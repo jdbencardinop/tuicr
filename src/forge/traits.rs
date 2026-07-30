@@ -7,11 +7,61 @@ use crate::forge::remote_comments::RemoteReviewThread;
 use crate::forge::submit::SubmitEvent;
 use crate::model::{DiffLine, FileStatus};
 
+/// A forge/host family this tool knows the shape of. Only `GitHub` and
+/// `GitLab` currently have a working transport (see
+/// `crate::forge::registry::create_backend`); the other three are
+/// placeholder identities so capability profiles
+/// (`crate::forge::capabilities`) and the dry-run publication planner
+/// (`crate::forge::dryrun`) can be modeled and tested ahead of their real
+/// HTTP adapters landing. Instantiating a transport for a placeholder kind
+/// always returns a typed error — never a panic, and never a silent
+/// fallback to a different kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForgeKind {
     GitHub,
     GitLab,
+    /// Placeholder only — no transport. See
+    /// `docs/follow-on-map/tickets/12-implement-azure-adapter.md`.
+    AzureDevOps,
+    /// Placeholder only — no transport. Shares route/shape ancestry with
+    /// `Forgejo`, but ships its own capability profile: they are one
+    /// adapter family with divergent profiles, not one shared profile. See
+    /// `docs/follow-on-map/tickets/13-implement-gitea-forgejo-adapter.md`.
+    Gitea,
+    /// Placeholder only — no transport. See `Gitea`'s doc comment.
+    Forgejo,
+}
+
+impl ForgeKind {
+    /// Stable lowercase identifier used as both a `provider_mappings` key
+    /// (`PersistedThread::upsert_provider_mapping`) and a dry-run
+    /// `--provider` CLI value.
+    pub fn provider_key(self) -> &'static str {
+        match self {
+            ForgeKind::GitHub => "github",
+            ForgeKind::GitLab => "gitlab",
+            ForgeKind::AzureDevOps => "azure_devops",
+            ForgeKind::Gitea => "gitea",
+            ForgeKind::Forgejo => "forgejo",
+        }
+    }
+
+    /// Parse the [`Self::provider_key`] identifier back into a `ForgeKind`.
+    /// Returns `None` for anything else, including this type's own
+    /// `#[serde(rename_all = "snake_case")]` derive output (`"git_hub"`,
+    /// `"git_lab"`) — those two representations are intentionally distinct
+    /// and are not interchangeable.
+    pub fn from_provider_key(key: &str) -> Option<Self> {
+        match key {
+            "github" => Some(ForgeKind::GitHub),
+            "gitlab" => Some(ForgeKind::GitLab),
+            "azure_devops" => Some(ForgeKind::AzureDevOps),
+            "gitea" => Some(ForgeKind::Gitea),
+            "forgejo" => Some(ForgeKind::Forgejo),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +93,50 @@ impl ForgeRepository {
     ) -> Self {
         Self {
             kind: ForgeKind::GitLab,
+            host: host.into(),
+            owner: owner.into(),
+            name: name.into(),
+        }
+    }
+
+    /// Placeholder-kind constructor — see [`ForgeKind::AzureDevOps`]. Useful
+    /// for capability/dry-run fixtures; `registry::create_backend` refuses
+    /// to build a transport for it.
+    pub fn azure_devops(
+        host: impl Into<String>,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: ForgeKind::AzureDevOps,
+            host: host.into(),
+            owner: owner.into(),
+            name: name.into(),
+        }
+    }
+
+    /// Placeholder-kind constructor — see [`ForgeKind::Gitea`].
+    pub fn gitea(
+        host: impl Into<String>,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: ForgeKind::Gitea,
+            host: host.into(),
+            owner: owner.into(),
+            name: name.into(),
+        }
+    }
+
+    /// Placeholder-kind constructor — see [`ForgeKind::Forgejo`].
+    pub fn forgejo(
+        host: impl Into<String>,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: ForgeKind::Forgejo,
             host: host.into(),
             owner: owner.into(),
             name: name.into(),

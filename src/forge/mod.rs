@@ -6,10 +6,12 @@
 #![allow(dead_code)]
 
 pub mod canonical;
+pub mod capabilities;
 pub mod context;
 pub mod github;
 pub mod gitlab;
 pub mod pr_open;
+pub mod registry;
 pub mod remote_comments;
 pub mod selector;
 pub mod submit;

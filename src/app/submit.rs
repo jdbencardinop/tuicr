@@ -426,6 +426,9 @@ impl App {
             DiffSource::PullRequest(pr) => match pr.key.repository.kind {
                 crate::forge::traits::ForgeKind::GitHub => "GitHub",
                 crate::forge::traits::ForgeKind::GitLab => "GitLab",
+                crate::forge::traits::ForgeKind::AzureDevOps => "Azure DevOps",
+                crate::forge::traits::ForgeKind::Gitea => "Gitea",
+                crate::forge::traits::ForgeKind::Forgejo => "Forgejo",
             },
             _ => "forge",
         }

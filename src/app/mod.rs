@@ -36,24 +36,37 @@ pub const STAGED_SELECTION_ID: &str = "__tuicr_staged__";
 pub const UNSTAGED_SELECTION_ID: &str = "__tuicr_unstaged__";
 pub const GAP_EXPAND_BATCH: usize = 20;
 
-/// Create a forge backend for the given repository.
-/// Routes to the GitHub backend (via `gh`) or the GitLab backend (via `glab`)
-/// based on `repo.kind`.
+/// Create a forge backend for the given repository, via the bounded
+/// provider registry (`crate::forge::registry::create_backend`).
+///
+/// `registry::create_backend` is the typed-`Result` API: it returns
+/// `Err(TuicrError::UnsupportedOperation(_))` — never a panic, never a
+/// silent fallback to a different kind — for the placeholder
+/// `ForgeKind::AzureDevOps`/`Gitea`/`Forgejo` identities, which have no
+/// transport yet. This wrapper `.expect()`s that result instead of
+/// threading a `Result` through its many TUI call sites, because every
+/// `ForgeRepository` reaching this function today is produced by
+/// `crate::forge::detect_forge_repository`/`local_checkout_for_repo`
+/// (GitHub/GitLab remote-URL parsing only) or by a persisted PR session
+/// created through one of those two paths — so `repo.kind` here is
+/// currently always `GitHub` or `GitLab`, for which `create_backend` never
+/// errors. Callers that *do* need to build a backend/capabilities for a
+/// placeholder kind (fixtures, the `review publish --dry-run` CLI path)
+/// should call `crate::forge::registry` directly instead of through this
+/// TUI-only convenience wrapper.
 fn create_forge_backend(
     repo: &ForgeRepository,
     local_checkout: Option<PathBuf>,
 ) -> Box<dyn ForgeBackend> {
-    use crate::forge::traits::ForgeKind;
-    match repo.kind {
-        ForgeKind::GitHub => {
-            use crate::forge::github::gh::GitHubGhBackend;
-            Box::new(GitHubGhBackend::new(Some(repo.clone())).with_local_checkout(local_checkout))
-        }
-        ForgeKind::GitLab => {
-            use crate::forge::gitlab::GitLabGlabBackend;
-            Box::new(GitLabGlabBackend::new(Some(repo.clone())).with_local_checkout(local_checkout))
-        }
-    }
+    crate::forge::registry::create_backend(repo, local_checkout).unwrap_or_else(|err| {
+        panic!(
+            "create_forge_backend: {} (TUI code paths only ever detect GitHub/GitLab \
+             repositories today; this indicates a new caller started passing a placeholder \
+             ForgeKind through the TUI path — such a caller should use \
+             crate::forge::registry::create_backend directly and handle the Err)",
+            err
+        )
+    })
 }
 
 fn char_slice(s: &str, lo_char: usize, hi_char: Option<usize>) -> &str {
