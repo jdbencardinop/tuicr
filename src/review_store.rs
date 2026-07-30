@@ -1453,5 +1453,57 @@ mod tests {
             let reloaded_again = store.get_review(&session_ref).unwrap();
             assert_eq!(reloaded_again.threads().len(), 1);
         }
+
+        #[test]
+        fn should_surface_a_legacy_review_add_via_list_threads_on_an_already_current_session() {
+            // Blocking-issue regression: `review add` on a session already
+            // at CURRENT_SESSION_VERSION only ever touches legacy fields
+            // (`add_comment_to_session` never calls `add_thread`), so
+            // without an incremental (not version-gated) sync inside
+            // `migrate_legacy_comments_to_threads`, a subsequent `review
+            // thread list` would never surface it -- the old version-gated
+            // migration was a permanent no-op once a session reached 1.4.
+            let (_temp, store, session_ref) = store_with_session();
+            assert_eq!(
+                store.get_review(&session_ref).unwrap().version,
+                CURRENT_SESSION_VERSION,
+                "sanity: this session is already at the current version, not a legacy 1.3 one"
+            );
+
+            store
+                .add_comment(
+                    &session_ref,
+                    AddCommentRequest {
+                        target: CommentTarget::Line {
+                            path: PathBuf::from("src/main.rs"),
+                            line: 5,
+                            side: LineSide::New,
+                        },
+                        content: "please add a test".to_string(),
+                        comment_type: CommentType::from_id("issue"),
+                        author: crate::model::comment::DEFAULT_AUTHOR.to_string(),
+                        commit_id: None,
+                    },
+                )
+                .unwrap();
+
+            // A separate `review thread list` invocation (fresh load) must
+            // see the newly-added legacy comment mirrored as a thread.
+            let threads = store.list_threads(&session_ref).unwrap();
+            assert_eq!(threads.len(), 1);
+            assert_eq!(threads[0].thread.root().unwrap().body, "please add a test");
+
+            // The legacy view must still work unchanged (authorship visible
+            // side by side, per required behavior #5).
+            let reloaded = store.get_review(&session_ref).unwrap();
+            let line_comments = &reloaded.files[&PathBuf::from("src/main.rs")].line_comments[&5];
+            assert_eq!(line_comments.len(), 1);
+            assert_eq!(line_comments[0].content, "please add a test");
+
+            // Listing threads again (yet another fresh load) must not
+            // duplicate the mirrored thread.
+            let threads_again = store.list_threads(&session_ref).unwrap();
+            assert_eq!(threads_again.len(), 1);
+        }
     }
 }

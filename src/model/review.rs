@@ -278,37 +278,52 @@ impl ReviewSession {
         id
     }
 
-    /// Deterministically and idempotently convert this session's legacy
+    /// Deterministically and idempotently sync this session's legacy
     /// `review_comments`/`files[..].file_comments`/`files[..].line_comments`
     /// into durable [`PersistedThread`]s.
     ///
-    /// No-op (returns `0`) once `self.version` is already
-    /// [`CURRENT_SESSION_VERSION`], so calling this on every session load is
-    /// safe and never duplicates threads. Legacy comment fields are never
-    /// mutated or removed — this only ever *adds* threads — so existing
-    /// public API/JSON consumers reading `review_comments`/`files` keep
-    /// working unchanged after migration.
+    /// Unlike a one-shot "migrate on first load" pass, this is safe (and
+    /// necessary) to call on *every* session load regardless of
+    /// `self.version`: a plain `review add` on an already-
+    /// [`CURRENT_SESSION_VERSION`] session only ever writes the legacy
+    /// fields, so without an incremental catch-up pass here, newly-added
+    /// legacy comments would never become visible via `review thread
+    /// list`/`show`. Each legacy source is synced independently:
+    ///
+    /// - `review_comments`/`file_comments` are always "1 comment = 1
+    ///   thread" (no reply concept at that granularity); a comment is only
+    ///   ever mirrored once, keyed by its own deterministic thread id
+    ///   (anchor + that comment's own legacy id), so re-syncing an
+    ///   already-mirrored comment is a no-op and a brand-new comment gets
+    ///   its own new thread.
+    /// - `line_comments` sharing the exact same anchor (side + line_range)
+    ///   are grouped into one thread (root + ordered replies). The
+    ///   thread's deterministic id depends only on the anchor and the
+    ///   *first* comment in the group, which never changes as more
+    ///   comments are appended to the same line, so a previously-synced
+    ///   group's thread is found again on every call; any comments in the
+    ///   current group not yet present in that thread (by legacy id) are
+    ///   appended as new ordered replies, and comments already present are
+    ///   left untouched (never duplicated).
+    ///
+    /// Legacy comment fields are never mutated or removed — this only ever
+    /// *adds* threads/replies — so existing public API/JSON consumers
+    /// reading `review_comments`/`files` keep working unchanged.
     ///
     /// Ordering is deterministic: review-level comments first (in their
     /// existing order), then per-file comments in file-path order, then
     /// file-level comments followed by line/range comments in ascending
-    /// line order. Each legacy `Comment` becomes its own single-comment
-    /// thread (the legacy format has no reply/thread concept), starting
-    /// `Open`. See [`thread_store::thread_from_legacy_comment`] for the
-    /// author-kind migration heuristic.
+    /// line order. See [`thread_store::thread_from_legacy_comment`] for the
+    /// author-kind migration heuristic. Returns the number of *new*
+    /// threads created (incremental replies appended to already-existing
+    /// threads are not counted, since no production caller inspects this
+    /// return value — only tests do, to assert on first-sync counts).
     pub fn migrate_legacy_comments_to_threads(&mut self) -> usize {
-        if self.version == CURRENT_SESSION_VERSION {
-            return 0;
-        }
-
         let mut created = 0;
 
         for comment in &self.review_comments {
-            self.threads.push(thread_store::thread_from_legacy_comment(
-                Anchor::review(),
-                comment,
-            ));
-            created += 1;
+            created +=
+                Self::sync_single_comment_thread(&mut self.threads, Anchor::review(), comment);
         }
 
         let mut paths: Vec<_> = self.files.keys().cloned().collect();
@@ -318,11 +333,11 @@ impl ReviewSession {
             let review = &self.files[&path];
 
             for comment in review.file_comments.clone() {
-                self.threads.push(thread_store::thread_from_legacy_comment(
+                created += Self::sync_single_comment_thread(
+                    &mut self.threads,
                     Anchor::file(path_str.clone()),
                     &comment,
-                ));
-                created += 1;
+                );
             }
 
             let mut lines: Vec<_> = review.line_comments.keys().copied().collect();
@@ -359,18 +374,82 @@ impl ReviewSession {
                         }
                         None => Anchor::line(path_str.clone(), side, line),
                     };
-                    self.threads
-                        .push(thread_store::thread_from_legacy_comment_group(
-                            anchor,
-                            &group_comments,
-                        ));
-                    created += 1;
+                    created +=
+                        Self::sync_comment_group_thread(&mut self.threads, anchor, &group_comments);
                 }
             }
         }
 
         self.version = CURRENT_SESSION_VERSION.to_string();
         created
+    }
+
+    /// Idempotently ensure a single legacy comment with no reply concept
+    /// (`review_comments`/`file_comments`) is mirrored as its own thread.
+    /// Returns `1` if a new thread was created, `0` if a thread for this
+    /// exact anchor/comment-id combination already exists (a repeat sync
+    /// of an already-migrated comment).
+    ///
+    /// Takes `threads: &mut Vec<PersistedThread>` rather than `&mut self`
+    /// so callers can invoke it while separately holding a shared borrow
+    /// of another field of `self` (e.g. `self.review_comments`/
+    /// `self.files`) in the same loop.
+    fn sync_single_comment_thread(
+        threads: &mut Vec<PersistedThread>,
+        anchor: Anchor,
+        comment: &Comment,
+    ) -> usize {
+        let thread_id = thread_store::legacy_thread_id_for(&anchor, &comment.id);
+        if threads.iter().any(|thread| *thread.id() == thread_id) {
+            return 0;
+        }
+        threads.push(thread_store::thread_from_legacy_comment(anchor, comment));
+        1
+    }
+
+    /// Idempotently ensure a group of same-anchor legacy `line_comments`
+    /// are mirrored as one thread (root + ordered replies).
+    ///
+    /// If a thread for this exact anchor/root-comment combination already
+    /// exists (from a previous sync), any comment in `comments` not yet
+    /// present in that thread (matched by legacy `Comment.id`) is appended
+    /// as a new ordered reply — this is what lets a brand-new comment
+    /// added to an already-synced line become visible via `review thread
+    /// list` without creating a duplicate thread or re-appending comments
+    /// that were already migrated. Returns `1` only when a brand-new
+    /// thread was created, `0` otherwise (even if replies were appended to
+    /// an existing thread).
+    fn sync_comment_group_thread(
+        threads: &mut Vec<PersistedThread>,
+        anchor: Anchor,
+        comments: &[Comment],
+    ) -> usize {
+        let thread_id = thread_store::legacy_thread_id_for(&anchor, &comments[0].id);
+
+        if let Some(existing) = threads.iter_mut().find(|thread| *thread.id() == thread_id) {
+            let already_mirrored: std::collections::HashSet<&str> = existing
+                .thread
+                .comments()
+                .iter()
+                .map(|thread_comment| thread_comment.id().as_str())
+                .collect();
+            let new_replies: Vec<Comment> = comments
+                .iter()
+                .filter(|comment| !already_mirrored.contains(comment.id.as_str()))
+                .cloned()
+                .collect();
+            for comment in &new_replies {
+                existing
+                    .thread
+                    .reply(thread_store::legacy_reply_comment(comment));
+            }
+            return 0;
+        }
+
+        threads.push(thread_store::thread_from_legacy_comment_group(
+            anchor, comments,
+        ));
+        1
     }
 }
 
@@ -1305,6 +1384,195 @@ mod tests {
             assert_eq!(first, 1);
             assert_eq!(second, 0, "repeat migration must not duplicate threads");
             assert_eq!(session.threads().len(), 1);
+        }
+
+        #[test]
+        fn should_sync_a_legacy_comment_added_to_a_brand_new_current_version_session() {
+            // Blocking-issue regression test: a session created fresh
+            // (already at CURRENT_SESSION_VERSION, so the old
+            // version-gated migration was a permanent no-op) that then
+            // receives a legacy `review add` must still have that comment
+            // show up via `threads()`/`review thread list` once sync runs
+            // on the next load -- not be silently invisible forever.
+            let mut session = test_session();
+            assert_eq!(session.version, CURRENT_SESSION_VERSION);
+            assert!(session.threads().is_empty());
+
+            let path = PathBuf::from("src/main.rs");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+            session.get_file_mut(&path).unwrap().add_line_comment(
+                7,
+                Comment::new("late note".to_string(), CommentType::None, None),
+            );
+
+            let created = session.migrate_legacy_comments_to_threads();
+
+            assert_eq!(created, 1);
+            assert_eq!(session.threads().len(), 1);
+            assert_eq!(
+                session.threads()[0].thread.root().unwrap().body,
+                "late note"
+            );
+            // Sync must still be a true no-op on the very next call.
+            assert_eq!(session.migrate_legacy_comments_to_threads(), 0);
+            assert_eq!(session.threads().len(), 1);
+        }
+
+        #[test]
+        fn should_sync_a_new_comment_added_to_an_already_migrated_line_as_a_reply() {
+            // The already-migrated-session variant of the same blocking
+            // issue: a session that was already synced once (so it has an
+            // existing thread for a line) later gets one more legacy
+            // comment appended to that same line via plain `review add`.
+            // The new comment must join the *existing* thread as an
+            // ordered reply, not spawn a duplicate thread and not vanish.
+            let mut session = test_session();
+            session.version = "1.3".to_string();
+            let path = PathBuf::from("src/main.rs");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+            let first = Comment::new("first note".to_string(), CommentType::None, None);
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_line_comment(7, first);
+
+            let first_sync = session.migrate_legacy_comments_to_threads();
+            assert_eq!(first_sync, 1);
+            assert_eq!(session.threads().len(), 1);
+            assert_eq!(session.threads()[0].thread.comments().len(), 1);
+
+            // Simulates `review add` on the already-migrated (now
+            // CURRENT_SESSION_VERSION) session: only the legacy field is
+            // touched.
+            let second = Comment::new("added later".to_string(), CommentType::None, None);
+            let second_id = second.id.clone();
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_line_comment(7, second);
+
+            let second_sync = session.migrate_legacy_comments_to_threads();
+
+            assert_eq!(
+                second_sync, 0,
+                "no *new* thread should be created; the new comment joins the existing one"
+            );
+            assert_eq!(
+                session.threads().len(),
+                1,
+                "must not create a duplicate thread for the same anchor"
+            );
+            let thread = &session.threads()[0];
+            assert_eq!(thread.thread.comments().len(), 2);
+            let replies: Vec<_> = thread.thread.replies().collect();
+            assert_eq!(replies.len(), 1);
+            assert_eq!(replies[0].body, "added later");
+            assert_eq!(replies[0].id().as_str(), second_id);
+        }
+
+        #[test]
+        fn should_be_idempotent_across_repeated_load_and_save_with_no_new_comments() {
+            // Simulates repeated load/save cycles (as `load_session` does
+            // on every call) with no new legacy comments in between: sync
+            // must be a true no-op every time, never re-appending already-
+            // mirrored comments as duplicate replies and never creating
+            // duplicate threads.
+            let mut session = test_session();
+            session.version = "1.3".to_string();
+            session.review_comments.push(Comment::new(
+                "review note".to_string(),
+                CommentType::None,
+                None,
+            ));
+            let path = PathBuf::from("src/main.rs");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_file_comment(Comment::new(
+                    "file note".to_string(),
+                    CommentType::None,
+                    None,
+                ));
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_line_comment(3, Comment::new("a".to_string(), CommentType::None, None));
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_line_comment(3, Comment::new("b".to_string(), CommentType::None, None));
+
+            let first = session.migrate_legacy_comments_to_threads();
+            assert_eq!(first, 3, "review + file + one grouped line thread");
+            let after_first: Vec<_> = session.threads().to_vec();
+
+            for _ in 0..5 {
+                let created = session.migrate_legacy_comments_to_threads();
+                assert_eq!(
+                    created, 0,
+                    "repeated sync with no new comments must be a no-op"
+                );
+            }
+
+            assert_eq!(session.threads().len(), after_first.len());
+            assert_eq!(
+                session.threads(),
+                after_first.as_slice(),
+                "repeated sync must not mutate already-synced threads (no duplicate replies)"
+            );
+        }
+
+        #[test]
+        fn should_preserve_same_anchor_grouping_when_syncing_incrementally_added_comments() {
+            // Same-anchor grouping semantics must hold not just for a
+            // one-shot migration of a fully-formed legacy session (already
+            // covered by `should_group_independent_legacy_comments_on_the_
+            // same_line_into_one_thread`), but also when comments are
+            // added incrementally across multiple sync calls -- the kind
+            // of sequence a real `review add` workflow produces.
+            let mut session = test_session();
+            session.version = "1.3".to_string();
+            let path = PathBuf::from("src/main.rs");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+
+            let first = Comment::new("one".to_string(), CommentType::None, None);
+            let first_id = first.id.clone();
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_line_comment(10, first);
+            session.migrate_legacy_comments_to_threads();
+
+            // Two more independent comments land on the same line across
+            // two separate later `review add` + sync cycles.
+            let second = Comment::new("two".to_string(), CommentType::None, None);
+            let second_id = second.id.clone();
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_line_comment(10, second);
+            session.migrate_legacy_comments_to_threads();
+
+            let third = Comment::new("three".to_string(), CommentType::None, None);
+            let third_id = third.id.clone();
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_line_comment(10, third);
+            session.migrate_legacy_comments_to_threads();
+
+            assert_eq!(
+                session.threads().len(),
+                1,
+                "all three same-line comments must stay grouped under one thread"
+            );
+            let thread = &session.threads()[0];
+            assert_eq!(thread.thread.comments().len(), 3);
+            assert_eq!(thread.thread.root().unwrap().id().as_str(), first_id);
+            let replies: Vec<_> = thread.thread.replies().collect();
+            assert_eq!(replies[0].id().as_str(), second_id);
+            assert_eq!(replies[1].id().as_str(), third_id);
         }
 
         #[test]

@@ -230,14 +230,7 @@ pub(super) fn thread_from_legacy_comment_group(
         .expect("thread_from_legacy_comment_group requires a non-empty comment group");
     let mut persisted = thread_from_legacy_comment(anchor, root_comment);
     for comment in replies {
-        let reply_id = comment_id_from_raw(&comment.id);
-        let reply = thread_comment_with_id(
-            reply_id,
-            legacy_comment_author(comment),
-            comment.content.clone(),
-            comment.created_at,
-        );
-        persisted.thread.reply(reply);
+        persisted.thread.reply(legacy_reply_comment(comment));
     }
     persisted
 }
@@ -255,6 +248,38 @@ fn legacy_comment_author(comment: &Comment) -> ThreadAuthor {
     } else {
         ThreadAuthor::agent(comment.author.clone())
     }
+}
+
+/// Compute the deterministic [`ThreadId`] that migrating a legacy comment
+/// (or comment group) anchored at `anchor` with `root_comment_id` as its
+/// root would produce, without constructing a full [`PersistedThread`].
+///
+/// Lets [`super::review::ReviewSession::migrate_legacy_comments_to_threads`]
+/// check whether a thread for this exact anchor/root combination already
+/// exists *before* deciding whether to create a brand-new thread or append
+/// incremental replies to one already synced from a previous load -- this
+/// is what makes re-running migration on an already-`CURRENT_SESSION_VERSION`
+/// session (e.g. after a plain `review add` appended one more legacy
+/// comment) idempotent instead of a version-gated no-op that permanently
+/// stops mirroring new legacy comments into threads.
+pub(super) fn legacy_thread_id_for(anchor: &Anchor, root_comment_id: &str) -> ThreadId {
+    deterministic_thread_id(anchor, &comment_id_from_raw(root_comment_id))
+}
+
+/// Build a [`ThreadComment`] reply from a legacy `Comment`, preserving its
+/// id/author/body/created_at -- the same conversion
+/// [`thread_from_legacy_comment_group`] applies to every non-root comment
+/// in a group, extracted so incremental catch-up syncing (appending a
+/// newly-added legacy comment to an already-migrated thread) can build the
+/// exact same reply shape without re-deriving a `ThreadId` or wrapping it
+/// in a new [`Thread`]/[`PersistedThread`].
+pub(super) fn legacy_reply_comment(comment: &Comment) -> ThreadComment {
+    thread_comment_with_id(
+        comment_id_from_raw(&comment.id),
+        legacy_comment_author(comment),
+        comment.content.clone(),
+        comment.created_at,
+    )
 }
 
 /// Map a legacy `Comment`'s `side` to the frozen module's [`AnchorSide`].
