@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
 use crate::error::{Result, TuicrError};
-use crate::model::{Comment, CommentType, LineRange, LineSide, ReviewSession};
+use crate::model::thread::{
+    Anchor, ProviderRemap, ThreadAnchorRefresh, ThreadAuthor, ThreadComment, ThreadId,
+};
+use crate::model::{Comment, CommentType, LineRange, LineSide, PersistedThread, ReviewSession};
 use crate::persistence::manifest::{ManifestEntry, ManifestKind};
 use crate::persistence::storage;
 
@@ -64,6 +68,28 @@ impl ReviewStore {
         Ok(storage::pr_session_path_in_dir(&reviews_dir, slug)?.map(SessionRef::from_path))
     }
 
+    /// Look up the durable review session for a PR's *lineage* (forge kind,
+    /// host, owner/repo, PR number), regardless of the head SHA in `key`.
+    /// This is the additive lookup requirement 6 asks for: it lets a
+    /// caller reuse an existing review's threads/replies/provider mappings
+    /// across a PR head advance instead of discarding them, without
+    /// changing the exact head-matching semantics [`Self::get_review`]/
+    /// [`crate::persistence::load_pr_session`] rely on today.
+    ///
+    /// Returns `None` if no session has ever been saved for this PR's
+    /// lineage. The returned session's `pr_session_key.head_sha` reflects
+    /// whatever head it was last saved under; callers that want to rebind
+    /// it to a new head should refresh anchors (see
+    /// [`Self::refresh_thread_anchors`]) and save under the new key.
+    pub fn find_pr_session_by_lineage(
+        &self,
+        key: &crate::forge::traits::PrSessionKey,
+    ) -> Result<Option<(SessionRef, ReviewSession)>> {
+        let reviews_dir = self.reviews_dir()?;
+        Ok(storage::load_pr_session_lineage_for_dir(&reviews_dir, key)?
+            .map(|(path, session)| (SessionRef::from_path(path), session)))
+    }
+
     /// Load a persisted review session.
     pub fn get_review(&self, session_ref: &SessionRef) -> Result<ReviewSession> {
         storage::load_session(session_ref.path())
@@ -81,6 +107,177 @@ impl ReviewStore {
                 add_comment_to_session(session, request)
             })?;
         Ok(comment)
+    }
+
+    /// List every durable thread in a persisted session, migrating legacy
+    /// `Comment`s into threads first if the session predates
+    /// `CURRENT_SESSION_VERSION` (see
+    /// [`crate::model::ReviewSession::migrate_legacy_comments_to_threads`]).
+    /// Read-only: does not save, so a v1.3 session's on-disk file is
+    /// unchanged by merely listing its threads.
+    pub fn list_threads(&self, session_ref: &SessionRef) -> Result<Vec<PersistedThread>> {
+        let session = self.get_review(session_ref)?;
+        Ok(session.threads().to_vec())
+    }
+
+    /// Fetch a single thread by ID.
+    pub fn get_thread(
+        &self,
+        session_ref: &SessionRef,
+        thread_id: &ThreadId,
+    ) -> Result<Option<PersistedThread>> {
+        let session = self.get_review(session_ref)?;
+        Ok(session.find_thread(thread_id).cloned())
+    }
+
+    /// Open a new durable thread and save it. `target` reuses the same
+    /// [`CommentTarget`] vocabulary as [`Self::add_comment`] so CLI/library
+    /// callers share one target-parsing path for both legacy comments and
+    /// threads.
+    pub fn add_thread(
+        &self,
+        session_ref: &SessionRef,
+        request: AddThreadRequest,
+    ) -> Result<PersistedThread> {
+        let reviews_dir = self.reviews_dir()?;
+        let (session, thread_id) =
+            storage::update_session_in_dir(session_ref.path(), &reviews_dir, |session| {
+                add_thread_to_session(session, request)
+            })?;
+        Ok(session
+            .find_thread(&thread_id)
+            .cloned()
+            .expect("thread just added must be present"))
+    }
+
+    /// Append a reply to an existing thread and save it.
+    pub fn reply_to_thread(
+        &self,
+        session_ref: &SessionRef,
+        thread_id: &ThreadId,
+        author: ThreadAuthor,
+        body: impl Into<String>,
+    ) -> Result<PersistedThread> {
+        let reviews_dir = self.reviews_dir()?;
+        let body = body.into();
+        let (session, ()) =
+            storage::update_session_in_dir(session_ref.path(), &reviews_dir, |session| {
+                let thread = session.find_thread_mut(thread_id).ok_or_else(|| {
+                    TuicrError::InvalidInput(format!("thread '{}' not found", thread_id.as_str()))
+                })?;
+                thread.thread.reply(ThreadComment::new(author, body));
+                session.updated_at = Utc::now();
+                Ok(())
+            })?;
+        Ok(session
+            .find_thread(thread_id)
+            .cloned()
+            .expect("thread just replied to must be present"))
+    }
+
+    /// Resolve a thread. Returns `false` (no-op) if the thread was already
+    /// `Dismissed`, per [`crate::model::Thread::resolve`].
+    pub fn resolve_thread(&self, session_ref: &SessionRef, thread_id: &ThreadId) -> Result<bool> {
+        self.mutate_thread_status(session_ref, thread_id, |thread| thread.resolve())
+    }
+
+    /// Reopen a resolved thread. Returns `false` (no-op) if the thread was
+    /// not `Resolved` (including if it was `Dismissed`, which is terminal),
+    /// per [`crate::model::Thread::reopen`].
+    pub fn reopen_thread(&self, session_ref: &SessionRef, thread_id: &ThreadId) -> Result<bool> {
+        self.mutate_thread_status(session_ref, thread_id, |thread| thread.reopen())
+    }
+
+    /// Dismiss a thread ("won't fix"). Terminal: a dismissed thread can
+    /// never be resolved or reopened again.
+    pub fn dismiss_thread(&self, session_ref: &SessionRef, thread_id: &ThreadId) -> Result<()> {
+        self.mutate_thread_status(session_ref, thread_id, |thread| {
+            thread.dismiss();
+            true
+        })?;
+        Ok(())
+    }
+
+    fn mutate_thread_status(
+        &self,
+        session_ref: &SessionRef,
+        thread_id: &ThreadId,
+        mutate: impl FnOnce(&mut crate::model::Thread) -> bool,
+    ) -> Result<bool> {
+        let reviews_dir = self.reviews_dir()?;
+        let (_session, changed) =
+            storage::update_session_in_dir(session_ref.path(), &reviews_dir, |session| {
+                let thread = session.find_thread_mut(thread_id).ok_or_else(|| {
+                    TuicrError::InvalidInput(format!("thread '{}' not found", thread_id.as_str()))
+                })?;
+                let changed = mutate(&mut thread.thread);
+                session.updated_at = Utc::now();
+                Ok(changed)
+            })?;
+        Ok(changed)
+    }
+
+    /// Safely re-evaluate every thread's anchor against updated file
+    /// content and save the result. `new_lines` supplies the full 0-based
+    /// line slice for each path that changed; paths absent from the map are
+    /// left untouched. `provider_remaps` lets a (future) provider adapter
+    /// supply an exact remap for specific threads, which always wins over
+    /// unique-context relocation for that thread — see
+    /// [`crate::model::Thread::refresh_anchor_with_remap`]. Closed threads
+    /// (`Resolved`/`Dismissed`) are frozen and never touched, per the same
+    /// contract.
+    pub fn refresh_thread_anchors(
+        &self,
+        session_ref: &SessionRef,
+        new_lines: &HashMap<PathBuf, Vec<String>>,
+        provider_remaps: &HashMap<ThreadId, ProviderRemap>,
+    ) -> Result<Vec<(ThreadId, ThreadAnchorRefresh)>> {
+        let reviews_dir = self.reviews_dir()?;
+        let (_session, results) =
+            storage::update_session_in_dir(session_ref.path(), &reviews_dir, |session| {
+                let mut results = Vec::new();
+                for thread in session.threads.iter_mut() {
+                    let Some(path) = thread.thread.anchor().target().path() else {
+                        continue;
+                    };
+                    let Some(lines) = new_lines.get(Path::new(path)) else {
+                        continue;
+                    };
+                    let lines_ref: Vec<&str> = lines.iter().map(String::as_str).collect();
+                    let remap = provider_remaps.get(thread.id());
+                    let refresh = thread.refresh_anchor_with_remap(&lines_ref, remap)?;
+                    results.push((thread.id().clone(), refresh));
+                }
+                session.updated_at = Utc::now();
+                Ok(results)
+            })?;
+        Ok(results)
+    }
+
+    /// Insert or overwrite a thread's provider-native mapping and save.
+    /// Idempotent: calling this repeatedly with the same `provider` key
+    /// replaces the stored payload rather than accumulating duplicates.
+    pub fn upsert_thread_provider_mapping(
+        &self,
+        session_ref: &SessionRef,
+        thread_id: &ThreadId,
+        provider: &str,
+        mapping: serde_json::Value,
+    ) -> Result<PersistedThread> {
+        let reviews_dir = self.reviews_dir()?;
+        let (session, ()) =
+            storage::update_session_in_dir(session_ref.path(), &reviews_dir, |session| {
+                let thread = session.find_thread_mut(thread_id).ok_or_else(|| {
+                    TuicrError::InvalidInput(format!("thread '{}' not found", thread_id.as_str()))
+                })?;
+                thread.upsert_provider_mapping(provider, mapping);
+                session.updated_at = Utc::now();
+                Ok(())
+            })?;
+        Ok(session
+            .find_thread(thread_id)
+            .cloned()
+            .expect("thread just mapped must be present"))
     }
 
     /// Save a session through this store's storage root.
@@ -273,10 +470,79 @@ fn file_review_mut<'a>(
     })
 }
 
+/// Request to open a new durable thread on a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddThreadRequest {
+    /// Reuses [`CommentTarget`] so thread and legacy-comment targets share
+    /// one CLI/library parsing path.
+    pub target: CommentTarget,
+    pub body: String,
+    pub author: ThreadAuthor,
+}
+
+/// Convert a [`CommentTarget`] into the [`Anchor`] vocabulary used by
+/// durable threads. `Line`/`Range` sides map 1:1 (legacy comments never
+/// express `Both`).
+fn anchor_for_target(target: &CommentTarget) -> Anchor {
+    match target {
+        CommentTarget::Review => Anchor::review(),
+        CommentTarget::File { path } => Anchor::file(path.to_string_lossy().to_string()),
+        CommentTarget::Line { path, line, side } => Anchor::line(
+            path.to_string_lossy().to_string(),
+            anchor_side(*side),
+            *line,
+        ),
+        CommentTarget::LineRange { path, range, side } => Anchor::range(
+            path.to_string_lossy().to_string(),
+            anchor_side(*side),
+            range.start,
+            range.end,
+        )
+        .expect("LineRange is always normalized start <= end"),
+    }
+}
+
+fn anchor_side(side: LineSide) -> crate::model::thread::AnchorSide {
+    match side {
+        LineSide::Old => crate::model::thread::AnchorSide::Old,
+        LineSide::New => crate::model::thread::AnchorSide::New,
+    }
+}
+
+/// Open a new durable thread in an in-memory session, validating (for
+/// `File`/`Line`/`LineRange` targets) that the target file is registered in
+/// the session, exactly like [`add_comment_to_session`].
+///
+/// This is the shared primitive used by [`ReviewStore::add_thread`]; kept
+/// as a free function so future TUI wiring can call it directly on an
+/// in-memory session, matching the existing `add_comment_to_session`
+/// convention.
+pub fn add_thread_to_session(
+    session: &mut ReviewSession,
+    request: AddThreadRequest,
+) -> Result<ThreadId> {
+    let body = request.body.trim().to_string();
+    if body.is_empty() {
+        return Err(TuicrError::InvalidInput(
+            "thread comment cannot be empty".to_string(),
+        ));
+    }
+    if let CommentTarget::File { path }
+    | CommentTarget::Line { path, .. }
+    | CommentTarget::LineRange { path, .. } = &request.target
+    {
+        file_review_mut(session, path)?;
+    }
+
+    let anchor = anchor_for_target(&request.target);
+    let root = ThreadComment::new(request.author, body);
+    Ok(session.add_thread(anchor, root))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{FileStatus, SessionDiffSource};
+    use crate::model::{CURRENT_SESSION_VERSION, FileStatus, SessionDiffSource};
 
     fn test_session(repo_path: PathBuf) -> ReviewSession {
         let mut session = ReviewSession::new(
@@ -425,5 +691,296 @@ mod tests {
 
         let listed = store.list_sessions_for_repo(&repo).unwrap();
         assert_eq!(listed[0].comment_count, 1);
+    }
+
+    mod thread_store_tests {
+        use super::*;
+        use crate::model::thread::{
+            Anchor, AnchorState, ProviderRemap, ThreadAuthor, ThreadStatus,
+        };
+        use std::collections::HashMap;
+
+        fn store_with_session() -> (tempfile::TempDir, ReviewStore, SessionRef) {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let reviews_dir = temp.path().join("reviews");
+            let store = ReviewStore::with_reviews_dir(reviews_dir);
+            let session = test_session(repo);
+            let session_ref = store.save_review(&session).unwrap();
+            (temp, store, session_ref)
+        }
+
+        #[test]
+        fn should_add_thread_and_persist_it() {
+            let (_temp, store, session_ref) = store_with_session();
+
+            let thread = store
+                .add_thread(
+                    &session_ref,
+                    AddThreadRequest {
+                        target: CommentTarget::Review,
+                        body: "please double-check this".to_string(),
+                        author: ThreadAuthor::human("alice"),
+                    },
+                )
+                .unwrap();
+
+            assert_eq!(thread.thread.status(), ThreadStatus::Open);
+            let reloaded = store.get_review(&session_ref).unwrap();
+            assert_eq!(reloaded.threads().len(), 1);
+            assert_eq!(
+                reloaded.threads()[0].thread.root().unwrap().body,
+                "please double-check this"
+            );
+        }
+
+        #[test]
+        fn should_reject_thread_on_unregistered_file() {
+            let (_temp, store, session_ref) = store_with_session();
+
+            let err = store
+                .add_thread(
+                    &session_ref,
+                    AddThreadRequest {
+                        target: CommentTarget::File {
+                            path: PathBuf::from("missing.rs"),
+                        },
+                        body: "note".to_string(),
+                        author: ThreadAuthor::human("alice"),
+                    },
+                )
+                .unwrap_err();
+
+            assert!(matches!(err, TuicrError::InvalidInput(_)));
+        }
+
+        #[test]
+        fn should_reply_resolve_and_reopen_thread_through_store() {
+            let (_temp, store, session_ref) = store_with_session();
+            let thread = store
+                .add_thread(
+                    &session_ref,
+                    AddThreadRequest {
+                        target: CommentTarget::Review,
+                        body: "root".to_string(),
+                        author: ThreadAuthor::human("alice"),
+                    },
+                )
+                .unwrap();
+            let thread_id = thread.id().clone();
+
+            let after_reply = store
+                .reply_to_thread(
+                    &session_ref,
+                    &thread_id,
+                    ThreadAuthor::agent("copilot"),
+                    "ack",
+                )
+                .unwrap();
+            assert_eq!(after_reply.thread.comments().len(), 2);
+
+            let resolved = store.resolve_thread(&session_ref, &thread_id).unwrap();
+            assert!(resolved);
+            let reloaded = store.get_review(&session_ref).unwrap();
+            assert_eq!(
+                reloaded.find_thread(&thread_id).unwrap().thread.status(),
+                ThreadStatus::Resolved
+            );
+
+            let reopened = store.reopen_thread(&session_ref, &thread_id).unwrap();
+            assert!(reopened);
+            let reloaded = store.get_review(&session_ref).unwrap();
+            assert_eq!(
+                reloaded.find_thread(&thread_id).unwrap().thread.status(),
+                ThreadStatus::Open
+            );
+        }
+
+        #[test]
+        fn should_dismiss_thread_terminally_through_store() {
+            let (_temp, store, session_ref) = store_with_session();
+            let thread = store
+                .add_thread(
+                    &session_ref,
+                    AddThreadRequest {
+                        target: CommentTarget::Review,
+                        body: "won't fix".to_string(),
+                        author: ThreadAuthor::human("alice"),
+                    },
+                )
+                .unwrap();
+            let thread_id = thread.id().clone();
+
+            store.dismiss_thread(&session_ref, &thread_id).unwrap();
+            let resolved_after_dismiss = store.resolve_thread(&session_ref, &thread_id).unwrap();
+            let reopened_after_dismiss = store.reopen_thread(&session_ref, &thread_id).unwrap();
+
+            assert!(!resolved_after_dismiss);
+            assert!(!reopened_after_dismiss);
+            let reloaded = store.get_review(&session_ref).unwrap();
+            assert_eq!(
+                reloaded.find_thread(&thread_id).unwrap().thread.status(),
+                ThreadStatus::Dismissed
+            );
+        }
+
+        #[test]
+        fn should_upsert_provider_mapping_idempotently_through_store() {
+            let (_temp, store, session_ref) = store_with_session();
+            let thread = store
+                .add_thread(
+                    &session_ref,
+                    AddThreadRequest {
+                        target: CommentTarget::Review,
+                        body: "imported thread".to_string(),
+                        author: ThreadAuthor::remote("github-user", "gh-author-1"),
+                    },
+                )
+                .unwrap();
+            let thread_id = thread.id().clone();
+
+            store
+                .upsert_thread_provider_mapping(
+                    &session_ref,
+                    &thread_id,
+                    "github",
+                    serde_json::json!({"id": "PRRT_1"}),
+                )
+                .unwrap();
+            let mapped_again = store
+                .upsert_thread_provider_mapping(
+                    &session_ref,
+                    &thread_id,
+                    "github",
+                    serde_json::json!({"id": "PRRT_1"}),
+                )
+                .unwrap();
+
+            assert_eq!(mapped_again.provider_mappings.len(), 1);
+            assert!(mapped_again.has_provider_id("github", "PRRT_1"));
+
+            let reloaded = store.get_review(&session_ref).unwrap();
+            assert!(
+                reloaded
+                    .find_thread_by_provider("github", "PRRT_1")
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn should_refresh_thread_anchor_via_store_with_unique_context_relocation() {
+            let (_temp, store, session_ref) = store_with_session();
+            let mut session = store.get_review(&session_ref).unwrap();
+            let path = PathBuf::from("src/main.rs");
+            let original_lines: Vec<&str> = vec!["one", "two", "three", "four"];
+            let context = crate::model::AnchorContext::capture(&original_lines, 1, 1, 1).unwrap();
+            let anchor =
+                Anchor::line_with_context("src/main.rs", crate::model::AnchorSide::New, 2, context)
+                    .unwrap();
+            session.add_thread(
+                anchor,
+                crate::model::ThreadComment::new(ThreadAuthor::human("alice"), "about 'two'"),
+            );
+            store.save_review(&session).unwrap();
+
+            // Insert a new line before "one", shifting "two" down by one
+            // without disturbing its captured before/after context.
+            let new_lines: Vec<String> = vec![
+                "zero".to_string(),
+                "one".to_string(),
+                "two".to_string(),
+                "three".to_string(),
+                "four".to_string(),
+            ];
+            let mut file_lines = HashMap::new();
+            file_lines.insert(path.clone(), new_lines);
+
+            let results = store
+                .refresh_thread_anchors(&session_ref, &file_lines, &HashMap::new())
+                .unwrap();
+            assert_eq!(results.len(), 1);
+
+            let reloaded = store.get_review(&session_ref).unwrap();
+            let thread = &reloaded.threads()[0];
+            assert_eq!(thread.thread.anchor().state(), AnchorState::Current);
+            match thread.thread.anchor().target() {
+                crate::model::AnchorTarget::Line { line, .. } => assert_eq!(*line, 3),
+                other => panic!("expected Line anchor, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn should_freeze_anchor_refresh_for_resolved_thread() {
+            let (_temp, store, session_ref) = store_with_session();
+            let thread = store
+                .add_thread(
+                    &session_ref,
+                    AddThreadRequest {
+                        target: CommentTarget::Review,
+                        body: "resolved already".to_string(),
+                        author: ThreadAuthor::human("alice"),
+                    },
+                )
+                .unwrap();
+            let thread_id = thread.id().clone();
+            store.resolve_thread(&session_ref, &thread_id).unwrap();
+
+            let mut remaps = HashMap::new();
+            remaps.insert(thread_id.clone(), ProviderRemap::line(99));
+            let results = store
+                .refresh_thread_anchors(&session_ref, &HashMap::new(), &remaps)
+                .unwrap();
+
+            // Review anchors have no path, so refresh_thread_anchors skips
+            // them entirely regardless of status; assert no crash and the
+            // thread stays Resolved either way.
+            assert!(results.is_empty());
+            let reloaded = store.get_review(&session_ref).unwrap();
+            assert_eq!(
+                reloaded.find_thread(&thread_id).unwrap().thread.status(),
+                ThreadStatus::Resolved
+            );
+        }
+
+        #[test]
+        fn should_migrate_legacy_session_on_load_and_persist_only_after_explicit_save() {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let reviews_dir = temp.path().join("reviews");
+            let store = ReviewStore::with_reviews_dir(reviews_dir.clone());
+
+            let mut session = test_session(repo);
+            session.version = "1.3".to_string();
+            session.review_comments.push(Comment::new(
+                "legacy note".to_string(),
+                CommentType::None,
+                None,
+            ));
+            let session_ref =
+                crate::persistence::storage::save_session_in_dir(&session, &reviews_dir)
+                    .map(SessionRef::from_path)
+                    .unwrap();
+
+            // Loading migrates in-memory (deterministically, idempotently)
+            // but does not itself rewrite the v1.3 file on disk.
+            let loaded_once = store.get_review(&session_ref).unwrap();
+            assert_eq!(loaded_once.threads().len(), 1);
+            let raw_contents = std::fs::read_to_string(session_ref.path()).unwrap();
+            let on_disk_untouched: ReviewSession = serde_json::from_str(&raw_contents).unwrap();
+            assert_eq!(on_disk_untouched.version, "1.3");
+
+            // Explicitly saving the migrated session persists it.
+            store.save_review(&loaded_once).unwrap();
+            let reloaded = store.get_review(&session_ref).unwrap();
+            assert_eq!(reloaded.version, CURRENT_SESSION_VERSION);
+            assert_eq!(reloaded.threads().len(), 1);
+            assert_eq!(reloaded.review_comments.len(), 1, "legacy field preserved");
+
+            // Loading a third time must not duplicate the migrated thread.
+            let reloaded_again = store.get_review(&session_ref).unwrap();
+            assert_eq!(reloaded_again.threads().len(), 1);
+        }
     }
 }

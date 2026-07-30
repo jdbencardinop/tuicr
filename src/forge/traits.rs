@@ -238,6 +238,20 @@ impl PrSessionKey {
             .take(8.min(self.head_sha.len()))
             .collect()
     }
+
+    /// Whether `other` refers to the same PR lineage (forge kind + host +
+    /// owner/repo + PR number) as this key, ignoring `head_sha`.
+    ///
+    /// A PR's head SHA changes every time it gains new commits, but the
+    /// underlying review conversation (threads, replies, resolutions) is
+    /// still about the same PR. This is an additive helper for
+    /// lineage-aware lookups (reusing a review across head advances); it
+    /// does not change existing head-sensitive `PartialEq`/`Hash`, which
+    /// remain exact-match and continue to drive today's session
+    /// open/reattach behavior unchanged.
+    pub fn lineage_matches(&self, other: &PrSessionKey) -> bool {
+        self.repository == other.repository && self.number == other.number
+    }
 }
 
 /// Which side of a pull request diff the caller wants to read from.
@@ -476,6 +490,30 @@ mod tests {
         );
         // when/then
         assert_eq!(key.short_head(), "abc");
+    }
+
+    #[test]
+    fn should_match_lineage_ignoring_head_sha() {
+        // given
+        let repo = ForgeRepository::github("github.com", "agavra", "tuicr");
+        let at_old_head = PrSessionKey::new(repo.clone(), 125, "old-sha".to_string());
+        let at_new_head = PrSessionKey::new(repo, 125, "new-sha".to_string());
+        // when/then
+        assert!(at_old_head.lineage_matches(&at_new_head));
+        assert_ne!(at_old_head, at_new_head);
+    }
+
+    #[test]
+    fn should_not_match_lineage_for_different_pr_number_or_repo() {
+        // given
+        let repo = ForgeRepository::github("github.com", "agavra", "tuicr");
+        let other_repo = ForgeRepository::github("github.com", "agavra", "other");
+        let base = PrSessionKey::new(repo.clone(), 125, "sha".to_string());
+        let different_number = PrSessionKey::new(repo, 126, "sha".to_string());
+        let different_repo = PrSessionKey::new(other_repo, 125, "sha".to_string());
+        // when/then
+        assert!(!base.lineage_matches(&different_number));
+        assert!(!base.lineage_matches(&different_repo));
     }
 
     #[test]

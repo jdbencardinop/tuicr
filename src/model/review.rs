@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use super::comment::Comment;
 use super::diff_types::{DiffFile, FileStatus};
+use super::thread::{Anchor, ThreadComment, ThreadId};
+use super::thread_store::{self, CURRENT_SESSION_VERSION, PersistedThread};
 use crate::forge::remote_comments::PrCommentsVisibility;
 use crate::forge::traits::PrSessionKey;
 
@@ -120,6 +122,15 @@ pub struct ReviewSession {
     pub review_comments: Vec<Comment>,
     pub files: HashMap<PathBuf, FileReview>,
     pub session_notes: Option<String>,
+    /// Durable provider-neutral threads. Populated directly for sessions
+    /// created at `CURRENT_SESSION_VERSION` or later; migrated
+    /// deterministically from `review_comments`/`files[..].*_comments` for
+    /// older sessions the first time they load (see
+    /// [`Self::migrate_legacy_comments_to_threads`]). Legacy comment fields
+    /// are never removed by migration, so old public API/JSON consumers
+    /// keep working unchanged.
+    #[serde(default)]
+    pub threads: Vec<PersistedThread>,
 }
 
 impl ReviewSession {
@@ -132,7 +143,7 @@ impl ReviewSession {
         let now = Utc::now();
         Self {
             id: uuid::Uuid::new_v4().to_string(),
-            version: "1.3".to_string(),
+            version: CURRENT_SESSION_VERSION.to_string(),
             repo_path,
             branch_name,
             base_commit,
@@ -146,6 +157,7 @@ impl ReviewSession {
             review_comments: Vec::new(),
             files: HashMap::new(),
             session_notes: None,
+            threads: Vec::new(),
         }
     }
 
@@ -229,6 +241,112 @@ impl ReviewSession {
         self.files
             .get(path)
             .is_some_and(|review| review.reviewed_hunks.contains(key))
+    }
+
+    pub fn threads(&self) -> &[PersistedThread] {
+        &self.threads
+    }
+
+    pub fn find_thread(&self, id: &ThreadId) -> Option<&PersistedThread> {
+        self.threads.iter().find(|thread| thread.id() == id)
+    }
+
+    pub fn find_thread_mut(&mut self, id: &ThreadId) -> Option<&mut PersistedThread> {
+        self.threads.iter_mut().find(|thread| thread.id() == id)
+    }
+
+    /// Find a thread previously imported/mapped from `provider` under
+    /// `provider_id`. Used by (future) provider adapters to make repeated
+    /// import/sync passes idempotent instead of creating duplicate threads.
+    pub fn find_thread_by_provider(
+        &self,
+        provider: &str,
+        provider_id: &str,
+    ) -> Option<&PersistedThread> {
+        self.threads
+            .iter()
+            .find(|thread| thread.has_provider_id(provider, provider_id))
+    }
+
+    /// Open a new durable thread anchored at `anchor` with `root` as its
+    /// first comment. Returns the new thread's stable ID.
+    pub fn add_thread(&mut self, anchor: Anchor, root: ThreadComment) -> ThreadId {
+        let thread = super::thread::Thread::open(anchor, root);
+        let id = thread.id().clone();
+        self.threads.push(PersistedThread::new(thread));
+        self.updated_at = Utc::now();
+        id
+    }
+
+    /// Deterministically and idempotently convert this session's legacy
+    /// `review_comments`/`files[..].file_comments`/`files[..].line_comments`
+    /// into durable [`PersistedThread`]s.
+    ///
+    /// No-op (returns `0`) once `self.version` is already
+    /// [`CURRENT_SESSION_VERSION`], so calling this on every session load is
+    /// safe and never duplicates threads. Legacy comment fields are never
+    /// mutated or removed — this only ever *adds* threads — so existing
+    /// public API/JSON consumers reading `review_comments`/`files` keep
+    /// working unchanged after migration.
+    ///
+    /// Ordering is deterministic: review-level comments first (in their
+    /// existing order), then per-file comments in file-path order, then
+    /// file-level comments followed by line/range comments in ascending
+    /// line order. Each legacy `Comment` becomes its own single-comment
+    /// thread (the legacy format has no reply/thread concept), starting
+    /// `Open`. See [`thread_store::thread_from_legacy_comment`] for the
+    /// author-kind migration heuristic.
+    pub fn migrate_legacy_comments_to_threads(&mut self) -> usize {
+        if self.version == CURRENT_SESSION_VERSION {
+            return 0;
+        }
+
+        let mut created = 0;
+
+        for comment in &self.review_comments {
+            self.threads.push(thread_store::thread_from_legacy_comment(
+                Anchor::review(),
+                comment,
+            ));
+            created += 1;
+        }
+
+        let mut paths: Vec<_> = self.files.keys().cloned().collect();
+        paths.sort();
+        for path in paths {
+            let path_str = path.to_string_lossy().to_string();
+            let review = &self.files[&path];
+
+            for comment in review.file_comments.clone() {
+                self.threads.push(thread_store::thread_from_legacy_comment(
+                    Anchor::file(path_str.clone()),
+                    &comment,
+                ));
+                created += 1;
+            }
+
+            let mut lines: Vec<_> = review.line_comments.keys().copied().collect();
+            lines.sort();
+            for line in lines {
+                let comments = self.files[&path].line_comments[&line].clone();
+                for comment in comments {
+                    let side = thread_store::anchor_side_for_legacy(comment.side);
+                    let anchor = match comment.line_range {
+                        Some(range) => {
+                            Anchor::range(path_str.clone(), side, range.start, range.end)
+                                .expect("LineRange is always normalized start <= end")
+                        }
+                        None => Anchor::line(path_str.clone(), side, line),
+                    };
+                    self.threads
+                        .push(thread_store::thread_from_legacy_comment(anchor, &comment));
+                    created += 1;
+                }
+            }
+        }
+
+        self.version = CURRENT_SESSION_VERSION.to_string();
+        created
     }
 }
 
@@ -864,5 +982,232 @@ mod tests {
         assert!(invalidated);
         assert!(!session.is_file_reviewed(&path));
         assert_eq!(session.files.get(&path).unwrap().content_hash, Some(999));
+    }
+
+    mod thread_tests {
+        use super::*;
+        use crate::model::comment::LineRange;
+        use crate::model::comment::LineSide;
+        use crate::model::thread::{
+            Anchor, AnchorTarget, AuthorKind, ThreadAuthor, ThreadComment, ThreadStatus,
+        };
+
+        #[test]
+        fn should_create_new_sessions_at_current_version_with_no_threads() {
+            let session = test_session();
+            assert_eq!(session.version, CURRENT_SESSION_VERSION);
+            assert!(session.threads().is_empty());
+        }
+
+        #[test]
+        fn should_add_and_find_thread() {
+            let mut session = test_session();
+            let id = session.add_thread(
+                Anchor::review(),
+                ThreadComment::new(ThreadAuthor::human("alice"), "root"),
+            );
+            assert_eq!(session.threads().len(), 1);
+            let thread = session.find_thread(&id).unwrap();
+            assert_eq!(thread.thread.root().unwrap().body, "root");
+        }
+
+        #[test]
+        fn should_deserialize_legacy_v1_3_json_without_threads_field() {
+            // Simulates a session file persisted before `threads` existed:
+            // no `threads` key in the JSON at all.
+            let json = serde_json::json!({
+                "id": "abc",
+                "version": "1.3",
+                "repo_path": "/repo",
+                "base_commit": "abc123",
+                "created_at": Utc::now().to_rfc3339(),
+                "updated_at": Utc::now().to_rfc3339(),
+                "review_comments": [],
+                "files": {},
+                "session_notes": null,
+            });
+            let session: ReviewSession = serde_json::from_value(json).unwrap();
+            assert_eq!(session.version, "1.3");
+            assert!(session.threads().is_empty());
+        }
+
+        #[test]
+        fn should_migrate_review_level_comment_to_review_anchor_thread() {
+            let mut session = test_session();
+            session.version = "1.3".to_string();
+            session.review_comments.push(Comment::new(
+                "nice work".to_string(),
+                CommentType::from_id("praise"),
+                None,
+            ));
+
+            let created = session.migrate_legacy_comments_to_threads();
+
+            assert_eq!(created, 1);
+            assert_eq!(session.version, CURRENT_SESSION_VERSION);
+            assert_eq!(session.threads().len(), 1);
+            let thread = &session.threads()[0];
+            assert_eq!(*thread.thread.anchor().target(), AnchorTarget::Review);
+            assert_eq!(thread.thread.status(), ThreadStatus::Open);
+            assert_eq!(thread.thread.root().unwrap().body, "nice work");
+            // Legacy field is preserved, not deleted.
+            assert_eq!(session.review_comments.len(), 1);
+        }
+
+        #[test]
+        fn should_migrate_file_level_comment_to_file_anchor_thread() {
+            let mut session = test_session();
+            session.version = "1.3".to_string();
+            let path = PathBuf::from("src/main.rs");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_file_comment(Comment::new(
+                    "file note".to_string(),
+                    CommentType::from_id("note"),
+                    None,
+                ));
+
+            session.migrate_legacy_comments_to_threads();
+
+            let thread = &session.threads()[0];
+            assert_eq!(
+                *thread.thread.anchor().target(),
+                AnchorTarget::File {
+                    path: "src/main.rs".to_string()
+                }
+            );
+            assert!(session.files.get(&path).unwrap().file_comments.len() == 1);
+        }
+
+        #[test]
+        fn should_migrate_line_comment_preserving_side_and_line() {
+            let mut session = test_session();
+            session.version = "1.3".to_string();
+            let path = PathBuf::from("src/main.rs");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+            let mut comment = Comment::new(
+                "line note".to_string(),
+                CommentType::from_id("note"),
+                Some(LineSide::Old),
+            );
+            comment = comment.with_author("Claude Opus");
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_line_comment(42, comment);
+
+            session.migrate_legacy_comments_to_threads();
+
+            let thread = &session.threads()[0];
+            match thread.thread.anchor().target() {
+                AnchorTarget::Line { path, side, line } => {
+                    assert_eq!(path, "src/main.rs");
+                    assert_eq!(*side, crate::model::thread::AnchorSide::Old);
+                    assert_eq!(*line, 42);
+                }
+                other => panic!("expected a Line anchor, got {other:?}"),
+            }
+            assert_eq!(thread.thread.root().unwrap().author.kind, AuthorKind::Agent);
+            assert_eq!(thread.thread.root().unwrap().author.name, "Claude Opus");
+        }
+
+        #[test]
+        fn should_migrate_range_comment_preserving_bounds() {
+            let mut session = test_session();
+            session.version = "1.3".to_string();
+            let path = PathBuf::from("src/main.rs");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+            let range = LineRange::new(10, 12);
+            let comment = Comment::new_with_range(
+                "range note".to_string(),
+                CommentType::from_id("suggestion"),
+                Some(LineSide::New),
+                range,
+            );
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_line_comment(range.end, comment);
+
+            session.migrate_legacy_comments_to_threads();
+
+            let thread = &session.threads()[0];
+            match thread.thread.anchor().target() {
+                AnchorTarget::Range {
+                    path,
+                    side,
+                    start,
+                    end,
+                } => {
+                    assert_eq!(path, "src/main.rs");
+                    assert_eq!(*side, crate::model::thread::AnchorSide::New);
+                    assert_eq!(*start, 10);
+                    assert_eq!(*end, 12);
+                }
+                other => panic!("expected a Range anchor, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn should_be_idempotent_across_repeat_migration_calls() {
+            let mut session = test_session();
+            session.version = "1.3".to_string();
+            session
+                .review_comments
+                .push(Comment::new("note".to_string(), CommentType::None, None));
+
+            let first = session.migrate_legacy_comments_to_threads();
+            let second = session.migrate_legacy_comments_to_threads();
+
+            assert_eq!(first, 1);
+            assert_eq!(second, 0, "repeat migration must not duplicate threads");
+            assert_eq!(session.threads().len(), 1);
+        }
+
+        #[test]
+        fn should_migrate_deterministically_across_multiple_files_and_lines() {
+            let build = || {
+                let mut session = test_session();
+                session.version = "1.3".to_string();
+                for (path, line) in [("b.rs", 5u32), ("a.rs", 2u32)] {
+                    let path = PathBuf::from(path);
+                    session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+                    session.get_file_mut(&path).unwrap().add_line_comment(
+                        line,
+                        Comment::new(
+                            format!("note on {}", path.display()),
+                            CommentType::None,
+                            None,
+                        ),
+                    );
+                }
+                session.migrate_legacy_comments_to_threads();
+                session
+                    .threads()
+                    .iter()
+                    .map(|t| t.thread.anchor().target().path().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            };
+
+            // Same structural mapping every time: a.rs before b.rs (path order).
+            assert_eq!(build(), vec!["a.rs".to_string(), "b.rs".to_string()]);
+            assert_eq!(build(), vec!["a.rs".to_string(), "b.rs".to_string()]);
+        }
+
+        #[test]
+        fn should_roundtrip_threads_through_session_json() {
+            let mut session = test_session();
+            session.add_thread(
+                Anchor::review(),
+                ThreadComment::new(ThreadAuthor::human("alice"), "root"),
+            );
+
+            let json = serde_json::to_string(&session).unwrap();
+            let restored: ReviewSession = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.threads().len(), 1);
+            assert_eq!(restored.threads()[0].thread.root().unwrap().body, "root");
+        }
     }
 }

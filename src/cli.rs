@@ -263,6 +263,169 @@ pub enum ReviewCommand {
         #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
         repo: PathBuf,
     },
+
+    /// Inspect or update durable, provider-neutral review threads.
+    Thread {
+        #[command(subcommand)]
+        command: ThreadCommand,
+    },
+}
+
+/// Author kind stamped on a thread comment/reply.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthorKindArg {
+    #[default]
+    Human,
+    Agent,
+}
+
+/// Non-interactive durable-thread commands (`tuicr review thread ...`).
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum ThreadCommand {
+    /// List every durable thread in a persisted session.
+    List {
+        /// Session slug from `tuicr review list` (local or PR), or path to a
+        /// session JSON file.
+        #[arg(long, value_name = "SESSION")]
+        session: String,
+
+        /// Repo selector used to resolve a local session slug (path or
+        /// `owner/repo`). PR slugs and JSON paths resolve without it.
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: PathBuf,
+    },
+
+    /// Print a single thread by ID.
+    Show {
+        #[arg(long, value_name = "SESSION")]
+        session: String,
+
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: PathBuf,
+
+        /// Thread ID from `tuicr review thread list`.
+        #[arg(long = "thread", value_name = "THREAD_ID")]
+        thread_id: String,
+    },
+
+    /// Open a new durable thread on a session.
+    Add {
+        #[arg(long, value_name = "SESSION")]
+        session: String,
+
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: PathBuf,
+
+        /// JSON payload. Use literal JSON, @path/to/file.json, or - for stdin.
+        #[arg(long, value_name = "JSON|@FILE|-")]
+        input: Option<String>,
+
+        /// File path for a file, line, or range anchor. Omit for a review-level thread.
+        #[arg(long = "target-file", value_name = "PATH")]
+        file: Option<PathBuf>,
+
+        /// Line number for a line or range anchor. Requires --target-file.
+        #[arg(long, value_name = "LINE", requires = "file")]
+        line: Option<u32>,
+
+        /// End line for a range anchor. Requires --line.
+        #[arg(long = "end-line", value_name = "LINE", requires = "line")]
+        end_line: Option<u32>,
+
+        /// Diff side for line and range anchors.
+        #[arg(long, value_enum, default_value_t = LineSideArg::New)]
+        side: LineSideArg,
+
+        /// Author name stamped on the thread's root comment. Falls back to
+        /// the config `username` setting, then to `"user"`.
+        #[arg(long, value_name = "NAME")]
+        author: Option<String>,
+
+        /// Author kind: `human` (default) or `agent`.
+        #[arg(long = "author-kind", value_enum, default_value_t = AuthorKindArg::Human)]
+        author_kind: AuthorKindArg,
+
+        /// Root comment text.
+        #[arg(
+            value_name = "COMMENT",
+            required_unless_present = "input",
+            value_parser = non_empty_comment_text,
+            allow_hyphen_values = true
+        )]
+        content: Option<String>,
+    },
+
+    /// Append a reply to an existing thread.
+    Reply {
+        #[arg(long, value_name = "SESSION")]
+        session: String,
+
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: PathBuf,
+
+        #[arg(long = "thread", value_name = "THREAD_ID")]
+        thread_id: String,
+
+        /// JSON payload. Use literal JSON, @path/to/file.json, or - for stdin.
+        #[arg(long, value_name = "JSON|@FILE|-")]
+        input: Option<String>,
+
+        /// Author name stamped on this reply. Falls back to the config
+        /// `username` setting, then to `"user"`.
+        #[arg(long, value_name = "NAME")]
+        author: Option<String>,
+
+        /// Author kind: `human` (default) or `agent`.
+        #[arg(long = "author-kind", value_enum, default_value_t = AuthorKindArg::Human)]
+        author_kind: AuthorKindArg,
+
+        /// Reply text.
+        #[arg(
+            value_name = "COMMENT",
+            required_unless_present = "input",
+            value_parser = non_empty_comment_text,
+            allow_hyphen_values = true
+        )]
+        content: Option<String>,
+    },
+
+    /// Resolve a thread.
+    Resolve {
+        #[arg(long, value_name = "SESSION")]
+        session: String,
+
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: PathBuf,
+
+        #[arg(long = "thread", value_name = "THREAD_ID")]
+        thread_id: String,
+    },
+
+    /// Reopen a resolved thread. No-op if the thread is not currently
+    /// `resolved` (including if it is `dismissed`, which is terminal).
+    Reopen {
+        #[arg(long, value_name = "SESSION")]
+        session: String,
+
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: PathBuf,
+
+        #[arg(long = "thread", value_name = "THREAD_ID")]
+        thread_id: String,
+    },
+
+    /// Dismiss a thread ("won't fix"). Terminal: a dismissed thread can
+    /// never be resolved or reopened again.
+    Dismiss {
+        #[arg(long, value_name = "SESSION")]
+        session: String,
+
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: PathBuf,
+
+        #[arg(long = "thread", value_name = "THREAD_ID")]
+        thread_id: String,
+    },
 }
 
 /// Diff side accepted by `tuicr review add --side`.
@@ -1016,6 +1179,218 @@ mod tests {
             "add",
             "--session",
             "session",
+            "--line",
+            "42",
+            "note",
+        ])
+        .expect_err("parse should fail");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn should_parse_review_thread_list_command() {
+        let parsed = parse_for_test(&["tuicr", "review", "thread", "list", "--session", "s.json"])
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed.review_command,
+            Some(ReviewCommand::Thread {
+                command: ThreadCommand::List {
+                    session: "s.json".to_string(),
+                    repo: PathBuf::from("."),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_review_thread_show_command() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "review",
+            "thread",
+            "show",
+            "--session",
+            "s.json",
+            "--thread",
+            "abc",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.review_command,
+            Some(ReviewCommand::Thread {
+                command: ThreadCommand::Show {
+                    session: "s.json".to_string(),
+                    repo: PathBuf::from("."),
+                    thread_id: "abc".to_string(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_review_thread_add_command_with_author_kind() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "review",
+            "thread",
+            "add",
+            "--session",
+            "s.json",
+            "--target-file",
+            "src/lib.rs",
+            "--line",
+            "10",
+            "--author",
+            "Claude",
+            "--author-kind",
+            "agent",
+            "note",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.review_command,
+            Some(ReviewCommand::Thread {
+                command: ThreadCommand::Add {
+                    session: "s.json".to_string(),
+                    repo: PathBuf::from("."),
+                    input: None,
+                    file: Some(PathBuf::from("src/lib.rs")),
+                    line: Some(10),
+                    end_line: None,
+                    side: LineSideArg::New,
+                    author: Some("Claude".to_string()),
+                    author_kind: AuthorKindArg::Agent,
+                    content: Some("note".to_string()),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn should_default_review_thread_add_author_kind_to_human() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "review",
+            "thread",
+            "add",
+            "--session",
+            "s.json",
+            "note",
+        ])
+        .expect("parse should succeed");
+        match parsed.review_command {
+            Some(ReviewCommand::Thread {
+                command: ThreadCommand::Add { author_kind, .. },
+            }) => assert_eq!(author_kind, AuthorKindArg::Human),
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_parse_review_thread_reply_resolve_reopen_dismiss_commands() {
+        let reply = parse_for_test(&[
+            "tuicr",
+            "review",
+            "thread",
+            "reply",
+            "--session",
+            "s.json",
+            "--thread",
+            "abc",
+            "reply body",
+        ])
+        .expect("reply should parse");
+        assert_eq!(
+            reply.review_command,
+            Some(ReviewCommand::Thread {
+                command: ThreadCommand::Reply {
+                    session: "s.json".to_string(),
+                    repo: PathBuf::from("."),
+                    thread_id: "abc".to_string(),
+                    input: None,
+                    author: None,
+                    author_kind: AuthorKindArg::Human,
+                    content: Some("reply body".to_string()),
+                },
+            })
+        );
+
+        let resolve = parse_for_test(&[
+            "tuicr",
+            "review",
+            "thread",
+            "resolve",
+            "--session",
+            "s.json",
+            "--thread",
+            "abc",
+        ])
+        .expect("resolve should parse");
+        assert_eq!(
+            resolve.review_command,
+            Some(ReviewCommand::Thread {
+                command: ThreadCommand::Resolve {
+                    session: "s.json".to_string(),
+                    repo: PathBuf::from("."),
+                    thread_id: "abc".to_string(),
+                },
+            })
+        );
+
+        let reopen = parse_for_test(&[
+            "tuicr",
+            "review",
+            "thread",
+            "reopen",
+            "--session",
+            "s.json",
+            "--thread",
+            "abc",
+        ])
+        .expect("reopen should parse");
+        assert_eq!(
+            reopen.review_command,
+            Some(ReviewCommand::Thread {
+                command: ThreadCommand::Reopen {
+                    session: "s.json".to_string(),
+                    repo: PathBuf::from("."),
+                    thread_id: "abc".to_string(),
+                },
+            })
+        );
+
+        let dismiss = parse_for_test(&[
+            "tuicr",
+            "review",
+            "thread",
+            "dismiss",
+            "--session",
+            "s.json",
+            "--thread",
+            "abc",
+        ])
+        .expect("dismiss should parse");
+        assert_eq!(
+            dismiss.review_command,
+            Some(ReviewCommand::Thread {
+                command: ThreadCommand::Dismiss {
+                    session: "s.json".to_string(),
+                    repo: PathBuf::from("."),
+                    thread_id: "abc".to_string(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn should_require_file_for_review_thread_add_line() {
+        let err = parse_for_test(&[
+            "tuicr",
+            "review",
+            "thread",
+            "add",
+            "--session",
+            "s.json",
             "--line",
             "42",
             "note",

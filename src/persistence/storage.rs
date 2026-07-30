@@ -462,9 +462,20 @@ fn read_lock_owner_pid(path: &Path) -> Option<u32> {
 }
 
 /// Load a session JSON file from an absolute path.
+///
+/// Sessions predating `CURRENT_SESSION_VERSION` have their legacy
+/// `review_comments`/`files[..].*_comments` migrated into durable threads
+/// in-memory before being returned (see
+/// `ReviewSession::migrate_legacy_comments_to_threads`). Migration is
+/// idempotent (a session already at `CURRENT_SESSION_VERSION` is a no-op)
+/// and never mutates the on-disk file — callers that want the migration
+/// persisted must save the returned session explicitly.
 pub fn load_session(path: &Path) -> Result<ReviewSession> {
     let contents = fs::read_to_string(path)?;
-    serde_json::from_str(&contents).map_err(|e| TuicrError::CorruptedSession(e.to_string()))
+    let mut session: ReviewSession =
+        serde_json::from_str(&contents).map_err(|e| TuicrError::CorruptedSession(e.to_string()))?;
+    session.migrate_legacy_comments_to_threads();
+    Ok(session)
 }
 
 /// Look up the persisted local session that matches the requested context.
@@ -633,6 +644,54 @@ pub fn load_pr_session(key: &PrSessionKey) -> Result<Option<(PathBuf, ReviewSess
         }
         _ => Ok(None),
     }
+}
+
+/// Look up the persisted PR session for a key's *lineage* (forge kind +
+/// host + owner/repo + PR number), ignoring `head_sha`, within `reviews_dir`.
+fn load_pr_session_lineage_in_dir(
+    reviews_dir: &Path,
+    key: &PrSessionKey,
+) -> Result<Option<(PathBuf, ReviewSession)>> {
+    maybe_migrate(reviews_dir)?;
+
+    let slug: Slug = key.into();
+    let manifest = manifest::load_manifest(reviews_dir).unwrap_or_default();
+    let Some(entry) = manifest.get_pr(&slug.to_string()) else {
+        return Ok(None);
+    };
+
+    let full_path = reviews_dir.join(&entry.path);
+    let session = load_session(&full_path)?;
+    Ok(Some((full_path, session)))
+}
+
+/// Look up the persisted PR session for a key's *lineage* (forge kind +
+/// host + owner/repo + PR number), ignoring `head_sha`.
+///
+/// Unlike [`load_pr_session`], this surfaces the manifest's current entry
+/// for the PR's slug regardless of which head SHA it was saved under. This
+/// is additive: it lets a caller reuse the same durable review (its
+/// threads, replies, provider mappings) across a PR head advance instead of
+/// starting a new one, without changing `load_pr_session`'s existing exact
+/// head-match semantics or any behavior built on it today. The returned
+/// session's own `pr_session_key.head_sha` reflects the head it was last
+/// saved at — callers that want to rebind it to the new head must refresh
+/// anchors and re-save explicitly (see
+/// [`crate::review_store::ReviewStore::refresh_thread_anchors`]).
+pub fn load_pr_session_lineage(key: &PrSessionKey) -> Result<Option<(PathBuf, ReviewSession)>> {
+    let reviews_dir = get_reviews_dir()?;
+    load_pr_session_lineage_in_dir(&reviews_dir, key)
+}
+
+/// [`ReviewStore`](crate::review_store::ReviewStore)-facing variant of
+/// [`load_pr_session_lineage`] that honors an explicit `reviews_dir`
+/// (e.g. one set via `ReviewStore::with_reviews_dir`) instead of always
+/// resolving the platform-global directory.
+pub(crate) fn load_pr_session_lineage_for_dir(
+    reviews_dir: &Path,
+    key: &PrSessionKey,
+) -> Result<Option<(PathBuf, ReviewSession)>> {
+    load_pr_session_lineage_in_dir(reviews_dir, key)
 }
 
 /// Derive the slug for a session from its embedded fields. Local sessions
@@ -1373,6 +1432,42 @@ mod tests {
         let new_key = make_pr_key(125, "9999999999999999");
         let loaded = load_pr_session(&new_key).unwrap();
         assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn should_find_pr_session_by_lineage_across_head_advance() {
+        let _g = with_test_reviews_dir();
+        let old_key = make_pr_key(125, "abcdef0123456789");
+        let session = make_pr_session(&old_key);
+        let saved_path = save_session(&session).unwrap();
+
+        // A head-exact lookup for the new head fails (existing behavior)...
+        let new_key = make_pr_key(125, "9999999999999999");
+        assert!(load_pr_session(&new_key).unwrap().is_none());
+
+        // ...but the lineage lookup still finds the durable review, keyed
+        // only by forge/host/repo/PR number, so its threads/replies survive
+        // a head advance even before the caller rebinds it to the new head.
+        let (lineage_path, lineage_session) = load_pr_session_lineage(&new_key)
+            .unwrap()
+            .expect("lineage hit");
+        assert_eq!(lineage_path, saved_path);
+        assert_eq!(lineage_session.id, session.id);
+        assert_eq!(
+            lineage_session.pr_session_key.as_ref().unwrap().head_sha,
+            old_key.head_sha
+        );
+        assert!(old_key.lineage_matches(&new_key));
+    }
+
+    #[test]
+    fn should_return_none_for_lineage_lookup_with_no_matching_pr() {
+        let _g = with_test_reviews_dir();
+        let key = make_pr_key(125, "abcdef0123456789");
+        save_session(&make_pr_session(&key)).unwrap();
+
+        let unrelated_key = make_pr_key(999, "abcdef0123456789");
+        assert!(load_pr_session_lineage(&unrelated_key).unwrap().is_none());
     }
 
     #[test]
