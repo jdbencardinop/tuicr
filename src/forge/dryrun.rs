@@ -254,14 +254,25 @@ fn plan_thread(
         });
     }
 
-    let resolution_outcome = || match capabilities.thread_resolution {
-        ThreadResolutionLevel::None => OperationOutcome::Unsupported {
-            reason: "provider has no verified thread-resolution mechanism for this host/version"
-                .to_string(),
-        },
-        ThreadResolutionLevel::Comment
-        | ThreadResolutionLevel::Discussion
-        | ThreadResolutionLevel::Thread => OperationOutcome::Planned,
+    let resolution_outcome = || {
+        // A thread whose own anchor can't be placed can't be resolved/
+        // dismissed either — inherit the same stale/conflict/invalid/
+        // unsupported outcome instead of independently claiming the
+        // resolution would succeed (mirrors the reply-inheritance rule
+        // above).
+        if !matches!(anchor_outcome, OperationOutcome::Planned) {
+            return anchor_outcome.clone();
+        }
+        match capabilities.thread_resolution {
+            ThreadResolutionLevel::None => OperationOutcome::Unsupported {
+                reason: "provider has no verified thread-resolution mechanism for this \
+                         host/version"
+                    .to_string(),
+            },
+            ThreadResolutionLevel::Comment
+            | ThreadResolutionLevel::Discussion
+            | ThreadResolutionLevel::Thread => OperationOutcome::Planned,
+        }
     };
 
     match thread.status() {
@@ -649,6 +660,190 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op.op, OperationKind::Dismiss))
         );
+    }
+
+    #[test]
+    fn should_inherit_stale_anchor_outcome_for_resolve_and_dismiss_not_planned() {
+        // A resolved/dismissed thread whose anchor is stale can't be
+        // created/located in the first place, so github()'s native
+        // thread-resolution support must not override that with a false
+        // `Planned` resolve/dismiss outcome.
+        let stale_anchor = || {
+            let anchor = Anchor::line_with_context(
+                "src/a.rs",
+                AnchorSide::New,
+                10,
+                crate::model::AnchorContext {
+                    before: vec![],
+                    selected: vec!["original content".to_string()],
+                    after: vec![],
+                },
+            )
+            .unwrap();
+            let mut thread = open_thread(anchor);
+            thread
+                .thread
+                .refresh_anchor_with_remap(&["completely", "different", "file"], None)
+                .unwrap();
+            thread
+        };
+
+        let mut resolved = stale_anchor();
+        resolved.thread.resolve();
+        let resolved_id = resolved.id().as_str().to_string();
+
+        let mut dismissed = stale_anchor();
+        dismissed.thread.dismiss();
+        let dismissed_id = dismissed.id().as_str().to_string();
+
+        let session = session_with_threads(vec![resolved, dismissed]);
+        let plan = plan_publication(&session, &github(), None);
+
+        let resolve_op = plan
+            .operations
+            .iter()
+            .find(|op| {
+                op.thread_id.as_deref() == Some(resolved_id.as_str())
+                    && matches!(op.op, OperationKind::Resolve)
+            })
+            .expect("resolve op present");
+        match &resolve_op.outcome {
+            OperationOutcome::Stale { .. } => {}
+            other => panic!("expected Stale, got {other:?}"),
+        }
+
+        let dismiss_op = plan
+            .operations
+            .iter()
+            .find(|op| {
+                op.thread_id.as_deref() == Some(dismissed_id.as_str())
+                    && matches!(op.op, OperationKind::Dismiss)
+            })
+            .expect("dismiss op present");
+        match &dismiss_op.outcome {
+            OperationOutcome::Stale { .. } => {}
+            other => panic!("expected Stale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_inherit_conflict_anchor_outcome_for_resolve_and_dismiss_not_planned() {
+        // Same rule as the stale case above, but for an ambiguous
+        // (multi-match) anchor that resolves to `Conflict`.
+        let ambiguous_anchor = || {
+            let anchor = Anchor::line_with_context(
+                "src/a.rs",
+                AnchorSide::New,
+                1,
+                crate::model::AnchorContext {
+                    before: vec![],
+                    selected: vec!["dup".to_string()],
+                    after: vec![],
+                },
+            )
+            .unwrap();
+            let mut thread = open_thread(anchor);
+            thread
+                .thread
+                .refresh_anchor_with_remap(&["dup", "dup"], None)
+                .unwrap();
+            thread
+        };
+
+        let mut resolved = ambiguous_anchor();
+        resolved.thread.resolve();
+        let resolved_id = resolved.id().as_str().to_string();
+
+        let mut dismissed = ambiguous_anchor();
+        dismissed.thread.dismiss();
+        let dismissed_id = dismissed.id().as_str().to_string();
+
+        let session = session_with_threads(vec![resolved, dismissed]);
+        let plan = plan_publication(&session, &github(), None);
+
+        let resolve_op = plan
+            .operations
+            .iter()
+            .find(|op| {
+                op.thread_id.as_deref() == Some(resolved_id.as_str())
+                    && matches!(op.op, OperationKind::Resolve)
+            })
+            .expect("resolve op present");
+        match &resolve_op.outcome {
+            OperationOutcome::Conflict { .. } => {}
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+
+        let dismiss_op = plan
+            .operations
+            .iter()
+            .find(|op| {
+                op.thread_id.as_deref() == Some(dismissed_id.as_str())
+                    && matches!(op.op, OperationKind::Dismiss)
+            })
+            .expect("dismiss op present");
+        match &dismiss_op.outcome {
+            OperationOutcome::Conflict { .. } => {}
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_inherit_invalid_anchor_outcome_for_resolve_and_dismiss_not_planned() {
+        // Same rule again, but for a structurally corrupted (`Invalid`)
+        // anchor loaded from a hand-edited/corrupted session file.
+        let invalid_anchor = || {
+            let anchor_json = serde_json::json!({
+                "target": {
+                    "kind": "range",
+                    "path": "src/a.rs",
+                    "side": "new",
+                    "start": 10,
+                    "end": 5
+                },
+                "state": "current",
+                "context": null
+            });
+            let anchor: Anchor = serde_json::from_value(anchor_json).unwrap();
+            open_thread(anchor)
+        };
+
+        let mut resolved = invalid_anchor();
+        resolved.thread.resolve();
+        let resolved_id = resolved.id().as_str().to_string();
+
+        let mut dismissed = invalid_anchor();
+        dismissed.thread.dismiss();
+        let dismissed_id = dismissed.id().as_str().to_string();
+
+        let session = session_with_threads(vec![resolved, dismissed]);
+        let plan = plan_publication(&session, &github(), None);
+
+        let resolve_op = plan
+            .operations
+            .iter()
+            .find(|op| {
+                op.thread_id.as_deref() == Some(resolved_id.as_str())
+                    && matches!(op.op, OperationKind::Resolve)
+            })
+            .expect("resolve op present");
+        match &resolve_op.outcome {
+            OperationOutcome::Invalid { .. } => {}
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+
+        let dismiss_op = plan
+            .operations
+            .iter()
+            .find(|op| {
+                op.thread_id.as_deref() == Some(dismissed_id.as_str())
+                    && matches!(op.op, OperationKind::Dismiss)
+            })
+            .expect("dismiss op present");
+        match &dismiss_op.outcome {
+            OperationOutcome::Invalid { .. } => {}
+            other => panic!("expected Invalid, got {other:?}"),
+        }
     }
 
     #[test]

@@ -36,27 +36,32 @@ pub enum ForgeKind {
 impl ForgeKind {
     /// Stable lowercase identifier used as both a `provider_mappings` key
     /// (`PersistedThread::upsert_provider_mapping`) and a dry-run
-    /// `--provider` CLI value.
+    /// `--provider` CLI value. Kebab-case (`"azure-devops"`), matching the
+    /// CLI's own `ForgeKindArg` clap `ValueEnum` rendering — no external
+    /// contract requires `snake_case` here, so the CLI's documented form
+    /// wins and the dry-run JSON output stays round-trippable with it.
     pub fn provider_key(self) -> &'static str {
         match self {
             ForgeKind::GitHub => "github",
             ForgeKind::GitLab => "gitlab",
-            ForgeKind::AzureDevOps => "azure_devops",
+            ForgeKind::AzureDevOps => "azure-devops",
             ForgeKind::Gitea => "gitea",
             ForgeKind::Forgejo => "forgejo",
         }
     }
 
     /// Parse the [`Self::provider_key`] identifier back into a `ForgeKind`.
-    /// Returns `None` for anything else, including this type's own
-    /// `#[serde(rename_all = "snake_case")]` derive output (`"git_hub"`,
-    /// `"git_lab"`) — those two representations are intentionally distinct
-    /// and are not interchangeable.
+    /// Accepts the canonical kebab-case form (`"azure-devops"`) and, as a
+    /// backward-compatible alias, the snake_case form (`"azure_devops"`)
+    /// used by an earlier revision of this API. Returns `None` for anything
+    /// else, including this type's own `#[serde(rename_all = "snake_case")]`
+    /// derive output (`"git_hub"`, `"git_lab"`) — those two representations
+    /// are intentionally distinct and are not interchangeable.
     pub fn from_provider_key(key: &str) -> Option<Self> {
         match key {
             "github" => Some(ForgeKind::GitHub),
             "gitlab" => Some(ForgeKind::GitLab),
-            "azure_devops" => Some(ForgeKind::AzureDevOps),
+            "azure-devops" | "azure_devops" => Some(ForgeKind::AzureDevOps),
             "gitea" => Some(ForgeKind::Gitea),
             "forgejo" => Some(ForgeKind::Forgejo),
             _ => None,
@@ -546,6 +551,32 @@ pub trait ForgeBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_round_trip_every_provider_key_including_azure_devops_kebab_case() {
+        for kind in [
+            ForgeKind::GitHub,
+            ForgeKind::GitLab,
+            ForgeKind::AzureDevOps,
+            ForgeKind::Gitea,
+            ForgeKind::Forgejo,
+        ] {
+            let key = kind.provider_key();
+            assert_eq!(ForgeKind::from_provider_key(key), Some(kind));
+        }
+        // The CLI's own clap `ValueEnum` derive renders `AzureDevops` as
+        // kebab-case; `provider_key()` must match it exactly, not the
+        // `"azure_devops"` snake_case form.
+        assert_eq!(ForgeKind::AzureDevOps.provider_key(), "azure-devops");
+    }
+
+    #[test]
+    fn should_accept_snake_case_azure_devops_as_a_backward_compatible_alias() {
+        assert_eq!(
+            ForgeKind::from_provider_key("azure_devops"),
+            Some(ForgeKind::AzureDevOps)
+        );
+    }
 
     #[test]
     fn should_round_trip_pr_session_key_via_serde() {

@@ -679,6 +679,27 @@ mod tests {
     }
 
     #[test]
+    fn should_parse_kebab_case_azure_devops_provider_flag() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "review",
+            "publish",
+            "--session",
+            "some-session",
+            "--dry-run",
+            "--provider",
+            "azure-devops",
+        ])
+        .expect("parse should succeed");
+        match parsed.review_command {
+            Some(ReviewCommand::Publish { provider, .. }) => {
+                assert_eq!(provider, Some(ForgeKindArg::AzureDevops));
+            }
+            other => panic!("expected Publish command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn should_parse_theme_when_provided() {
         let parsed = parse_for_test(&["tuicr", "--theme", "light"]).expect("parse should succeed");
         assert_eq!(parsed.theme, Some("light".to_string()));

@@ -1496,6 +1496,36 @@ mod tests {
         assert_eq!(value["provider"], "github");
     }
 
+    #[test]
+    fn should_emit_kebab_case_azure_devops_provider_in_dry_run_json() {
+        // `ForgeKindArg::AzureDevops` parses from the CLI's own kebab-case
+        // `--provider azure-devops` (see `cli.rs`'s
+        // `should_parse_kebab_case_azure_devops_provider_flag`), and
+        // `DryRunPlan.provider` must round-trip through the very same
+        // `"azure-devops"` spelling via `ForgeKind::provider_key()` — never
+        // the old `"azure_devops"` snake_case form.
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store = ReviewStore::with_reviews_dir(temp.path().join("reviews"));
+        let session = test_session(repo.clone());
+        let session_ref = store.save_review(&session).unwrap();
+
+        let mut out = Vec::new();
+        publish_dry_run(
+            &session_ref.path().display().to_string(),
+            &repo,
+            true,
+            Some(ForgeKindArg::AzureDevops),
+            None,
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["provider"], "azure-devops");
+    }
+
     // ---- Thread commands ----
 
     fn setup_thread_store() -> (tempfile::TempDir, PathBuf, ReviewStore, SessionRef) {
