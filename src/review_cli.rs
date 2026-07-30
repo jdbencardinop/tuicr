@@ -551,6 +551,7 @@ struct CommentOutput {
     side: Option<&'static str>,
     comment_type: String,
     lifecycle_state: &'static str,
+    author: String,
     created_at: String,
     content: String,
 }
@@ -600,6 +601,7 @@ impl CommentOutput {
             side: side_id(side),
             comment_type: comment.comment_type.id().to_string(),
             lifecycle_state: lifecycle_id(comment.lifecycle_state),
+            author: comment.author.clone(),
             created_at: comment.created_at.to_rfc3339(),
             content: comment.content.clone(),
         }
@@ -846,7 +848,7 @@ mod tests {
                     },
                     content: "check this".to_string(),
                     comment_type: CommentType::from_id("issue"),
-                    author: crate::model::comment::DEFAULT_AUTHOR.to_string(),
+                    author: "Claude Sonnet 5".to_string(),
                     commit_id: None,
                 },
             )
@@ -858,12 +860,14 @@ mod tests {
         assert_eq!(comments[0].id, comment.id);
         assert_eq!(comments[0].location, "src/main.rs:42");
         assert_eq!(comments[0].comment_type, "issue");
+        assert_eq!(comments[0].author, "Claude Sonnet 5");
 
         show_comments(&session_ref.path().display().to_string(), &repo, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value[0]["comment_type"], "issue");
         assert_eq!(value[0]["location"], "src/main.rs:42");
+        assert_eq!(value[0]["author"], "Claude Sonnet 5");
         assert_eq!(value[0]["content"], "check this");
     }
 }
