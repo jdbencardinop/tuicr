@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
-use super::comment::Comment;
+use super::comment::{Comment, LineRange};
 use super::diff_types::{DiffFile, FileStatus};
-use super::thread::{Anchor, ThreadComment, ThreadId};
+use super::thread::{Anchor, AnchorSide, ThreadComment, ThreadId};
 use super::thread_store::{self, CURRENT_SESSION_VERSION, PersistedThread};
 use crate::forge::remote_comments::PrCommentsVisibility;
 use crate::forge::traits::PrSessionKey;
@@ -329,9 +329,30 @@ impl ReviewSession {
             lines.sort();
             for line in lines {
                 let comments = self.files[&path].line_comments[&line].clone();
+
+                // Group comments that resolve to the *exact same* anchor
+                // (identical side + line_range; a bare line comment and a
+                // range comment ending on the same line number share this
+                // HashMap bucket but are different anchors) so multiple
+                // independent legacy notes at one spot become one thread
+                // (root + ordered replies) instead of several one-comment
+                // threads fragmenting a single anchor point. `Vec`-based
+                // grouping (not a HashMap) preserves original insertion
+                // order both within and across groups.
+                let mut groups: Vec<(AnchorSide, Option<LineRange>, Vec<Comment>)> = Vec::new();
                 for comment in comments {
                     let side = thread_store::anchor_side_for_legacy(comment.side);
-                    let anchor = match comment.line_range {
+                    match groups
+                        .iter_mut()
+                        .find(|(s, r, _)| *s == side && *r == comment.line_range)
+                    {
+                        Some((_, _, group)) => group.push(comment),
+                        None => groups.push((side, comment.line_range, vec![comment])),
+                    }
+                }
+
+                for (side, line_range, group_comments) in groups {
+                    let anchor = match line_range {
                         Some(range) => {
                             Anchor::range(path_str.clone(), side, range.start, range.end)
                                 .expect("LineRange is always normalized start <= end")
@@ -339,7 +360,10 @@ impl ReviewSession {
                         None => Anchor::line(path_str.clone(), side, line),
                     };
                     self.threads
-                        .push(thread_store::thread_from_legacy_comment(anchor, &comment));
+                        .push(thread_store::thread_from_legacy_comment_group(
+                            anchor,
+                            &group_comments,
+                        ));
                     created += 1;
                 }
             }
@@ -1121,6 +1145,113 @@ mod tests {
             );
             assert_eq!(thread.thread.root().unwrap().author.kind, AuthorKind::Agent);
             assert_eq!(thread.thread.root().unwrap().author.name, "Claude Opus");
+        }
+
+        #[test]
+        fn should_group_independent_legacy_comments_on_the_same_line_into_one_thread() {
+            // Migration-audit follow-up: legacy `line_comments:
+            // HashMap<u32, Vec<Comment>>` has no root/reply distinction --
+            // any number of independent `Comment`s can accumulate on the
+            // same line via repeated `add_line_comment` calls. Migrating
+            // each into its own one-comment thread would fragment a single
+            // anchor point into several threads, contradicting the frozen
+            // `Thread` model's own framing of "a discussion anchored at one
+            // place". The first comment (original insertion order) must
+            // become the thread's root and every later one an ordered
+            // reply, all under one thread at one anchor.
+            let mut session = test_session();
+            session.version = "1.3".to_string();
+            let path = PathBuf::from("src/main.rs");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+
+            let first = Comment::new("first note".to_string(), CommentType::None, None)
+                .with_author("alice");
+            let second =
+                Comment::new("second note".to_string(), CommentType::None, None).with_author("bob");
+            let third = Comment::new("third note".to_string(), CommentType::None, None)
+                .with_author("carol");
+            let (first_id, second_id, third_id) =
+                (first.id.clone(), second.id.clone(), third.id.clone());
+
+            let file = session.get_file_mut(&path).unwrap();
+            file.add_line_comment(7, first);
+            file.add_line_comment(7, second);
+            file.add_line_comment(7, third);
+
+            let created = session.migrate_legacy_comments_to_threads();
+
+            assert_eq!(
+                created, 1,
+                "three independent comments on the same line must migrate into exactly \
+                 one thread, not three"
+            );
+            assert_eq!(session.threads().len(), 1);
+            let thread = &session.threads()[0];
+            assert_eq!(thread.thread.comments().len(), 3);
+
+            let root = thread.thread.root().unwrap();
+            assert_eq!(root.body, "first note");
+            assert_eq!(
+                root.id().as_str(),
+                first_id,
+                "root must reuse the first comment's legacy id"
+            );
+            assert_eq!(root.author.name, "alice");
+
+            let replies: Vec<_> = thread.thread.replies().collect();
+            assert_eq!(replies.len(), 2);
+            assert_eq!(replies[0].body, "second note");
+            assert_eq!(
+                replies[0].id().as_str(),
+                second_id,
+                "first reply must reuse the second comment's legacy id, not a fresh random one"
+            );
+            assert_eq!(replies[0].author.name, "bob");
+            assert_eq!(replies[1].body, "third note");
+            assert_eq!(replies[1].id().as_str(), third_id);
+            assert_eq!(replies[1].author.name, "carol");
+        }
+
+        #[test]
+        fn should_keep_a_line_comment_and_an_overlapping_range_comment_as_separate_threads() {
+            // A bare line comment and a range comment whose *end* lands on
+            // the same line share the same `line_comments` HashMap bucket
+            // key, but they are genuinely different anchors -- grouping
+            // must key on the fully resolved anchor (side + line_range),
+            // not merely the bucket's line number, or these would be
+            // incorrectly merged into one thread.
+            let mut session = test_session();
+            session.version = "1.3".to_string();
+            let path = PathBuf::from("src/main.rs");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+
+            let line_comment =
+                Comment::new("about line 7 alone".to_string(), CommentType::None, None);
+            let range_comment = Comment::new_with_range(
+                "about the 5-7 range".to_string(),
+                CommentType::None,
+                None,
+                LineRange::new(5, 7),
+            );
+
+            let file = session.get_file_mut(&path).unwrap();
+            file.add_line_comment(7, line_comment);
+            file.add_line_comment(7, range_comment);
+
+            let created = session.migrate_legacy_comments_to_threads();
+
+            assert_eq!(
+                created, 2,
+                "different anchors sharing one bucket must stay separate"
+            );
+            assert_eq!(session.threads().len(), 2);
+            for thread in session.threads() {
+                assert_eq!(
+                    thread.thread.comments().len(),
+                    1,
+                    "each distinct anchor keeps its own single-comment thread"
+                );
+            }
         }
 
         #[test]

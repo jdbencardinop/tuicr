@@ -194,15 +194,67 @@ fn thread_with_id(id: ThreadId, anchor: Anchor, root: ThreadComment) -> Thread {
 /// what makes `migrate_legacy_comments_to_threads` safe to run on every
 /// session load rather than only once.
 pub(super) fn thread_from_legacy_comment(anchor: Anchor, comment: &Comment) -> PersistedThread {
-    let author = if comment.author == DEFAULT_AUTHOR {
-        ThreadAuthor::human(comment.author.clone())
-    } else {
-        ThreadAuthor::agent(comment.author.clone())
-    };
+    let author = legacy_comment_author(comment);
     let root_id = comment_id_from_raw(&comment.id);
     let thread_id = deterministic_thread_id(&anchor, &root_id);
     let root = thread_comment_with_id(root_id, author, comment.content.clone(), comment.created_at);
     PersistedThread::new(thread_with_id(thread_id, anchor, root))
+}
+
+/// Migrate a *group* of legacy `Comment`s that all resolve to the exact
+/// same `Anchor` target (e.g. several independent notes left on the same
+/// diff line/range, which the legacy model stores as a flat
+/// `Vec<Comment>` with no root/reply distinction) into a single
+/// [`Thread`]: the first comment in original insertion order becomes the
+/// root, and every following comment becomes an ordered reply. This
+/// mirrors the frozen model's own framing of a thread as "a discussion
+/// anchored at one place" rather than fragmenting one anchor point into
+/// several one-comment threads.
+///
+/// Every comment -- root or reply -- keeps its own legacy `Comment.id` as
+/// its `CommentId` verbatim (see [`thread_from_legacy_comment`]), and the
+/// resulting `ThreadId` is still derived only from the anchor plus the
+/// *root's* id, so re-migrating the same group twice is still fully
+/// deterministic and produces byte-identical thread/comment/reply
+/// identities and ordering.
+///
+/// # Panics
+/// `comments` must be non-empty; callers only invoke this for an anchor
+/// that has at least one legacy comment.
+pub(super) fn thread_from_legacy_comment_group(
+    anchor: Anchor,
+    comments: &[Comment],
+) -> PersistedThread {
+    let (root_comment, replies) = comments
+        .split_first()
+        .expect("thread_from_legacy_comment_group requires a non-empty comment group");
+    let mut persisted = thread_from_legacy_comment(anchor, root_comment);
+    for comment in replies {
+        let reply_id = comment_id_from_raw(&comment.id);
+        let reply = thread_comment_with_id(
+            reply_id,
+            legacy_comment_author(comment),
+            comment.content.clone(),
+            comment.created_at,
+        );
+        persisted.thread.reply(reply);
+    }
+    persisted
+}
+
+/// Convert a legacy `Comment`'s free-form `author` string into the frozen
+/// module's [`ThreadAuthor`] vocabulary: the sentinel [`DEFAULT_AUTHOR`]
+/// maps to [`ThreadAuthor::human`], any other value to
+/// [`ThreadAuthor::agent`]. Extracted so both
+/// [`thread_from_legacy_comment`] and
+/// [`thread_from_legacy_comment_group`]'s reply path apply the exact same
+/// rule.
+fn legacy_comment_author(comment: &Comment) -> ThreadAuthor {
+    if comment.author == DEFAULT_AUTHOR {
+        ThreadAuthor::human(comment.author.clone())
+    } else {
+        ThreadAuthor::agent(comment.author.clone())
+    }
 }
 
 /// Map a legacy `Comment`'s `side` to the frozen module's [`AnchorSide`].
