@@ -90,6 +90,33 @@ impl ReviewStore {
             .map(|(path, session)| (SessionRef::from_path(path), session)))
     }
 
+    /// Rebind an existing durable review to a new PR head, completing the
+    /// lineage lookup [`Self::find_pr_session_by_lineage`] performs into an
+    /// actual migration: find the review by lineage (forge/host/repo/PR
+    /// number) regardless of which head it was last saved under, update
+    /// its `pr_session_key.head_sha` to `new_key.head_sha`, and save it
+    /// under the new head's canonical path. Threads, replies, statuses and
+    /// provider mappings are carried forward unchanged; this does not
+    /// itself refresh anchors against the new head's diff content (call
+    /// [`Self::refresh_thread_anchors`] with the new content for that).
+    ///
+    /// Idempotent: calling this again with the same `new_key` after it has
+    /// already been rebound finds the review (now already at `new_key`'s
+    /// head) and re-saves it unchanged. Returns `Ok(None)` if no review
+    /// exists yet for this lineage; callers should fall back to creating a
+    /// fresh session in that case, exactly as they do today.
+    pub fn rebind_pr_session_to_head(
+        &self,
+        new_key: &crate::forge::traits::PrSessionKey,
+    ) -> Result<Option<(SessionRef, ReviewSession)>> {
+        let Some((_, mut session)) = self.find_pr_session_by_lineage(new_key)? else {
+            return Ok(None);
+        };
+        session.pr_session_key = Some(new_key.clone());
+        let session_ref = self.save_review(&session)?;
+        Ok(Some((session_ref, session)))
+    }
+
     /// Load a persisted review session.
     pub fn get_review(&self, session_ref: &SessionRef) -> Result<ReviewSession> {
         storage::load_session(session_ref.path())
@@ -693,10 +720,122 @@ mod tests {
         assert_eq!(listed[0].comment_count, 1);
     }
 
+    #[test]
+    fn should_rebind_pr_session_to_new_head_and_carry_threads_forward() {
+        use crate::forge::traits::{ForgeRepository, PrSessionKey};
+
+        let temp = tempfile::tempdir().unwrap();
+        let reviews_dir = temp.path().join("reviews");
+        let store = ReviewStore::with_reviews_dir(reviews_dir);
+
+        let repository = ForgeRepository::github("github.com", "acme", "widgets");
+        let old_key = PrSessionKey::new(repository.clone(), 42, "old-head-sha");
+        let mut session = ReviewSession::new(
+            PathBuf::from("forge:github.com/acme/widgets"),
+            old_key.head_sha.clone(),
+            Some("reviews".to_string()),
+            SessionDiffSource::PullRequest,
+        );
+        session.pr_session_key = Some(old_key.clone());
+        session.add_file(PathBuf::from("src/lib.rs"), FileStatus::Modified, 0);
+        let session_ref = store.save_review(&session).unwrap();
+
+        let thread = store
+            .add_thread(
+                &session_ref,
+                AddThreadRequest {
+                    target: CommentTarget::Line {
+                        path: PathBuf::from("src/lib.rs"),
+                        line: 1,
+                        side: LineSide::New,
+                    },
+                    body: "please fix".to_string(),
+                    author: ThreadAuthor::human("reviewer"),
+                },
+            )
+            .unwrap();
+
+        // Rebind to a new head: the review is found by lineage (repo + PR
+        // number) regardless of the old head, its `head_sha` is updated,
+        // and the thread created above survives the rebind untouched.
+        let new_key = PrSessionKey::new(repository, 42, "new-head-sha");
+        let (new_ref, rebound) = store
+            .rebind_pr_session_to_head(&new_key)
+            .unwrap()
+            .expect("lineage hit for rebind");
+        assert_eq!(
+            rebound.pr_session_key.as_ref().unwrap().head_sha,
+            "new-head-sha"
+        );
+        assert_eq!(rebound.threads().len(), 1);
+        assert_eq!(rebound.threads()[0].thread.id(), thread.thread.id());
+
+        // The exact old-head lookup no longer resolves (it was rebound),
+        // but the new head resolves directly, and the lineage lookup finds
+        // it under the new head too.
+        assert!(store.get_review(&session_ref).is_ok());
+        let reloaded = store.get_review(&new_ref).unwrap();
+        assert_eq!(reloaded.threads().len(), 1);
+
+        let (_, lineage_session) = store
+            .find_pr_session_by_lineage(&new_key)
+            .unwrap()
+            .expect("lineage lookup after rebind");
+        assert_eq!(lineage_session.pr_session_key.as_ref().unwrap(), &new_key);
+    }
+
+    #[test]
+    fn should_rebind_idempotently_when_called_twice_for_same_head() {
+        use crate::forge::traits::{ForgeRepository, PrSessionKey};
+
+        let temp = tempfile::tempdir().unwrap();
+        let reviews_dir = temp.path().join("reviews");
+        let store = ReviewStore::with_reviews_dir(reviews_dir);
+
+        let repository = ForgeRepository::github("github.com", "acme", "widgets");
+        let old_key = PrSessionKey::new(repository.clone(), 7, "head-a");
+        let mut session = ReviewSession::new(
+            PathBuf::from("forge:github.com/acme/widgets"),
+            old_key.head_sha.clone(),
+            Some("reviews".to_string()),
+            SessionDiffSource::PullRequest,
+        );
+        session.pr_session_key = Some(old_key);
+        store.save_review(&session).unwrap();
+
+        let new_key = PrSessionKey::new(repository, 7, "head-b");
+        let first = store
+            .rebind_pr_session_to_head(&new_key)
+            .unwrap()
+            .expect("first rebind hit");
+        let second = store
+            .rebind_pr_session_to_head(&new_key)
+            .unwrap()
+            .expect("second rebind hit");
+
+        assert_eq!(first.0.path(), second.0.path());
+        assert_eq!(first.1.id, second.1.id);
+        assert_eq!(second.1.pr_session_key.as_ref().unwrap().head_sha, "head-b");
+    }
+
+    #[test]
+    fn should_return_none_rebinding_a_pr_with_no_prior_session() {
+        use crate::forge::traits::{ForgeRepository, PrSessionKey};
+
+        let temp = tempfile::tempdir().unwrap();
+        let reviews_dir = temp.path().join("reviews");
+        let store = ReviewStore::with_reviews_dir(reviews_dir);
+
+        let repository = ForgeRepository::github("github.com", "acme", "widgets");
+        let key = PrSessionKey::new(repository, 999, "some-head");
+        assert!(store.rebind_pr_session_to_head(&key).unwrap().is_none());
+    }
+
     mod thread_store_tests {
         use super::*;
         use crate::model::thread::{
-            Anchor, AnchorState, ProviderRemap, ThreadAuthor, ThreadStatus,
+            Anchor, AnchorRelocation, AnchorState, ProviderRemap, ThreadAnchorRefresh,
+            ThreadAuthor, ThreadStatus,
         };
         use std::collections::HashMap;
 
@@ -733,6 +872,69 @@ mod tests {
                 reloaded.threads()[0].thread.root().unwrap().body,
                 "please double-check this"
             );
+        }
+
+        #[test]
+        fn should_serialize_concurrent_thread_appends_with_no_lost_updates() {
+            // Reuses the existing `.tuicr.lock` directory-level lock (via
+            // `update_session_in_dir`/`with_reviews_dir_lock`) rather than
+            // any new locking primitive: N real OS threads race to append
+            // a reply to the same thread through the same `ReviewStore`,
+            // and every single append must survive -- proving the
+            // read-modify-write path serializes correctly instead of
+            // silently overwriting a concurrent writer's update.
+            let (_temp, store, session_ref) = store_with_session();
+            let thread = store
+                .add_thread(
+                    &session_ref,
+                    AddThreadRequest {
+                        target: CommentTarget::Review,
+                        body: "root".to_string(),
+                        author: ThreadAuthor::human("alice"),
+                    },
+                )
+                .unwrap();
+            let thread_id = thread.id().clone();
+            let store = std::sync::Arc::new(store);
+
+            const WRITERS: usize = 8;
+            let handles: Vec<_> = (0..WRITERS)
+                .map(|i| {
+                    let store = std::sync::Arc::clone(&store);
+                    let session_ref = session_ref.clone();
+                    let thread_id = thread_id.clone();
+                    std::thread::spawn(move || {
+                        store
+                            .reply_to_thread(
+                                &session_ref,
+                                &thread_id,
+                                ThreadAuthor::agent(format!("writer-{i}")),
+                                format!("reply {i}"),
+                            )
+                            .unwrap();
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            let reloaded = store.get_review(&session_ref).unwrap();
+            let persisted = reloaded.find_thread(&thread_id).unwrap();
+            // 1 root + one reply per writer thread; a lost update would
+            // show up as fewer than WRITERS + 1 comments.
+            assert_eq!(persisted.thread.comments().len(), WRITERS + 1);
+            let bodies: std::collections::HashSet<_> = persisted
+                .thread
+                .replies()
+                .map(|reply| reply.body.clone())
+                .collect();
+            for i in 0..WRITERS {
+                assert!(
+                    bodies.contains(&format!("reply {i}")),
+                    "writer {i}'s reply must not be lost to a concurrent overwrite"
+                );
+            }
         }
 
         #[test]
@@ -869,6 +1071,88 @@ mod tests {
         }
 
         #[test]
+        fn should_import_remote_thread_idempotently_by_composing_find_and_add() {
+            // Migration-audit §5: no HTTP/remote-mutation pipeline exists in
+            // this ticket, so there is no production "import" call site yet
+            // -- but the two primitives a future importer must compose
+            // (`find_thread_by_provider` to check for an existing mapping,
+            // `add_thread` + `upsert_thread_provider_mapping` to create one)
+            // must themselves compose into an idempotent find-or-create.
+            // This simulates importing the *same* fixture fetch twice and
+            // asserts the thread count never grows past one.
+            let (_temp, store, session_ref) = store_with_session();
+
+            fn import_once(
+                store: &ReviewStore,
+                session_ref: &SessionRef,
+                provider: &str,
+                provider_id: &str,
+                body: &str,
+                author_name: &str,
+            ) -> PersistedThread {
+                let session = store.get_review(session_ref).unwrap();
+                if let Some(existing) = session.find_thread_by_provider(provider, provider_id) {
+                    return existing.clone();
+                }
+                let thread = store
+                    .add_thread(
+                        session_ref,
+                        AddThreadRequest {
+                            target: CommentTarget::Review,
+                            body: body.to_string(),
+                            author: ThreadAuthor::remote(author_name, "gh-author-1"),
+                        },
+                    )
+                    .unwrap();
+                store
+                    .upsert_thread_provider_mapping(
+                        session_ref,
+                        thread.id(),
+                        provider,
+                        serde_json::json!({"id": provider_id}),
+                    )
+                    .unwrap()
+            }
+
+            let first = import_once(
+                &store,
+                &session_ref,
+                "github",
+                "PRRT_imported_1",
+                "please fix this",
+                "github-user",
+            );
+            let second = import_once(
+                &store,
+                &session_ref,
+                "github",
+                "PRRT_imported_1",
+                "please fix this",
+                "github-user",
+            );
+
+            assert_eq!(
+                first.id(),
+                second.id(),
+                "re-importing the same provider ID must find the same thread, not mint a new one"
+            );
+            let reloaded = store.get_review(&session_ref).unwrap();
+            assert_eq!(
+                reloaded.threads().len(),
+                1,
+                "importing the same fixture fetch twice must not grow the thread count"
+            );
+            assert_eq!(
+                reloaded
+                    .threads()
+                    .iter()
+                    .filter(|t| t.has_provider_id("github", "PRRT_imported_1"))
+                    .count(),
+                1
+            );
+        }
+
+        #[test]
         fn should_refresh_thread_anchor_via_store_with_unique_context_relocation() {
             let (_temp, store, session_ref) = store_with_session();
             let mut session = store.get_review(&session_ref).unwrap();
@@ -908,6 +1192,193 @@ mod tests {
                 crate::model::AnchorTarget::Line { line, .. } => assert_eq!(*line, 3),
                 other => panic!("expected Line anchor, got {other:?}"),
             }
+        }
+
+        #[test]
+        fn should_relocate_thread_current_when_an_unrelated_line_changes_elsewhere_in_the_file() {
+            // Mirrors the migration-audit finding on `file_review_carried_forward`
+            // (src/app/session.rs): that TUI-layer helper drops every draft
+            // in a file outright the moment the file's content hash changes
+            // at all, with no per-anchor relocation. This test proves the
+            // STORE-level primitive the next wave should wire in instead
+            // does not have that all-or-nothing failure mode: a change to
+            // a line far away from a thread's anchor must relocate that
+            // thread as `Current` at its original line, never drop it.
+            let (_temp, store, session_ref) = store_with_session();
+            let mut session = store.get_review(&session_ref).unwrap();
+            let path = PathBuf::from("src/main.rs");
+            let original_lines: Vec<&str> = vec!["fn main() {", "let x = 1;", "let y = 2;", "}"];
+            let context = crate::model::AnchorContext::capture(&original_lines, 1, 1, 1).unwrap();
+            let anchor =
+                Anchor::line_with_context("src/main.rs", crate::model::AnchorSide::New, 2, context)
+                    .unwrap();
+            session.add_thread(
+                anchor,
+                crate::model::ThreadComment::new(ThreadAuthor::human("alice"), "about x"),
+            );
+            store.save_review(&session).unwrap();
+
+            // An unrelated line, far from the anchor, changes content --
+            // the anchor's own line and its surrounding context are
+            // untouched, so its line number must not shift either.
+            let new_lines: Vec<String> = vec![
+                "fn main() {".to_string(),
+                "let x = 1;".to_string(),
+                "let y = 2;".to_string(),
+                "println!(\"unrelated edit\");".to_string(),
+            ];
+            let mut file_lines = HashMap::new();
+            file_lines.insert(path, new_lines);
+
+            let results = store
+                .refresh_thread_anchors(&session_ref, &file_lines, &HashMap::new())
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            assert!(matches!(
+                results[0].1,
+                ThreadAnchorRefresh::Applied(AnchorRelocation::Current { .. })
+            ));
+
+            let reloaded = store.get_review(&session_ref).unwrap();
+            let thread = &reloaded.threads()[0];
+            assert_eq!(
+                thread.thread.anchor().state(),
+                AnchorState::Current,
+                "an unrelated edit elsewhere in the file must never drop or stale a thread"
+            );
+            assert_eq!(
+                thread.thread.root().unwrap().body,
+                "about x",
+                "the comment itself must be fully preserved, not dropped"
+            );
+            match thread.thread.anchor().target() {
+                crate::model::AnchorTarget::Line { line, .. } => assert_eq!(*line, 2),
+                other => panic!("expected Line anchor, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn should_leave_legacy_migrated_no_context_anchor_relocation_inert() {
+            // Legacy `Comment`s never captured before/after context lines,
+            // so every thread produced by `migrate_legacy_comments_to_
+            // threads` has `Anchor.context: None` (see
+            // `thread_from_legacy_comment`). Per the frozen contract's own
+            // doc comment on `Anchor::relocate_with_remap` -- "anchors with
+            // no captured context or remap are left untouched" -- refreshing
+            // such an anchor must always report `Current` at its original
+            // line, completely independent of the new file content, rather
+            // than being marked `Stale`/`Ambiguous` or silently relocated.
+            // This proves that documented behavior holds end-to-end through
+            // the store for a real legacy-migrated thread.
+            let (_temp, store, session_ref) = store_with_session();
+            let mut session = store.get_review(&session_ref).unwrap();
+            session.version = "1.3".to_string();
+            let path = PathBuf::from("src/main.rs");
+            session.get_file_mut(&path).unwrap().add_line_comment(
+                2,
+                Comment::new("about x".to_string(), CommentType::None, None),
+            );
+            session.migrate_legacy_comments_to_threads();
+            assert_eq!(session.threads().len(), 1);
+            assert!(
+                session.threads()[0].thread.anchor().context.is_none(),
+                "legacy-migrated line anchors must have no captured context"
+            );
+            store.save_review(&session).unwrap();
+
+            // Completely different content, and even shorter than the
+            // original anchor's line number -- a context-aware anchor
+            // would go `Stale` here (no unique match, or out of range);
+            // a no-context anchor must not even look.
+            let new_lines: Vec<String> = vec!["totally different content".to_string()];
+            let mut file_lines = HashMap::new();
+            file_lines.insert(path, new_lines);
+
+            let results = store
+                .refresh_thread_anchors(&session_ref, &file_lines, &HashMap::new())
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            assert!(matches!(
+                results[0].1,
+                ThreadAnchorRefresh::Applied(AnchorRelocation::Current { new_start: 2, .. })
+            ));
+
+            let reloaded = store.get_review(&session_ref).unwrap();
+            let thread = &reloaded.threads()[0];
+            assert_eq!(thread.thread.anchor().state(), AnchorState::Current);
+            match thread.thread.anchor().target() {
+                crate::model::AnchorTarget::Line { line, .. } => assert_eq!(*line, 2),
+                other => panic!("expected Line anchor, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn should_freeze_dismissed_thread_anchor_across_a_real_json_save_and_reload() {
+            // Migration-audit §9 item 10: a Dismissed thread's anchor freeze
+            // (thread.rs's own in-memory `lifecycle_tests`/`freeze_tests`)
+            // must also survive a *real* persistence round trip -- not just
+            // in-memory mutation within one process -- and `refresh_thread_
+            // anchors` must still treat it as frozen even when the anchor
+            // has a path/line that would otherwise be touched.
+            let (_temp, store, session_ref) = store_with_session();
+            let path = PathBuf::from("src/main.rs");
+            let thread = store
+                .add_thread(
+                    &session_ref,
+                    AddThreadRequest {
+                        target: CommentTarget::Line {
+                            path: path.clone(),
+                            line: 2,
+                            side: LineSide::New,
+                        },
+                        body: "won't fix, dismissing".to_string(),
+                        author: ThreadAuthor::human("alice"),
+                    },
+                )
+                .unwrap();
+            let thread_id = thread.id().clone();
+            store.dismiss_thread(&session_ref, &thread_id).unwrap();
+
+            // Force a real JSON round trip: `get_review` always reads and
+            // deserializes the file from disk (no in-memory cache), so
+            // reusing the same store handle still exercises the exact save
+            // → JSON → reload path, not an in-process-only mutation.
+            let before = store.get_review(&session_ref).unwrap();
+            let before_thread = before.find_thread(&thread_id).unwrap().clone();
+            assert_eq!(before_thread.thread.status(), ThreadStatus::Dismissed);
+
+            // Content that would relocate/stale a *live* line anchor.
+            let new_lines: Vec<String> = vec!["completely rewritten".to_string()];
+            let mut file_lines = HashMap::new();
+            file_lines.insert(path, new_lines);
+            let results = store
+                .refresh_thread_anchors(&session_ref, &file_lines, &HashMap::new())
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].1, ThreadAnchorRefresh::Frozen);
+
+            let after = store.get_review(&session_ref).unwrap();
+            let after_thread = after.find_thread(&thread_id).unwrap().clone();
+            assert_eq!(
+                after_thread.thread.anchor(),
+                before_thread.thread.anchor(),
+                "a dismissed thread's anchor must be byte-identical after refresh_thread_anchors, \
+                 across a real save/reload, not just in-process"
+            );
+            assert_eq!(after_thread.thread.status(), ThreadStatus::Dismissed);
+
+            // Terminal: reopening a dismissed thread is a permanent no-op,
+            // even after the real persistence round trip above.
+            assert!(!store.reopen_thread(&session_ref, &thread_id).unwrap());
+            let still_dismissed = store.get_review(&session_ref).unwrap();
+            assert_eq!(
+                still_dismissed
+                    .find_thread(&thread_id)
+                    .unwrap()
+                    .thread
+                    .status(),
+                ThreadStatus::Dismissed
+            );
         }
 
         #[test]

@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use super::comment::{Comment, DEFAULT_AUTHOR, LineSide};
 use super::thread::{
-    Anchor, AnchorSide, ProviderRemap, Thread, ThreadAnchorRefresh, ThreadAuthor, ThreadComment,
-    ThreadId,
+    Anchor, AnchorSide, CommentId, ProviderRemap, Thread, ThreadAnchorRefresh, ThreadAuthor,
+    ThreadComment, ThreadId,
 };
 use crate::error::Result;
 
@@ -97,6 +97,82 @@ impl PersistedThread {
 /// are loaded (see [`super::review::ReviewSession::migrate_legacy_comments_to_threads`]).
 pub const CURRENT_SESSION_VERSION: &str = "1.4";
 
+/// Construct a [`CommentId`] whose serialized value is exactly
+/// `raw_id` (e.g. a legacy `Comment.id`), rather than a freshly minted
+/// random one.
+///
+/// `CommentId`'s inner string is private outside `thread.rs`, and its only
+/// public constructor (`CommentId::new`) always mints a random UUID v4.
+/// Since `CommentId` derives `Deserialize` as a plain newtype (serde treats
+/// single-field tuple structs as transparent), round-tripping a chosen JSON
+/// string through `Deserialize` is the only way to reuse an existing ID
+/// without modifying the frozen `thread.rs` module.
+fn comment_id_from_raw(raw_id: &str) -> CommentId {
+    serde_json::from_value(serde_json::Value::String(raw_id.to_string()))
+        .expect("CommentId deserializes transparently from any string")
+}
+
+/// Construct a [`ThreadId`] whose serialized value is exactly `raw_id`, via
+/// the same transparent-`Deserialize` technique as [`comment_id_from_raw`].
+fn thread_id_from_raw(raw_id: &str) -> ThreadId {
+    serde_json::from_value(serde_json::Value::String(raw_id.to_string()))
+        .expect("ThreadId deserializes transparently from any string")
+}
+
+/// Deterministically derive a migrated thread's [`ThreadId`] from its
+/// anchor target and its root comment's (preserved) [`CommentId`].
+///
+/// Using the anchor target (rather than only the comment ID) means two
+/// otherwise-identical legacy comment IDs anchored at different targets
+/// (which cannot happen in practice, since legacy `Comment.id`s are already
+/// globally unique, but is defensive against any future relaxation of that
+/// invariant) still cannot collide. The anchor target is serialized to a
+/// canonical JSON string via the frozen module's own `Serialize` impl, so
+/// this derivation never needs to inspect `Anchor`'s private fields.
+fn deterministic_thread_id(anchor: &Anchor, root_id: &CommentId) -> ThreadId {
+    let anchor_fingerprint =
+        serde_json::to_string(anchor.target()).expect("AnchorTarget always serializes");
+    thread_id_from_raw(&format!(
+        "legacy-thread:{anchor_fingerprint}:{}",
+        root_id.as_str()
+    ))
+}
+
+/// Build a [`ThreadComment`] whose `id` is exactly `id` (rather than a
+/// freshly minted random [`CommentId`]), via a JSON round-trip through the
+/// frozen module's own derived `Deserialize` impl. `author`/`body`/
+/// `created_at` are set as given; `updated_at` starts `None`, matching
+/// [`ThreadComment::new`]'s defaults.
+fn thread_comment_with_id(
+    id: CommentId,
+    author: ThreadAuthor,
+    body: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> ThreadComment {
+    let value = serde_json::json!({
+        "id": id,
+        "author": author,
+        "body": body,
+        "created_at": created_at,
+        "updated_at": Option::<chrono::DateTime<chrono::Utc>>::None,
+    });
+    serde_json::from_value(value).expect("ThreadComment fields always round-trip through JSON")
+}
+
+/// Build a [`Thread`] whose `id` is exactly `id` (rather than a freshly
+/// minted random [`ThreadId`] from [`Thread::open`]), via the same
+/// JSON-round-trip technique as [`thread_comment_with_id`]. Always starts
+/// `Open` with a single root comment, matching `Thread::open`'s invariants.
+fn thread_with_id(id: ThreadId, anchor: Anchor, root: ThreadComment) -> Thread {
+    let value = serde_json::json!({
+        "id": id,
+        "status": "open",
+        "anchor": anchor,
+        "comments": [root],
+    });
+    serde_json::from_value(value).expect("Thread fields always round-trip through JSON")
+}
+
 /// Build a one-comment [`PersistedThread`] from a legacy `Comment`,
 /// preserving its original `content`, `author` name, and `created_at`.
 ///
@@ -108,15 +184,25 @@ pub const CURRENT_SESSION_VERSION: &str = "1.4";
 /// [`ThreadAuthor::agent`]. The original name string is always preserved
 /// verbatim either way, so authorship is never lost even when the kind
 /// guess is imperfect.
+///
+/// IDs are deterministic, not randomly minted: the root [`ThreadComment`]
+/// reuses the legacy `Comment.id` verbatim as its [`CommentId`], and the
+/// [`Thread`]'s [`ThreadId`] is derived from the anchor target plus that
+/// same comment ID (see [`deterministic_thread_id`]). Migrating the same
+/// legacy session twice therefore produces byte-identical thread/comment
+/// identities (never a fresh random ID, never a duplicate thread), which is
+/// what makes `migrate_legacy_comments_to_threads` safe to run on every
+/// session load rather than only once.
 pub(super) fn thread_from_legacy_comment(anchor: Anchor, comment: &Comment) -> PersistedThread {
     let author = if comment.author == DEFAULT_AUTHOR {
         ThreadAuthor::human(comment.author.clone())
     } else {
         ThreadAuthor::agent(comment.author.clone())
     };
-    let mut root = ThreadComment::new(author, comment.content.clone());
-    root.created_at = comment.created_at;
-    PersistedThread::new(Thread::open(anchor, root))
+    let root_id = comment_id_from_raw(&comment.id);
+    let thread_id = deterministic_thread_id(&anchor, &root_id);
+    let root = thread_comment_with_id(root_id, author, comment.content.clone(), comment.created_at);
+    PersistedThread::new(thread_with_id(thread_id, anchor, root))
 }
 
 /// Map a legacy `Comment`'s `side` to the frozen module's [`AnchorSide`].
@@ -136,6 +222,51 @@ mod tests {
 
     fn legacy_comment(author: &str, content: &str) -> Comment {
         Comment::new(content.to_string(), CommentType::None, None).with_author(author)
+    }
+
+    #[test]
+    fn should_preserve_legacy_comment_id_as_thread_comment_id() {
+        let comment = legacy_comment(DEFAULT_AUTHOR, "note");
+        let legacy_id = comment.id.clone();
+        let persisted = thread_from_legacy_comment(Anchor::review(), &comment);
+        assert_eq!(
+            persisted.thread.root().unwrap().id().as_str(),
+            legacy_id,
+            "root ThreadComment id must reuse the legacy Comment.id verbatim, not a fresh random id"
+        );
+    }
+
+    #[test]
+    fn should_derive_the_same_thread_id_across_repeat_migrations_of_the_same_comment() {
+        let comment = legacy_comment(DEFAULT_AUTHOR, "note");
+
+        let first = thread_from_legacy_comment(Anchor::line("a.rs", AnchorSide::New, 10), &comment);
+        let second =
+            thread_from_legacy_comment(Anchor::line("a.rs", AnchorSide::New, 10), &comment);
+
+        assert_eq!(
+            first.id(),
+            second.id(),
+            "migrating the same legacy comment/anchor twice must derive an identical ThreadId, never a random one"
+        );
+        assert_eq!(
+            first.thread.root().unwrap().id(),
+            second.thread.root().unwrap().id()
+        );
+    }
+
+    #[test]
+    fn should_derive_different_thread_ids_for_different_anchors_of_the_same_comment_id() {
+        // Defensive: even if two comments somehow shared an id, differing
+        // anchors must not collapse to the same ThreadId.
+        let comment = legacy_comment(DEFAULT_AUTHOR, "note");
+
+        let at_line_10 =
+            thread_from_legacy_comment(Anchor::line("a.rs", AnchorSide::New, 10), &comment);
+        let at_line_11 =
+            thread_from_legacy_comment(Anchor::line("a.rs", AnchorSide::New, 11), &comment);
+
+        assert_ne!(at_line_10.id(), at_line_11.id());
     }
 
     #[test]

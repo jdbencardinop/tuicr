@@ -645,6 +645,9 @@ mod tests {
             session.remote_comments_visibility,
             PrCommentsVisibility::Unresolved
         );
+        // Migration-audit §8: every known pre-thread-store version must
+        // default `threads` to empty on load, not fail or fabricate data.
+        assert!(session.threads().is_empty());
     }
 
     #[test]
@@ -1109,6 +1112,13 @@ mod tests {
                 }
                 other => panic!("expected a Line anchor, got {other:?}"),
             }
+            assert!(
+                thread.thread.anchor().context.is_none(),
+                "legacy comments never captured before/after context, so a migrated \
+                 old-side anchor must have no context -- it's relocation-inert (always \
+                 reports Current at its last known line) rather than fabricating a \
+                 zero-window context that would falsely claim content-matched confidence"
+            );
             assert_eq!(thread.thread.root().unwrap().author.kind, AuthorKind::Agent);
             assert_eq!(thread.thread.root().unwrap().author.name, "Claude Opus");
         }
@@ -1167,6 +1177,44 @@ mod tests {
         }
 
         #[test]
+        fn should_derive_identical_thread_and_comment_ids_across_independent_migrations() {
+            // Two independently-built sessions from byte-identical legacy
+            // input (same comment id, content, anchor) must migrate to
+            // byte-identical thread/comment identities -- not just the
+            // same *count* of threads. This is what makes it safe to run
+            // migration in-memory on every load of the same underlying
+            // legacy file across separate processes without ever
+            // persisting two different identities for the same comment.
+            // Fixed once so both builds migrate the exact same legacy
+            // comment id -- simulating two separate processes loading the
+            // same on-disk legacy session file.
+            let comment = Comment::new("note".to_string(), CommentType::None, None);
+            let build = |comment: &Comment| {
+                let mut session = test_session();
+                session.version = "1.3".to_string();
+                session.review_comments.push(comment.clone());
+                session.migrate_legacy_comments_to_threads();
+                session.threads().to_vec()
+            };
+
+            let first = build(&comment);
+            let second = build(&comment);
+
+            assert_eq!(first.len(), 1);
+            assert_eq!(second.len(), 1);
+            assert_eq!(
+                first[0].id(),
+                second[0].id(),
+                "ThreadId must be deterministic, not randomly minted per migration run"
+            );
+            assert_eq!(
+                first[0].thread.root().unwrap().id(),
+                second[0].thread.root().unwrap().id(),
+                "root CommentId must be deterministic, not randomly minted per migration run"
+            );
+        }
+
+        #[test]
         fn should_migrate_deterministically_across_multiple_files_and_lines() {
             let build = || {
                 let mut session = test_session();
@@ -1194,6 +1242,47 @@ mod tests {
             // Same structural mapping every time: a.rs before b.rs (path order).
             assert_eq!(build(), vec!["a.rs".to_string(), "b.rs".to_string()]);
             assert_eq!(build(), vec!["a.rs".to_string(), "b.rs".to_string()]);
+        }
+
+        #[test]
+        fn should_migrate_lines_within_one_file_in_stable_sorted_order_despite_hashmap_iteration() {
+            // `line_comments` is a `HashMap<u32, Vec<Comment>>`; its
+            // iteration order is randomized per-instance and can differ
+            // across otherwise-identical builds within the same process,
+            // not just across runs. This seeds many lines in scrambled
+            // insertion order and asserts the migrated thread order is
+            // always sorted by line number, proving `migrate_legacy_
+            // comments_to_threads`'s explicit `lines.sort()` (not
+            // HashMap iteration) is what determines output order.
+            let build = || {
+                let mut session = test_session();
+                session.version = "1.3".to_string();
+                let path = PathBuf::from("scrambled.rs");
+                session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+                // Deliberately out-of-order insertion.
+                for line in [40u32, 10, 30, 20, 50, 1, 25] {
+                    session.get_file_mut(&path).unwrap().add_line_comment(
+                        line,
+                        Comment::new(format!("note on line {line}"), CommentType::None, None),
+                    );
+                }
+                session.migrate_legacy_comments_to_threads();
+                session
+                    .threads()
+                    .iter()
+                    .map(|t| match t.thread.anchor().target() {
+                        crate::model::thread::AnchorTarget::Line { line, .. } => *line,
+                        other => unreachable!(
+                            "all threads in this test are line-anchored, got {other:?}"
+                        ),
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            let expected = vec![1u32, 10, 20, 25, 30, 40, 50];
+            for _ in 0..5 {
+                assert_eq!(build(), expected);
+            }
         }
 
         #[test]

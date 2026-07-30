@@ -46,6 +46,16 @@ const STORAGE_LOCK_STALE_AFTER: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const STORAGE_LOCK_STALE_AFTER: Duration = Duration::from_millis(0);
 const STORAGE_LOCK_REUSE_GUARD_AFTER: Duration = Duration::from_secs(12 * 60 * 60);
+/// A lock file is created (`create_new`) and then has its owning PID/
+/// timestamp written to it as two separate steps. A concurrent waiter that
+/// reads the file in the (normally sub-millisecond) gap between those two
+/// steps sees zero bytes and cannot parse an owner PID, which would
+/// otherwise fall through to the "unknown owner" staleness check below and
+/// -- in test builds, where [`STORAGE_LOCK_STALE_AFTER`] is `0` -- delete a
+/// lock its rightful holder has not finished writing yet. Treat a
+/// zero-byte lock file younger than this grace period as "not yet fully
+/// written", never stale, regardless of [`STORAGE_LOCK_STALE_AFTER`].
+const STORAGE_LOCK_WRITE_GRACE: Duration = Duration::from_millis(200);
 const ACTIVE_SESSIONS_FILENAME: &str = "active_sessions.json";
 const ACTIVE_SESSION_STALE_AFTER: Duration = Duration::from_secs(12 * 60 * 60);
 
@@ -435,6 +445,11 @@ fn remove_stale_reviews_dir_lock(path: &Path) -> Result<bool> {
         .modified()
         .ok()
         .and_then(|modified| SystemTime::now().duration_since(modified).ok());
+    if metadata.len() == 0 && lock_age.is_none_or(|age| age < STORAGE_LOCK_WRITE_GRACE) {
+        // The lock file was just created; its owner hasn't written its
+        // PID/timestamp yet. Never treat this as stale -- keep waiting.
+        return Ok(false);
+    }
     let stale = match read_lock_owner_pid(path) {
         Some(pid) => {
             !process_is_running(pid)
@@ -1057,6 +1072,33 @@ mod tests {
 
         assert!(path.exists());
         assert!(!reviews_dir.join(STORAGE_LOCK_FILENAME).exists());
+    }
+
+    #[test]
+    fn should_not_treat_a_freshly_created_empty_lock_file_as_stale() {
+        // Regression test for a race exposed by concurrent thread-store
+        // writers: a lock file is created (`create_new`) and then has its
+        // owner PID written to it as a second step. A waiter that observes
+        // the file in that gap sees zero bytes, cannot parse an owner PID,
+        // and -- before this fix -- fell through to the "unknown owner"
+        // staleness check, which is instant (`STORAGE_LOCK_STALE_AFTER` is
+        // 0 in test builds) and would delete the lock out from under its
+        // rightful holder. A zero-byte lock file must never be treated as
+        // stale within the write grace period, regardless of
+        // `STORAGE_LOCK_STALE_AFTER`.
+        let _g = with_test_reviews_dir();
+        let reviews_dir = get_reviews_dir().unwrap();
+        let lock_path = reviews_dir.join(STORAGE_LOCK_FILENAME);
+        fs::File::create(&lock_path).unwrap();
+        assert_eq!(fs::metadata(&lock_path).unwrap().len(), 0);
+
+        let removed = remove_stale_reviews_dir_lock(&lock_path).unwrap();
+
+        assert!(
+            !removed,
+            "a just-created empty lock file must not be removed as stale"
+        );
+        assert!(lock_path.exists());
     }
 
     #[test]
