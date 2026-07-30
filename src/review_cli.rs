@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{AuthorKindArg, LineSideArg, ReviewCommand, ThreadCommand};
+use crate::cli::{AuthorKindArg, ForgeKindArg, LineSideArg, ReviewCommand, ThreadCommand};
 use crate::config;
 use crate::error::{Result, TuicrError};
 use crate::model::comment::{self, CommentLifecycleState};
@@ -55,6 +55,13 @@ fn run_with_writer(command: ReviewCommand, out: &mut impl Write) -> Result<()> {
         ),
         ReviewCommand::Comments { session, repo } => show_comments(&session, &repo, out),
         ReviewCommand::Thread { command } => run_thread_command(command, out),
+        ReviewCommand::Publish {
+            session,
+            repo,
+            dry_run,
+            provider,
+            provider_version,
+        } => publish_dry_run(&session, &repo, dry_run, provider, provider_version, out),
     }
 }
 
@@ -337,6 +344,53 @@ fn show_comments(session: &str, repo: &Path, out: &mut impl Write) -> Result<()>
     let session = store.get_review(&session_ref)?;
     let comments = collect_comments(&session);
     serde_json::to_writer_pretty(&mut *out, &comments)?;
+    writeln!(out)?;
+    Ok(())
+}
+
+/// `tuicr review publish --dry-run`: plan (never execute) how a session's
+/// threads/replies/resolutions would map onto a forge host's capability
+/// profile. Pure and local — no credentials, no remote calls, no mutation
+/// of the session.
+fn publish_dry_run(
+    session: &str,
+    repo: &Path,
+    dry_run: bool,
+    provider: Option<ForgeKindArg>,
+    provider_version: Option<String>,
+    out: &mut impl Write,
+) -> Result<()> {
+    if !dry_run {
+        return Err(TuicrError::InvalidInput(
+            "review publish only supports planning today; pass --dry-run explicitly \
+             (live publication is not implemented yet)"
+                .to_string(),
+        ));
+    }
+
+    let store = ReviewStore::new();
+    let session_ref = resolve_session_ref(&store, repo, session)?;
+    let review_session = store.get_review(&session_ref)?;
+
+    let kind = match provider {
+        Some(arg) => crate::forge::traits::ForgeKind::from(arg),
+        None => review_session
+            .pr_session_key
+            .as_ref()
+            .map(|key| key.repository.kind)
+            .ok_or_else(|| {
+                TuicrError::InvalidInput(
+                    "session has no PR forge coordinate; pass --provider to plan a local \
+                     session against a specific host"
+                        .to_string(),
+                )
+            })?,
+    };
+    let version = provider_version.map(crate::forge::capabilities::ProviderVersion::new);
+    let capabilities = crate::forge::capabilities::capabilities_for(kind, version.as_ref())?;
+
+    let plan = crate::forge::dryrun::plan_publication(&review_session, &capabilities, None);
+    serde_json::to_writer_pretty(&mut *out, &plan)?;
     writeln!(out)?;
     Ok(())
 }
@@ -1339,6 +1393,107 @@ mod tests {
         assert_eq!(value[0]["location"], "src/main.rs:42");
         assert_eq!(value[0]["author"], "Claude Sonnet 5");
         assert_eq!(value[0]["content"], "check this");
+    }
+
+    // ---- Publish dry-run ----
+
+    #[test]
+    fn should_reject_publish_without_dry_run_flag() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store = ReviewStore::with_reviews_dir(temp.path().join("reviews"));
+        let session = test_session(repo.clone());
+        let session_ref = store.save_review(&session).unwrap();
+
+        let mut out = Vec::new();
+        let err = publish_dry_run(
+            &session_ref.path().display().to_string(),
+            &repo,
+            false,
+            Some(ForgeKindArg::Github),
+            None,
+            &mut out,
+        )
+        .unwrap_err();
+        assert!(matches!(err, TuicrError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn should_reject_publish_without_provider_or_pr_session() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store = ReviewStore::with_reviews_dir(temp.path().join("reviews"));
+        let session = test_session(repo.clone());
+        let session_ref = store.save_review(&session).unwrap();
+
+        let mut out = Vec::new();
+        let err = publish_dry_run(
+            &session_ref.path().display().to_string(),
+            &repo,
+            true,
+            None,
+            None,
+            &mut out,
+        )
+        .unwrap_err();
+        assert!(matches!(err, TuicrError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn should_emit_dry_run_plan_json_using_explicit_provider() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store = ReviewStore::with_reviews_dir(temp.path().join("reviews"));
+        let mut session = test_session(repo.clone());
+        session.add_thread(
+            Anchor::line("src/main.rs", AnchorSide::New, 42),
+            ThreadComment::new(ThreadAuthor::human("dev"), "please fix"),
+        );
+        let session_ref = store.save_review(&session).unwrap();
+
+        let mut out = Vec::new();
+        publish_dry_run(
+            &session_ref.path().display().to_string(),
+            &repo,
+            true,
+            Some(ForgeKindArg::Gitea),
+            None,
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["provider"], "gitea");
+        let operations = value["operations"].as_array().unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0]["op"], "create_thread");
+        assert_eq!(operations[0]["outcome"], "planned");
+    }
+
+    #[test]
+    fn should_emit_dry_run_plan_json_using_pr_session_forge_kind() {
+        let temp = tempdir().unwrap();
+        let store = ReviewStore::with_reviews_dir(temp.path().join("reviews"));
+        let session_ref = save_pr_session(&store);
+
+        let mut out = Vec::new();
+        publish_dry_run(
+            &session_ref.path().display().to_string(),
+            Path::new("."),
+            true,
+            None,
+            None,
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        // `save_pr_session` keys the session to a github.com repository;
+        // `DryRunPlan.provider` serializes via `ForgeKind::provider_key()`.
+        assert_eq!(value["provider"], "github");
     }
 
     // ---- Thread commands ----

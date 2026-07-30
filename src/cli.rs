@@ -269,6 +269,44 @@ pub enum ReviewCommand {
         #[command(subcommand)]
         command: ThreadCommand,
     },
+
+    /// Plan (without publishing) how a session's threads/replies/resolutions
+    /// would map onto a forge host, given that host's capability profile.
+    /// Pure and local: never contacts a remote provider and never mutates
+    /// the session. Every operation is classified as planned, unsupported,
+    /// emulated (with its substitute), stale, conflict, or invalid — no
+    /// silent loss of range/outcome/reply/resolution.
+    Publish {
+        /// Session slug from `tuicr review list` (local or PR), or path to a
+        /// session JSON file.
+        #[arg(long, value_name = "SESSION")]
+        session: String,
+
+        /// Repo selector used to resolve a local session slug (path or
+        /// `owner/repo`). PR slugs and JSON paths resolve without it.
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: PathBuf,
+
+        /// Must be passed today: this command only supports planning, never
+        /// publishing. Reserved so the flag can gain a real publish mode
+        /// later without a breaking CLI change.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Capability profile to plan against. Defaults to the session's own
+        /// PR forge kind; required for local (non-PR) sessions, and can
+        /// override a PR session's own kind (e.g. to preview publishing a
+        /// local-only session on a hypothetical host).
+        #[arg(long, value_enum)]
+        provider: Option<ForgeKindArg>,
+
+        /// Provider version to bucket the capability profile by (only
+        /// meaningful for the Gitea/Forgejo family; ignored otherwise).
+        /// Omit to use this codebase's single evidence-backed default for
+        /// that provider.
+        #[arg(long, value_name = "VERSION")]
+        provider_version: Option<String>,
+    },
 }
 
 /// Author kind stamped on a thread comment/reply.
@@ -434,6 +472,31 @@ pub enum LineSideArg {
     Old,
     #[default]
     New,
+}
+
+/// Forge kind accepted by `tuicr review publish --provider`. Mirrors
+/// `crate::forge::traits::ForgeKind`, including the placeholder kinds that
+/// have a capability profile but no transport yet.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgeKindArg {
+    Github,
+    Gitlab,
+    AzureDevops,
+    Gitea,
+    Forgejo,
+}
+
+impl From<ForgeKindArg> for crate::forge::traits::ForgeKind {
+    fn from(value: ForgeKindArg) -> Self {
+        use crate::forge::traits::ForgeKind;
+        match value {
+            ForgeKindArg::Github => ForgeKind::GitHub,
+            ForgeKindArg::Gitlab => ForgeKind::GitLab,
+            ForgeKindArg::AzureDevops => ForgeKind::AzureDevOps,
+            ForgeKindArg::Gitea => ForgeKind::Gitea,
+            ForgeKindArg::Forgejo => ForgeKind::Forgejo,
+        }
+    }
 }
 
 impl From<Cli> for CliArgs {
