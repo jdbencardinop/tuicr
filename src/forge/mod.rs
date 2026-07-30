@@ -8,6 +8,7 @@
 pub mod canonical;
 pub mod capabilities;
 pub mod context;
+pub mod dryrun;
 pub mod github;
 pub mod gitlab;
 pub mod pr_open;
