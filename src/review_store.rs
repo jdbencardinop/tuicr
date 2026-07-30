@@ -105,16 +105,29 @@ impl ReviewStore {
     /// head) and re-saves it unchanged. Returns `Ok(None)` if no review
     /// exists yet for this lineage; callers should fall back to creating a
     /// fresh session in that case, exactly as they do today.
+    ///
+    /// The lineage lookup, the `pr_session_key` mutation, and the save all
+    /// happen inside one `.tuicr.lock`-protected critical section (see
+    /// [`storage::rebind_pr_session_to_head_in_dir`]) — not a lookup
+    /// followed by a separately-locked save — so a concurrent writer (e.g.
+    /// [`Self::reply_to_thread`] appending to the same old-head session)
+    /// can never have its update silently discarded by this function
+    /// saving a stale pre-lock snapshot over it. See that function's doc
+    /// comment for the one residual limitation this does *not* close: a
+    /// caller holding a stale, pre-rebind [`SessionRef`] for the old head
+    /// can still durably write to that now-orphaned file afterwards; it
+    /// just won't be found by lineage going forward.
     pub fn rebind_pr_session_to_head(
         &self,
         new_key: &crate::forge::traits::PrSessionKey,
     ) -> Result<Option<(SessionRef, ReviewSession)>> {
-        let Some((_, mut session)) = self.find_pr_session_by_lineage(new_key)? else {
+        let reviews_dir = self.reviews_dir()?;
+        let Some((path, session)) =
+            storage::rebind_pr_session_to_head_in_dir(&reviews_dir, new_key)?
+        else {
             return Ok(None);
         };
-        session.pr_session_key = Some(new_key.clone());
-        let session_ref = self.save_review(&session)?;
-        Ok(Some((session_ref, session)))
+        Ok(Some((SessionRef::from_path(path), session)))
     }
 
     /// Load a persisted review session.
@@ -829,6 +842,100 @@ mod tests {
         let repository = ForgeRepository::github("github.com", "acme", "widgets");
         let key = PrSessionKey::new(repository, 999, "some-head");
         assert!(store.rebind_pr_session_to_head(&key).unwrap().is_none());
+    }
+
+    #[test]
+    fn should_read_lineage_inside_the_lock_when_rebinding_and_not_miss_a_concurrent_write() {
+        // Deterministically proves `rebind_pr_session_to_head`'s lineage
+        // read now happens *inside* the shared `.tuicr.lock` critical
+        // section rather than before it, closing the lost-update race the
+        // previous unlocked-read-then-locked-write implementation had.
+        //
+        // A real multi-thread race between a writer and a rebind isn't a
+        // reliable way to prove this: whichever operation wins the lock
+        // first is a *valid* outcome even under the fix (the fix only
+        // guarantees ordering relative to the lock, not a specific
+        // winner), so a naive race would be flaky either way. Instead this
+        // test controls the interleaving explicitly: it holds the
+        // `.tuicr.lock` file itself (using the test process's own live
+        // PID, so the storage module's staleness check treats it as held
+        // by a running process and the rebind call underneath is forced
+        // to genuinely block/retry rather than proceed), performs a
+        // direct on-disk write simulating a writer's fully completed,
+        // already-unlocked update while that fake lock is held, then
+        // releases it. If the lineage read happens inside the lock (the
+        // fix), the now-unblocked rebind is guaranteed to observe the
+        // simulated write, because it cannot acquire the lock -- and thus
+        // cannot read -- until after the write has landed. Under the old
+        // code (whose unlocked read fires immediately on the background
+        // thread, without ever waiting on this fake lock at all) this
+        // assertion fails, since the stale pre-write snapshot is what gets
+        // captured and later saved back over the rebound session.
+        use crate::forge::traits::{ForgeRepository, PrSessionKey};
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().unwrap();
+        let reviews_dir = temp.path().join("reviews");
+        let store = ReviewStore::with_reviews_dir(reviews_dir.clone());
+
+        let repository = ForgeRepository::github("github.com", "acme", "widgets");
+        let old_key = PrSessionKey::new(repository.clone(), 55, "old-head-sha");
+        let mut session = ReviewSession::new(
+            PathBuf::from("forge:github.com/acme/widgets"),
+            old_key.head_sha.clone(),
+            Some("reviews".to_string()),
+            SessionDiffSource::PullRequest,
+        );
+        session.pr_session_key = Some(old_key.clone());
+        session.add_file(PathBuf::from("src/lib.rs"), FileStatus::Modified, 0);
+        let session_ref = store.save_review(&session).unwrap();
+
+        // Simulate the review storage lock already being held by a live
+        // process: writing the test's own PID means `process_is_running`
+        // (used by the staleness check) reports it as alive, so any
+        // `with_reviews_dir_lock` caller genuinely blocks/retries instead
+        // of treating it as stale and barging in.
+        std::fs::create_dir_all(&reviews_dir).unwrap();
+        let lock_path = reviews_dir.join(".tuicr.lock");
+        std::fs::write(&lock_path, format!("{}\n", std::process::id())).unwrap();
+
+        let new_key = PrSessionKey::new(repository, 55, "new-head-sha");
+        let store = Arc::new(store);
+        let store_bg = Arc::clone(&store);
+        let handle = std::thread::spawn(move || store_bg.rebind_pr_session_to_head(&new_key));
+
+        // Give the background thread a chance to reach (and start
+        // blocking on) the lock's acquire-retry loop before we simulate
+        // the concurrent write; not required for correctness (see comment
+        // above -- the write always happens before we remove the lock
+        // either way), but it exercises genuine blocking rather than a
+        // trivially-uncontended lock.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Simulate a concurrent writer's fully completed update (e.g. an
+        // `update_session_in_dir`-based reply) landing on the old-head
+        // session file while the lock is "held".
+        let mut concurrently_written = store.get_review(&session_ref).unwrap();
+        concurrently_written.add_file(PathBuf::from("src/extra.rs"), FileStatus::Added, 0);
+        std::fs::write(
+            session_ref.path(),
+            serde_json::to_string_pretty(&concurrently_written).unwrap(),
+        )
+        .unwrap();
+
+        // Release the fake lock; the blocked rebind can now proceed.
+        std::fs::remove_file(&lock_path).unwrap();
+
+        let (_, rebound) = handle
+            .join()
+            .unwrap()
+            .unwrap()
+            .expect("lineage hit for rebind");
+        assert!(
+            rebound.files.contains_key(&PathBuf::from("src/extra.rs")),
+            "rebind must observe the concurrently-completed write made while it was \
+             blocked on the lock, not a stale pre-lock snapshot"
+        );
     }
 
     mod thread_store_tests {

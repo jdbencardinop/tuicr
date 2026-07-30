@@ -680,6 +680,58 @@ fn load_pr_session_lineage_in_dir(
     Ok(Some((full_path, session)))
 }
 
+/// [`ReviewStore`](crate::review_store::ReviewStore)-facing rebind: find the
+/// persisted PR session for `new_key`'s *lineage* (ignoring `head_sha`),
+/// update its `pr_session_key` to `new_key`, and save it under the new
+/// head's canonical path — all inside a *single* `.tuicr.lock`-protected
+/// critical section, the same lock every other session mutation
+/// ([`update_session_in_dir`]) already shares. No new lock is introduced.
+///
+/// This closes a lost-update race the previous implementation had: doing
+/// the lineage lookup *unlocked* and only acquiring a lock for the later
+/// save meant another writer's `update_session_in_dir` (e.g. a concurrent
+/// `reply_to_thread` on the same old-head file) could load-mutate-save
+/// entirely in the window between the unlocked read and the locked write —
+/// and that writer's update would then be silently discarded once this
+/// function's now-stale in-memory copy got saved over the new head's path
+/// and the manifest was repointed there. Performing the lineage lookup
+/// *inside* the same lock the save uses closes that window: whichever
+/// operation acquires the lock second is guaranteed to observe everything
+/// the first one already committed, because `write_atomic`'s temp-file
+/// rename means every reader either sees a fully-written file or the
+/// previous one, never a torn write.
+///
+/// Residual limitation (not solved here, and not solvable without changing
+/// how callers reference sessions): a caller already holding a
+/// [`crate::review_store::SessionRef`]/path for the *old* head, obtained
+/// *before* this rebind runs, can still validly write to that now-orphaned
+/// old-head file afterwards — its own critical section is still correctly
+/// serialized and durable, but the manifest/lineage lookup will no longer
+/// surface it, since the old file is intentionally left in place (not
+/// deleted or aliased) rather than migrated forward automatically. Callers
+/// that always re-resolve a session by lineage before writing are
+/// unaffected; callers holding a long-lived stale `SessionRef` across a
+/// head change are not.
+pub(crate) fn rebind_pr_session_to_head_in_dir(
+    reviews_dir: &Path,
+    new_key: &PrSessionKey,
+) -> Result<Option<(PathBuf, ReviewSession)>> {
+    maybe_migrate(reviews_dir)?;
+    with_reviews_dir_lock(reviews_dir, || {
+        let slug: Slug = new_key.into();
+        let manifest = manifest::load_manifest(reviews_dir).unwrap_or_default();
+        let Some(entry) = manifest.get_pr(&slug.to_string()) else {
+            return Ok(None);
+        };
+
+        let full_path = reviews_dir.join(&entry.path);
+        let mut session = load_session(&full_path)?;
+        session.pr_session_key = Some(new_key.clone());
+        let saved_path = save_session_in_dir_unlocked(&session, reviews_dir)?;
+        Ok(Some((saved_path, session)))
+    })
+}
+
 /// Look up the persisted PR session for a key's *lineage* (forge kind +
 /// host + owner/repo + PR number), ignoring `head_sha`.
 ///
