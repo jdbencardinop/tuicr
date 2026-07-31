@@ -426,13 +426,15 @@ fn generate_markdown(
         }
         local_section_written = true;
     }
-    // Dedup guard: a durable Thread can mirror several legacy comments
-    // grouped at one anchor (see
-    // `ReviewSession::migrate_legacy_comments_to_threads`), so this stops a
-    // thread's native-only replies (no legacy `Comment` counterpart — see
-    // `App::reply_to_thread_at_cursor`) from being printed once per legacy
-    // comment in the group instead of once total.
-    let mut rendered_native_reply_threads: HashSet<crate::model::thread::ThreadId> = HashSet::new();
+    // A durable Thread can mirror several legacy comments grouped at one
+    // anchor (see `ReviewSession::migrate_legacy_comments_to_threads`), so
+    // native-only replies (no legacy `Comment` counterpart — see
+    // `App::reply_to_thread_at_cursor`) must print exactly once, after the
+    // *last* legacy comment in the group — see
+    // `ReviewSession::is_last_legacy_comment_for_thread`, the single shared
+    // predicate this loop, `App::splice_native_thread_replies`, and
+    // `ui::diff_view::push_native_thread_replies` all use, so the three
+    // can never independently drift into different orderings.
     for (i, (file, line_range, side, comment_type, content, commit_id, comment_id, author)) in
         all_comments.iter().enumerate()
     {
@@ -499,9 +501,10 @@ fn generate_markdown(
         // Thread-native replies with no legacy `Comment` counterpart (added
         // via the TUI's thread-reply keybinding) have no other export
         // representation at all, so surface them indented under the root
-        // comment they belong to, once per thread.
+        // comment they belong to, once per thread, after the last
+        // grouped legacy comment.
         if let Some(persisted) = thread
-            && rendered_native_reply_threads.insert(persisted.id().clone())
+            && session.is_last_legacy_comment_for_thread(comment_id)
         {
             for reply in persisted.thread.comments() {
                 if session.is_legacy_comment_id(reply.id().as_str()) {
@@ -1310,6 +1313,23 @@ mod tests {
                 .count(),
             1,
             "expected the native reply exactly once in:\n{markdown}"
+        );
+
+        // and it prints in the correct root -> legacy reply -> native
+        // reply order (not merely present/counted once) - i.e. after
+        // BOTH grouped legacy comment bodies, not spliced between them.
+        let root_pos = markdown
+            .find("Magic number should be a constant")
+            .expect("root comment body rendered");
+        let legacy_reply_pos = markdown
+            .find("agreed, let's fix")
+            .expect("legacy reply body rendered");
+        let native_pos = markdown
+            .find("one native reply")
+            .expect("native reply body rendered");
+        assert!(
+            root_pos < legacy_reply_pos && legacy_reply_pos < native_pos,
+            "expected markdown order root({root_pos}) < legacy reply({legacy_reply_pos}) < native({native_pos}) in:\n{markdown}"
         );
     }
 

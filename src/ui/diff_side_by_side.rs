@@ -226,14 +226,6 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
     let mut lines: Vec<Line> = Vec::new();
     let mut line_idx: usize = 0;
 
-    // Dedup guard so a thread with multiple legacy comments grouped into it
-    // (see `ReviewSession::migrate_legacy_comments_to_threads`) only has its
-    // native-only (no legacy shadow) replies rendered once, not once per
-    // legacy comment in the group.
-    let mut rendered_native_reply_threads: std::collections::HashSet<
-        crate::model::thread::ThreadId,
-    > = std::collections::HashSet::new();
-
     // Track cursor position for IME when in Comment mode
     let mut comment_cursor_logical_line: Option<usize> = None;
     let mut comment_cursor_column: u16 = 0;
@@ -339,7 +331,6 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
                 &app.theme,
                 ctx.panel_width.saturating_sub(1),
                 ctx.current_line_idx,
-                &mut rendered_native_reply_threads,
                 &mut lines,
                 &mut line_idx,
             );
@@ -530,7 +521,6 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
                         &app.theme,
                         ctx.panel_width.saturating_sub(1),
                         ctx.current_line_idx,
-                        &mut rendered_native_reply_threads,
                         &mut lines,
                         &mut line_idx,
                     );
@@ -1789,13 +1779,6 @@ fn add_comments_to_line(
         && file_idx == ctx.current_file_idx
         && ctx.comment_line == Some((line_num, side));
     let mut cursor_info_out: Option<SideBySideCursorInfo> = None;
-    // Dedup guard so a thread with multiple legacy comments grouped into it
-    // (see `ReviewSession::migrate_legacy_comments_to_threads`) only has its
-    // native-only (no legacy shadow) replies rendered once per call, not
-    // once per legacy comment in the group.
-    let mut rendered_native_reply_threads: std::collections::HashSet<
-        crate::model::thread::ThreadId,
-    > = std::collections::HashSet::new();
 
     if let Some(comments) = line_comments.get(&line_num) {
         for comment in comments {
@@ -1894,7 +1877,6 @@ fn add_comments_to_line(
                         ctx.theme,
                         ctx.panel_width.saturating_sub(1),
                         ctx.current_line_idx,
-                        &mut rendered_native_reply_threads,
                         lines,
                         &mut line_idx,
                     );
@@ -1955,7 +1937,9 @@ mod remote_comments_side_by_side_snapshot_tests {
     //! Render-snapshot tests for inline remote review threads in the
     //! side-by-side diff view. Confirms the badge appears at least once
     //! when a thread is active and is hidden under `:comments hide`.
-    use crate::app::{App, DiffSource, DiffViewMode, InputMode, PullRequestDiffSource};
+    use crate::app::{
+        AnnotatedLine, App, DiffSource, DiffViewMode, InputMode, PullRequestDiffSource,
+    };
     use crate::error::Result as TuicrResult;
     use crate::error::TuicrError;
     use crate::forge::remote_comments::{
@@ -1963,7 +1947,8 @@ mod remote_comments_side_by_side_snapshot_tests {
     };
     use crate::forge::traits::{ForgeRepository, PrSessionKey};
     use crate::model::{
-        DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin, ReviewSession, SessionDiffSource,
+        DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin, LineSide, ReviewSession,
+        SessionDiffSource,
     };
     use crate::syntax::SyntaxHighlighter;
     use crate::theme::Theme;
@@ -2172,6 +2157,143 @@ mod remote_comments_side_by_side_snapshot_tests {
         assert!(
             !body.contains("[github @alice"),
             "remote comment leaked under Hide:\n{body}"
+        );
+    }
+
+    /// Render-output regression, side-by-side counterpart of
+    /// `diff_unified`'s `should_render_grouped_legacy_replies_before_native_reply_in_unified_view`:
+    /// a thread grouped from two same-anchor legacy line comments plus one
+    /// native-only reply must render root -> legacy reply -> native reply
+    /// in this view too, since both views share
+    /// `ui::diff_view::push_native_thread_replies` and its
+    /// `ReviewSession::is_last_legacy_comment_for_thread` predicate.
+    #[test]
+    fn should_render_grouped_legacy_replies_before_native_reply_in_side_by_side_view() {
+        use crate::review_store::{AddCommentRequest, CommentTarget, add_comment_to_session};
+
+        // given two legacy line comments at the exact same anchor (line 2,
+        // New side) on the PR test app's sample file - these migrate into
+        // a single thread: root + 1 legacy reply.
+        let mut app = make_pr_app();
+        let root = add_comment_to_session(
+            &mut app.session,
+            AddCommentRequest {
+                target: CommentTarget::Line {
+                    path: PathBuf::from("src/lib.rs"),
+                    line: 2,
+                    side: LineSide::New,
+                },
+                content: "sbs root legacy".to_string(),
+                comment_type: crate::model::CommentType::from_id("note"),
+                author: "reviewer".to_string(),
+                commit_id: None,
+            },
+        )
+        .unwrap();
+        add_comment_to_session(
+            &mut app.session,
+            AddCommentRequest {
+                target: CommentTarget::Line {
+                    path: PathBuf::from("src/lib.rs"),
+                    line: 2,
+                    side: LineSide::New,
+                },
+                content: "sbs legacy reply".to_string(),
+                comment_type: crate::model::CommentType::from_id("note"),
+                author: "reviewer".to_string(),
+                commit_id: None,
+            },
+        )
+        .unwrap();
+        app.session.migrate_legacy_comments_to_threads();
+        let thread_id = app
+            .session
+            .find_thread_by_legacy_comment_id(&root.id)
+            .expect("legacy comments migrated to a thread")
+            .id()
+            .clone();
+        assert_eq!(
+            app.session
+                .find_thread(&thread_id)
+                .unwrap()
+                .thread
+                .comments()
+                .len(),
+            2,
+            "thread should have root + legacy reply before the native reply is added"
+        );
+
+        // when a native-only reply (no legacy `Comment` counterpart) is
+        // appended
+        app.session
+            .find_thread_mut(&thread_id)
+            .expect("thread exists")
+            .thread
+            .reply(crate::model::thread::ThreadComment::new(
+                crate::model::thread::ThreadAuthor::human("carol"),
+                "sbs native reply",
+            ));
+        app.rebuild_annotations();
+
+        // then `line_annotations` shows the native reply spliced after
+        // BOTH legacy comment blocks, not between them.
+        let root_row = app
+            .line_annotations
+            .iter()
+            .position(|a| {
+                matches!(
+                    a,
+                    AnnotatedLine::LineComment {
+                        line: 2,
+                        side: LineSide::New,
+                        comment_idx: 0,
+                        ..
+                    }
+                )
+            })
+            .expect("root legacy comment has an annotation row");
+        let legacy_reply_row = app
+            .line_annotations
+            .iter()
+            .position(|a| {
+                matches!(
+                    a,
+                    AnnotatedLine::LineComment {
+                        line: 2,
+                        side: LineSide::New,
+                        comment_idx: 1,
+                        ..
+                    }
+                )
+            })
+            .expect("legacy-mirrored reply has an annotation row");
+        let native_row = app
+            .line_annotations
+            .iter()
+            .position(|a| matches!(a, AnnotatedLine::ThreadNativeReply { thread_id: id } if *id == thread_id))
+            .expect("native reply has a spliced annotation row");
+        assert!(
+            root_row < legacy_reply_row && legacy_reply_row < native_row,
+            "expected annotation order root({root_row}) < legacy reply({legacy_reply_row}) < native({native_row})"
+        );
+
+        // and the actual rendered text is in the same order (not just the
+        // annotation bookkeeping) - a tall viewport is used so all three
+        // comment blocks are simultaneously visible without scrolling.
+        let buffer = draw_sbs(&mut app, 160, 60);
+        let body = body_text(&buffer);
+        let root_pos = body
+            .find("sbs root legacy")
+            .expect("root comment body rendered");
+        let legacy_reply_pos = body
+            .find("sbs legacy reply")
+            .expect("legacy reply body rendered");
+        let native_pos = body
+            .find("sbs native reply")
+            .expect("native reply body rendered");
+        assert!(
+            root_pos < legacy_reply_pos && legacy_reply_pos < native_pos,
+            "expected rendered order root({root_pos}) < legacy reply({legacy_reply_pos}) < native({native_pos}) in:\n{body}"
         );
     }
 

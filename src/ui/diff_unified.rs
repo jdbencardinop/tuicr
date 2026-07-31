@@ -55,14 +55,6 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
     let mut line_idx: usize = 0;
     let current_line_idx = app.diff_state.cursor_line;
 
-    // Dedup guard so a thread with multiple legacy comments grouped into it
-    // (see `ReviewSession::migrate_legacy_comments_to_threads`) only has its
-    // native-only (no legacy shadow) replies rendered once, not once per
-    // legacy comment in the group.
-    let mut rendered_native_reply_threads: std::collections::HashSet<
-        crate::model::thread::ThreadId,
-    > = std::collections::HashSet::new();
-
     // Only build the expensive per-diff-line spans for lines that are actually
     // visible. Everything else still pushes (cheap) so `lines.len()` keeps
     // matching `line_idx`, but the hot inner loops push `Line::default()` for
@@ -180,7 +172,6 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                 &app.theme,
                 comment_width,
                 current_line_idx,
-                &mut rendered_native_reply_threads,
                 &mut lines,
                 &mut line_idx,
             );
@@ -378,7 +369,6 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                         &app.theme,
                         comment_width,
                         current_line_idx,
-                        &mut rendered_native_reply_threads,
                         &mut lines,
                         &mut line_idx,
                     );
@@ -760,7 +750,6 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                                             &app.theme,
                                             comment_width,
                                             current_line_idx,
-                                            &mut rendered_native_reply_threads,
                                             &mut lines,
                                             &mut line_idx,
                                         );
@@ -940,7 +929,6 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                                             &app.theme,
                                             comment_width,
                                             current_line_idx,
-                                            &mut rendered_native_reply_threads,
                                             &mut lines,
                                             &mut line_idx,
                                         );
@@ -1391,6 +1379,7 @@ mod remote_comments_snapshot_tests {
     //! Render-snapshot tests for inline remote review threads in the
     //! unified diff. We drive `ui::render` against `TestBackend` and check
     //! for the `[github @author]` badge text on the expected row.
+    use crate::app::AnnotatedLine;
     use crate::app::{App, DiffSource, InputMode, PullRequestDiffSource};
     use crate::error::Result as TuicrResult;
     use crate::error::TuicrError;
@@ -1780,6 +1769,166 @@ mod remote_comments_snapshot_tests {
             body.contains("Sounds good to me"),
             "expected the native reply's body in:\n{body}"
         );
+    }
+
+    /// Render-output regression for the annotations/render desync fix:
+    /// `push_native_thread_replies` and `App::splice_native_thread_replies`
+    /// now share one predicate
+    /// (`ReviewSession::is_last_legacy_comment_for_thread`), so for a
+    /// thread grouped from two same-anchor legacy line comments (root +
+    /// legacy reply) plus one native-only reply, the actual *rendered*
+    /// row order and `line_annotations` row order must both be
+    /// root -> legacy reply -> native reply — not root -> native -> legacy
+    /// (which is what rendering after the *first* legacy comment, as the
+    /// old per-renderer `HashSet` dedup did, would have produced).
+    #[test]
+    fn should_render_grouped_legacy_replies_before_native_reply_in_unified_view() {
+        use crate::review_store::{AddCommentRequest, CommentTarget, add_comment_to_session};
+
+        // given two legacy line comments at the exact same anchor (line 2,
+        // New side) - these migrate into a single thread: root + 1 legacy
+        // reply.
+        let mut app = make_revision_app(vec![sample_diff_file()]);
+        let root = add_comment_to_session(
+            &mut app.session,
+            AddCommentRequest {
+                target: CommentTarget::Line {
+                    path: PathBuf::from("src/lib.rs"),
+                    line: 2,
+                    side: LineSide::New,
+                },
+                content: "root legacy comment".to_string(),
+                comment_type: crate::model::CommentType::from_id("note"),
+                author: "reviewer".to_string(),
+                commit_id: None,
+            },
+        )
+        .unwrap();
+        add_comment_to_session(
+            &mut app.session,
+            AddCommentRequest {
+                target: CommentTarget::Line {
+                    path: PathBuf::from("src/lib.rs"),
+                    line: 2,
+                    side: LineSide::New,
+                },
+                content: "legacy mirrored reply".to_string(),
+                comment_type: crate::model::CommentType::from_id("note"),
+                author: "reviewer".to_string(),
+                commit_id: None,
+            },
+        )
+        .unwrap();
+        app.session.migrate_legacy_comments_to_threads();
+        let thread_id = app
+            .session
+            .find_thread_by_legacy_comment_id(&root.id)
+            .expect("legacy comments migrated to a thread")
+            .id()
+            .clone();
+        assert_eq!(
+            app.session
+                .find_thread(&thread_id)
+                .unwrap()
+                .thread
+                .comments()
+                .len(),
+            2,
+            "thread should have root + legacy reply before the native reply is added"
+        );
+
+        // when a native-only reply (no legacy `Comment` counterpart) is
+        // appended
+        app.session
+            .find_thread_mut(&thread_id)
+            .expect("thread exists")
+            .thread
+            .reply(crate::model::thread::ThreadComment::new(
+                crate::model::thread::ThreadAuthor::human("carol"),
+                "native only reply text",
+            ));
+        app.rebuild_annotations();
+
+        // then `line_annotations` shows the native reply spliced after
+        // BOTH legacy comment blocks, not between them. `LineComment`'s
+        // `comment_idx` is the index into that (line, side)'s legacy
+        // `line_comments` bucket, so 0 is the root and 1 is the
+        // legacy-mirrored reply, matching insertion order above.
+        let root_row = app
+            .line_annotations
+            .iter()
+            .position(|a| {
+                matches!(
+                    a,
+                    AnnotatedLine::LineComment {
+                        line: 2,
+                        side: LineSide::New,
+                        comment_idx: 0,
+                        ..
+                    }
+                )
+            })
+            .expect("root legacy comment has an annotation row");
+        let legacy_reply_row = app
+            .line_annotations
+            .iter()
+            .position(|a| {
+                matches!(
+                    a,
+                    AnnotatedLine::LineComment {
+                        line: 2,
+                        side: LineSide::New,
+                        comment_idx: 1,
+                        ..
+                    }
+                )
+            })
+            .expect("legacy-mirrored reply has an annotation row");
+        let native_row = app
+            .line_annotations
+            .iter()
+            .position(|a| matches!(a, AnnotatedLine::ThreadNativeReply { thread_id: id } if *id == thread_id))
+            .expect("native reply has a spliced annotation row");
+        assert!(
+            root_row < legacy_reply_row && legacy_reply_row < native_row,
+            "expected annotation order root({root_row}) < legacy reply({legacy_reply_row}) < native({native_row})"
+        );
+
+        // and the actual rendered text is in the same root -> legacy reply
+        // -> native reply order (not just the annotation bookkeeping) -
+        // this is the render/annotation desync this fix closes. A tall
+        // viewport is used so all three comment blocks are simultaneously
+        // visible without scrolling.
+        let backend = TestBackend::new(100, 60);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_unified_diff(frame, &mut app, Rect::new(0, 0, 100, 60)))
+            .expect("draw unified diff");
+        let buffer = terminal.backend().buffer().clone();
+        let body = body_text(&buffer);
+        let root_pos = body
+            .find("root legacy comment")
+            .expect("root comment body rendered");
+        let legacy_reply_pos = body
+            .find("legacy mirrored reply")
+            .expect("legacy reply body rendered");
+        let native_pos = body
+            .find("native only reply text")
+            .expect("native reply body rendered");
+        assert!(
+            root_pos < legacy_reply_pos && legacy_reply_pos < native_pos,
+            "expected rendered order root({root_pos}) < legacy reply({legacy_reply_pos}) < native({native_pos}) in:\n{body}"
+        );
+
+        // and the rendered row order for these same annotation rows
+        // matches: the diff view renders `line_annotations` in order, one
+        // rendered row per annotation row for non-wrapped single-line
+        // comment bodies, so `native_row` being strictly after both
+        // `root_row`/`legacy_reply_row` (already asserted above) is
+        // exactly the row-alignment/hit-testing guarantee cursor-based
+        // reply/resolve/dismiss keybindings rely on
+        // (`App::thread_id_at_cursor`, exercised directly in
+        // `app::tests::thread_navigator_tests`).
     }
 
     // Revision diffs with `wrap = true` render the file-header rule without a

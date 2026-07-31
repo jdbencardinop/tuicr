@@ -182,6 +182,108 @@ fn should_splice_a_thread_native_reply_annotation_for_a_review_level_thread() {
     ));
 }
 
+/// Finding 3 audit: file-level comments (`sync_single_comment_thread`,
+/// the same non-grouping path `review_comments` uses) never group two
+/// file-level comments into one thread — each becomes its own
+/// single-comment thread — so there is no last-legacy-comment ambiguity
+/// to get wrong for this anchor kind either.
+#[test]
+fn should_splice_a_thread_native_reply_annotation_for_a_file_level_thread() {
+    // given two separate file-level comments on the same file (each
+    // migrates into its own thread, not a shared one) and a native-only
+    // reply appended to only the first thread
+    let file = make_file("src/lib.rs", vec![make_hunk(1, 3)]);
+    let mut app = build_app(vec![file]);
+    let comment_type = app.default_comment_type();
+    let first = add_comment_to_session(
+        &mut app.session,
+        AddCommentRequest {
+            target: CommentTarget::File {
+                path: PathBuf::from("src/lib.rs"),
+            },
+            content: "first file-level comment".to_string(),
+            comment_type: comment_type.clone(),
+            author: "reviewer".to_string(),
+            commit_id: None,
+        },
+    )
+    .unwrap();
+    let second = add_comment_to_session(
+        &mut app.session,
+        AddCommentRequest {
+            target: CommentTarget::File {
+                path: PathBuf::from("src/lib.rs"),
+            },
+            content: "second file-level comment".to_string(),
+            comment_type: comment_type.clone(),
+            author: "reviewer".to_string(),
+            commit_id: None,
+        },
+    )
+    .unwrap();
+    app.session.migrate_legacy_comments_to_threads();
+
+    let first_thread_id = app
+        .session
+        .find_thread_by_legacy_comment_id(&first.id)
+        .unwrap()
+        .id()
+        .clone();
+    let second_thread_id = app
+        .session
+        .find_thread_by_legacy_comment_id(&second.id)
+        .unwrap()
+        .id()
+        .clone();
+    assert_ne!(
+        first_thread_id, second_thread_id,
+        "file-level comments never group into one thread"
+    );
+
+    app.session
+        .find_thread_mut(&first_thread_id)
+        .unwrap()
+        .thread
+        .reply(crate::model::thread::ThreadComment::new(
+            crate::model::thread::ThreadAuthor::human("alice"),
+            "reply on first file comment's thread only".to_string(),
+        ));
+
+    // when annotations are rebuilt
+    app.rebuild_annotations();
+
+    // then only the first thread has a spliced native reply, and it
+    // lands immediately after the first file comment's own block (before
+    // the second file comment's block, which is unaffected).
+    let native_reply_thread_ids = thread_native_reply_positions(&app);
+    assert!(!native_reply_thread_ids.is_empty());
+    assert!(
+        native_reply_thread_ids
+            .iter()
+            .all(|id| *id == first_thread_id)
+    );
+
+    let first_comment_end = app
+        .line_annotations
+        .iter()
+        .rposition(|a| matches!(a, AnnotatedLine::FileComment { comment_idx: 0, .. }))
+        .unwrap();
+    let second_comment_row = app
+        .line_annotations
+        .iter()
+        .position(|a| matches!(a, AnnotatedLine::FileComment { comment_idx: 1, .. }))
+        .unwrap();
+    assert!(matches!(
+        app.line_annotations[first_comment_end + 1],
+        AnnotatedLine::ThreadNativeReply { .. }
+    ));
+    assert!(
+        second_comment_row > first_comment_end,
+        "second file comment's own block must not be disturbed by the first \
+         thread's spliced reply"
+    );
+}
+
 #[test]
 fn should_resolve_thread_id_at_cursor_directly_from_a_thread_native_reply_row() {
     // given a review comment's thread with a native-only reply, cursor
@@ -957,6 +1059,136 @@ mod remote_thread_overlay_rendering {
                 .map(|o| o.local_only_replies.len())
                 .unwrap_or(0),
             1
+        );
+    }
+
+    /// Finding 3 audit: two distinct threads anchored effectively at the
+    /// same source line — a bare line comment and a range comment ending
+    /// on that same line number share the file's `line_comments` HashMap
+    /// bucket (see `migrate_legacy_comments_to_threads`'s grouping
+    /// comment), but differ in `(side, line_range)` so they migrate into
+    /// two *separate* `PersistedThread`s, not one grouped thread. A
+    /// native-only reply added to only one of them must not leak into,
+    /// duplicate onto, or reorder the other thread's own legacy block.
+    #[test]
+    fn should_not_cross_contaminate_native_replies_between_two_threads_sharing_a_line_bucket() {
+        // given a bare line comment on line 5 (New side) and a distinct
+        // range comment spanning lines 3-5 (also New side) - both land in
+        // `line_comments[&5]` but form two separate anchors/threads.
+        let hunk = make_hunk(1, 10);
+        let file = make_file("src/lib.rs", vec![hunk]);
+        let mut app = build_app(vec![file]);
+        let comment_type = app.default_comment_type();
+
+        let bare_line_comment = add_comment_to_session(
+            &mut app.session,
+            AddCommentRequest {
+                target: CommentTarget::Line {
+                    path: PathBuf::from("src/lib.rs"),
+                    line: 5,
+                    side: LineSide::New,
+                },
+                content: "bare line thread root".to_string(),
+                comment_type: comment_type.clone(),
+                author: "reviewer".to_string(),
+                commit_id: None,
+            },
+        )
+        .unwrap();
+        let range_comment = add_comment_to_session(
+            &mut app.session,
+            AddCommentRequest {
+                target: CommentTarget::LineRange {
+                    path: PathBuf::from("src/lib.rs"),
+                    range: crate::model::LineRange { start: 3, end: 5 },
+                    side: LineSide::New,
+                },
+                content: "range thread root".to_string(),
+                comment_type: comment_type.clone(),
+                author: "reviewer".to_string(),
+                commit_id: None,
+            },
+        )
+        .unwrap();
+        app.session.migrate_legacy_comments_to_threads();
+
+        let bare_thread_id = app
+            .session
+            .find_thread_by_legacy_comment_id(&bare_line_comment.id)
+            .unwrap()
+            .id()
+            .clone();
+        let range_thread_id = app
+            .session
+            .find_thread_by_legacy_comment_id(&range_comment.id)
+            .unwrap()
+            .id()
+            .clone();
+        assert_ne!(
+            bare_thread_id, range_thread_id,
+            "a bare line comment and a same-ending-line range comment must migrate \
+             into two distinct threads, not be grouped into one"
+        );
+
+        // when a native-only reply is appended to the bare-line thread
+        // only
+        app.session
+            .find_thread_mut(&bare_thread_id)
+            .unwrap()
+            .thread
+            .reply(crate::model::thread::ThreadComment::new(
+                crate::model::thread::ThreadAuthor::human("alice"),
+                "reply on bare line thread only".to_string(),
+            ));
+        app.rebuild_annotations();
+
+        // then only `ThreadNativeReply` rows for the bare-line thread
+        // exist (the badge + body lines the renderer produces for one
+        // reply) - the range thread's own legacy block is untouched (no
+        // reply spliced onto it, and none of its rows carry a
+        // `range_thread_id`).
+        let native_reply_thread_ids = thread_native_reply_positions(&app);
+        assert!(
+            !native_reply_thread_ids.is_empty(),
+            "expected at least one spliced ThreadNativeReply row"
+        );
+        assert!(
+            native_reply_thread_ids
+                .iter()
+                .all(|id| *id == bare_thread_id),
+            "expected every spliced ThreadNativeReply row to belong to the bare-line \
+             thread only, got {native_reply_thread_ids:?}"
+        );
+
+        // and the range thread's own legacy comment is still last-legacy
+        // for its own thread (untouched by the other thread's mutation),
+        // while the bare-line thread's legacy comment stays last-legacy
+        // for its own thread too.
+        assert!(
+            app.session
+                .is_last_legacy_comment_for_thread(&range_comment.id)
+        );
+        assert!(
+            app.session
+                .is_last_legacy_comment_for_thread(&bare_line_comment.id)
+        );
+
+        // and both threads' own legacy rows are still present, distinct,
+        // and not reordered relative to each other by the splice.
+        let bare_row = app.line_annotations.iter().position(|a| {
+            matches!(
+                a,
+                AnnotatedLine::LineComment {
+                    line: 5,
+                    side: LineSide::New,
+                    comment_idx: 0,
+                    ..
+                }
+            )
+        });
+        assert!(
+            bare_row.is_some(),
+            "expected the bare-line comment's own row"
         );
     }
 }

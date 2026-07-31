@@ -308,6 +308,43 @@ impl ReviewSession {
             })
     }
 
+    /// Whether `comment_id` is the *last* legacy-mirrored comment (in the
+    /// migrated durable thread's own chronological `comments()` order)
+    /// belonging to its thread — i.e. the single correct place to splice/
+    /// append/print that thread's native-only replies (no legacy `Comment`
+    /// counterpart) during render or export, regardless of how many other
+    /// same-anchor legacy comments were grouped into the same thread by
+    /// [`Self::migrate_legacy_comments_to_threads`].
+    ///
+    /// A thread's `comments()` are always in the order they were added:
+    /// root, then any legacy-mirrored replies grouped at the same anchor
+    /// (in the order `migrate_legacy_comments_to_threads` synced them),
+    /// then any native-only replies (always appended after via
+    /// `Thread::reply`, since a native reply can only be added once the
+    /// thread already exists). So the last legacy id in that order is
+    /// always immediately followed only by native-only replies (if any) —
+    /// making it the correct splice point.
+    ///
+    /// This is the single shared predicate every render/export path
+    /// (`App::splice_native_thread_replies`, `ui::diff_view::push_native_thread_replies`,
+    /// and `output::markdown`'s remote/local export loops) must use to
+    /// decide *where* to emit a thread's native-only replies, so the three
+    /// can never independently drift into different orderings for a
+    /// grouped multi-comment thread. Returns `false` when `comment_id` has
+    /// no thread at all (nothing to splice).
+    pub fn is_last_legacy_comment_for_thread(&self, comment_id: &str) -> bool {
+        let Some(persisted) = self.find_thread_by_legacy_comment_id(comment_id) else {
+            return false;
+        };
+        persisted
+            .thread
+            .comments()
+            .iter()
+            .rev()
+            .find(|c| self.is_legacy_comment_id(c.id().as_str()))
+            .is_some_and(|c| c.id().as_str() == comment_id)
+    }
+
     /// Find a thread previously imported/mapped from `provider` under
     /// `provider_id`. Used by (future) provider adapters to make repeated
     /// import/sync passes idempotent instead of creating duplicate threads.

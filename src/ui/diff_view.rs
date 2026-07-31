@@ -246,38 +246,38 @@ pub(super) fn cursor_indicator_spaced(line_idx: usize, current_line_idx: usize) 
 /// Push any thread-native-only replies (no legacy `Comment` counterpart —
 /// see `comment_panel::format_thread_native_reply_lines`) for the thread
 /// mirroring legacy `comment_id`, right after that legacy comment's own box
-/// has just been rendered. `rendered_native_reply_threads` is a per-render-
-/// pass dedup guard (declared once by the caller) so a thread with several
-/// legacy comments grouped into it (line/range anchors —
-/// see `ReviewSession::migrate_legacy_comments_to_threads`) only has its
-/// native replies rendered once, not once per legacy comment in the group.
-/// No-op (nothing pushed) when the legacy comment has no thread, or its
-/// thread's native replies were already rendered by an earlier call in this
-/// pass, or it simply has none.
+/// has just been rendered. Only actually renders anything when `comment_id`
+/// is [`ReviewSession::is_last_legacy_comment_for_thread`] — the single
+/// shared predicate that also drives `App::splice_native_thread_replies`
+/// (`src/app/annotations.rs`) and `output::markdown`'s export loop — so a
+/// thread with several legacy comments grouped into it (line/range anchors
+/// — see `ReviewSession::migrate_legacy_comments_to_threads`) has its
+/// native replies rendered exactly once, after the *last* legacy comment in
+/// the group, never after an earlier one. No-op (nothing pushed) when the
+/// legacy comment has no thread, isn't its thread's last legacy comment, or
+/// the thread simply has no native-only replies.
 ///
 /// `App::splice_native_thread_replies` (`src/app/annotations.rs`) mirrors
-/// this exact line-count/dedup logic to emit a matching
+/// this exact line-count/splice-point logic to emit a matching
 /// `AnnotatedLine::ThreadNativeReply` entry per row pushed here — keeping
 /// `line_annotations.len()` in lockstep with the `Vec<Line>` this function
 /// actually renders. If either side's line-count math changes, the other
 /// must change with it or cursor hit-testing desyncs past this point.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn push_native_thread_replies<'a>(
     app: &App,
     comment_id: &str,
     theme: &Theme,
     width: usize,
     current_line_idx: usize,
-    rendered_native_reply_threads: &mut std::collections::HashSet<crate::model::thread::ThreadId>,
     lines: &mut Vec<Line<'a>>,
     line_idx: &mut usize,
 ) {
+    if !app.session.is_last_legacy_comment_for_thread(comment_id) {
+        return;
+    }
     let Some(persisted) = app.session.find_thread_by_legacy_comment_id(comment_id) else {
         return;
     };
-    if !rendered_native_reply_threads.insert(persisted.id().clone()) {
-        return;
-    }
     let extra_lines = comment_panel::format_thread_native_reply_lines(
         theme,
         &persisted.thread,

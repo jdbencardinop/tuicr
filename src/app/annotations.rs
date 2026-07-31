@@ -387,52 +387,18 @@ impl App {
     /// matching annotation at all, silently desyncing cursor hit-testing
     /// for every line after the first thread with a native-only reply).
     ///
-    /// A thread's native replies are spliced in exactly once, tracked via
-    /// `rendered`, even though `migrate_legacy_comments_to_threads` may
-    /// have grouped several legacy comments (root + replies) into the
-    /// same thread — so more than one legacy id in the annotation stream
-    /// can resolve to the same `ThreadId`.
+    /// A thread's native replies are spliced in exactly once, at the
+    /// block-end of its *last* legacy comment
+    /// ([`crate::model::review::ReviewSession::is_last_legacy_comment_for_thread`]
+    /// — the single shared predicate `ui::diff_view::push_native_thread_replies`
+    /// and `output::markdown`'s export loop also use, so the three can
+    /// never independently drift into different orderings), even though
+    /// `migrate_legacy_comments_to_threads` may have grouped several
+    /// legacy comments (root + replies) into the same thread — so more
+    /// than one legacy id in the annotation stream can resolve to the
+    /// same `ThreadId`.
     fn splice_native_thread_replies(&mut self) {
         if self.session.threads.is_empty() {
-            return;
-        }
-
-        // legacy comment id -> thread id, and thread id -> how many
-        // native-only reply lines it needs (0 => thread has no
-        // native-only content, so nothing to splice for it).
-        let mut thread_for_legacy_id: HashMap<String, crate::model::thread::ThreadId> =
-            HashMap::new();
-        let mut reply_count_for_thread: HashMap<crate::model::thread::ThreadId, usize> =
-            HashMap::new();
-        for persisted in &self.session.threads {
-            let mut has_legacy_comment = false;
-            for comment in persisted.thread.comments() {
-                let id = comment.id().as_str();
-                if self.session.is_legacy_comment_id(id) {
-                    thread_for_legacy_id.insert(id.to_string(), persisted.id().clone());
-                    has_legacy_comment = true;
-                }
-            }
-            // No legacy comment maps to this thread at all: it can't be
-            // spliced in relative to a legacy comment's block. (Making a
-            // legacy-shadowless thread visible on its own is a separate,
-            // documented follow-up — see the module-level thread docs.)
-            if !has_legacy_comment {
-                continue;
-            }
-            let n = crate::ui::comment_panel::format_thread_native_reply_lines(
-                &self.theme,
-                &persisted.thread,
-                |id| self.session.is_legacy_comment_id(id),
-                self.diff_state.viewport_width,
-            )
-            .len();
-            if n > 0 {
-                reply_count_for_thread.insert(persisted.id().clone(), n);
-            }
-        }
-
-        if reply_count_for_thread.is_empty() {
             return;
         }
 
@@ -448,46 +414,28 @@ impl App {
             })
             .collect();
 
-        // A thread can be grouped from several legacy comment ids (root +
-        // replies all migrated into one `Thread` — see
-        // `migrate_legacy_comments_to_threads`), so more than one
-        // block-end in the annotation stream can resolve to the same
-        // `ThreadId`. Splicing at the *first* such block-end (as opposed
-        // to the last) would insert native-only replies between two
-        // legacy comment boxes belonging to the same thread instead of
-        // after all of them, breaking the required root -> legacy replies
-        // -> native replies order. Find the last (highest-index)
-        // block-end per thread up front so the splice pass below only
-        // ever fires once, at the correct position.
-        let mut last_block_end_for_thread: HashMap<crate::model::thread::ThreadId, usize> =
-            HashMap::new();
-        for (i, comment_id) in ids.iter().enumerate() {
-            if !is_block_end[i] {
-                continue;
-            }
-            let Some(comment_id) = comment_id else {
-                continue;
-            };
-            let Some(thread_id) = thread_for_legacy_id.get(comment_id) else {
-                continue;
-            };
-            if reply_count_for_thread.contains_key(thread_id) {
-                last_block_end_for_thread.insert(thread_id.clone(), i);
-            }
-        }
-
         let mut spliced: Vec<AnnotatedLine> = Vec::with_capacity(source.len());
         for (i, annotation) in source.into_iter().enumerate() {
             spliced.push(annotation);
-            if let Some(comment_id) = &ids[i]
-                && let Some(thread_id) = thread_for_legacy_id.get(comment_id)
-                && last_block_end_for_thread.get(thread_id) == Some(&i)
-                && let Some(&n) = reply_count_for_thread.get(thread_id)
+            if is_block_end[i]
+                && let Some(comment_id) = &ids[i]
+                && self.session.is_last_legacy_comment_for_thread(comment_id)
+                && let Some(persisted) = self.session.find_thread_by_legacy_comment_id(comment_id)
             {
-                for _ in 0..n {
-                    spliced.push(AnnotatedLine::ThreadNativeReply {
-                        thread_id: thread_id.clone(),
-                    });
+                let n = crate::ui::comment_panel::format_thread_native_reply_lines(
+                    &self.theme,
+                    &persisted.thread,
+                    |id| self.session.is_legacy_comment_id(id),
+                    self.diff_state.viewport_width,
+                )
+                .len();
+                if n > 0 {
+                    let thread_id = persisted.id().clone();
+                    for _ in 0..n {
+                        spliced.push(AnnotatedLine::ThreadNativeReply {
+                            thread_id: thread_id.clone(),
+                        });
+                    }
                 }
             }
         }
