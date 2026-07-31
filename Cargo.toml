@@ -1,6 +1,12 @@
 [package]
 name = "tuicr"
-version = "0.19.1"
+# Offline fork-candidate identity: a semver prerelease tag distinguishes this
+# build from real upstream `tuicr` releases (which never publish an
+# `-offline-candidate.N` version). The exact source commit is additionally
+# embedded at build time (see build.rs) and surfaced via `--version` as
+# `<version>+<short-sha>`, so this binary never reports an identity that
+# could be mistaken for an unmodified upstream release.
+version = "0.19.1-offline-candidate.1"
 edition = "2024"
 description = "Review AI-generated diffs like a GitHub pull request, right from your terminal."
 license = "MIT"
@@ -24,7 +30,15 @@ crossterm = "0.29"
 edtui = { version = "0.11", default-features = false }
 
 # Git operations
-git2 = { version = "0.20", default-features = false }
+#
+# `vendored-libgit2` pins the exact libgit2 build used on every platform to
+# the version bundled by the `libgit2-sys` crate (rather than whatever
+# libgit2 happens to be installed via Homebrew/apt/etc. on the build host),
+# so macOS and Linux offline-candidate builds link an identical, documented
+# libgit2 instead of two different system-provided ones. This repo never
+# performs network git operations (clone/fetch/push) via git2, so the
+# `https`/`ssh` default features are intentionally left disabled.
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

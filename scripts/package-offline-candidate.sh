@@ -128,8 +128,21 @@ SOURCE_SHA_FULL="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 SOURCE_SHA_SHORT="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
 SOURCE_BRANCH="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD)"
 REPO_REMOTE="$(git -C "$ROOT_DIR" remote get-url origin 2>/dev/null || echo "none")"
-VERSION="$(cargo metadata --locked --no-deps --format-version 1 2>/dev/null \
+# FORK_VERSION is Cargo.toml's full version, e.g. "0.19.1-offline-candidate.1"
+# -- a semver prerelease tag that can never collide with an unmodified
+# upstream release. UPSTREAM_BASE_VERSION strips that tag back to the
+# upstream baseline ("0.19.1") purely for archive-naming/doc-display
+# continuity with prior runs of this script.
+FORK_VERSION="$(cargo metadata --locked --no-deps --format-version 1 2>/dev/null \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+UPSTREAM_BASE_VERSION="${FORK_VERSION%%-*}"
+VERSION="$UPSTREAM_BASE_VERSION"
+# Exported so build.rs (both the native macOS build and the Linux container
+# build, which builds from a clean `git archive` checkout with no `.git`
+# directory to fall back on) embeds an identical, known-correct source SHA
+# into `--version` regardless of build environment.
+export TUICR_OFFLINE_CANDIDATE_SHA="$SOURCE_SHA_SHORT"
+EXPECTED_REPORTED_VERSION="tuicr ${FORK_VERSION}+${SOURCE_SHA_SHORT}"
 PACKAGED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 RUSTC_VERSION="$(rustc --version)"
 CARGO_VERSION="$(cargo --version)"
@@ -137,7 +150,8 @@ HOST_TRIPLE="$(rustc -vV | awk '/^host:/ {print $2}')"
 LINUX_BUILD_IMAGE_DIGEST="not-built"
 
 log "source commit: $SOURCE_SHA_FULL ($SOURCE_SHA_SHORT) on $SOURCE_BRANCH"
-log "upstream crate version: $VERSION"
+log "upstream baseline version: $UPSTREAM_BASE_VERSION / fork version: $FORK_VERSION"
+log "expected --version output: $EXPECTED_REPORTED_VERSION"
 log "toolchain: $RUSTC_VERSION / $CARGO_VERSION (host: $HOST_TRIPLE)"
 
 ARTIFACTS_JSONL="$WORK_DIR/artifacts.jsonl"
@@ -245,10 +259,13 @@ with open(out_path, "w") as out:
     out.write(
         "Generated from `cargo metadata --locked` (each crate's own declared "
         "`license` field, as published to the registry) -- no separate "
-        "license-audit tool was added for this. This is a summary for human "
-        "review, not a legal clearance; verify anything load-bearing against "
-        "the vendored source pinned in Cargo.lock before redistribution "
-        "decisions.\n\n"
+        "license-audit tool was added for this. **This is an audit aid, not "
+        "legal certification.** It is a summary for human review only; "
+        "verify anything load-bearing against the vendored source pinned in "
+        "Cargo.lock before redistribution decisions. It also does not cover "
+        "this repository's own MIT license/attribution -- see the bundled "
+        "`LICENSE` file (upstream MIT, unmodified) in each packaged "
+        "archive.\n\n"
     )
     out.write(f"Total third-party packages in the resolved dependency graph: {len(used_ids) - 1}\n\n")
     out.write("## By declared license\n\n")
@@ -264,6 +281,57 @@ with open(out_path, "w") as out:
             out.write(f"- {p}\n")
 print(f"license summary written: {out_path}", file=sys.stderr)
 PYEOF
+}
+
+# ---------------------------------------------------------------------------
+# Secret scan of the exact tracked source that will be built and of the
+# staged archive contents (binary + docs) before packaging. No new tool is
+# added -- this is a small grep-based pattern scan, recorded as an artifact
+# for human review, not a certification that no secret exists anywhere.
+# ---------------------------------------------------------------------------
+SECRET_SCAN_PATTERNS=(
+  'ghp_[0-9A-Za-z]{36}'
+  'gh[oesu]_[0-9A-Za-z]{36}'
+  'github_pat_[0-9A-Za-z_]{22,}'
+  'glpat-[0-9A-Za-z_-]{20}'
+  'AKIA[0-9A-Z]{16}'
+  'xox[baprs]-[0-9A-Za-z-]{10,}'
+  '-----BEGIN[A-Z ]*PRIVATE KEY-----'
+)
+
+run_secret_scan() {
+  local scan_root="$1" label="$2" report_file="$3"
+  local hits=0
+  {
+    echo "# Secret scan: $label"
+    echo
+    echo "Grep-based pattern scan over \`$scan_root\` (tracked source / staged"
+    echo "archive contents only, at commit $SOURCE_SHA_SHORT). This is an audit"
+    echo "aid, not a certification that no secret exists anywhere -- review any"
+    echo "hits below manually."
+    echo
+  } >> "$report_file"
+  for pattern in "${SECRET_SCAN_PATTERNS[@]}"; do
+    local matches
+    matches="$(grep -RIlE --exclude-dir=.git --exclude-dir=target "$pattern" "$scan_root" 2>/dev/null || true)"
+    if [[ -n "$matches" ]]; then
+      hits=$((hits + 1))
+      {
+        echo "## MATCH: pattern \`$pattern\`"
+        echo '```'
+        echo "$matches"
+        echo '```'
+        echo
+      } >> "$report_file"
+    fi
+  done
+  if [[ "$hits" -eq 0 ]]; then
+    echo "No matches for any of the ${#SECRET_SCAN_PATTERNS[@]} known secret patterns." >> "$report_file"
+    log "[$label] secret scan: no matches"
+  else
+    log "[$label] secret scan: $hits pattern(s) matched -- see $report_file"
+  fi
+  echo "$hits"
 }
 
 # ---------------------------------------------------------------------------
@@ -437,6 +505,7 @@ package_artifact() {
 
   local sed_script
   sed_script="s/@@ARCHIVE_NAME@@/${base_name}/g;"
+  sed_script+="s/@@FORK_VERSION@@/${FORK_VERSION}/g;"
   sed_script+="s/@@VERSION@@/${VERSION}/g;"
   sed_script+="s/@@SOURCE_SHA_SHORT@@/${SOURCE_SHA_SHORT}/g;"
   sed_script+="s/@@SOURCE_SHA_FULL@@/${SOURCE_SHA_FULL}/g;"
@@ -448,6 +517,8 @@ package_artifact() {
     sed -e "$sed_script" "$ROOT_DIR/docs/offline-candidate/$doc" > "$stage_dir/$doc"
   done
   cp "$ROOT_DIR/docs/offline-candidate/config.no-update-check.toml" "$stage_dir/config.no-update-check.toml"
+  cp "$ROOT_DIR/scripts/import-upstream-reviews.sh" "$stage_dir/import-upstream-reviews.sh"
+  chmod +x "$stage_dir/import-upstream-reviews.sh"
 
   local archive_path="$OUTPUT_DIR/${base_name}.tar.gz"
   rm -f "$archive_path"
@@ -458,6 +529,10 @@ package_artifact() {
   archive_sha256="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
   binary_size="$(wc -c < "$stage_dir/tuicr" | tr -d ' ')"
   archive_size="$(wc -c < "$archive_path" | tr -d ' ')"
+
+  # Secret scan the exact staged archive contents (binary + docs) before
+  # trusting the archive. No new tool added; see run_secret_scan().
+  run_secret_scan "$stage_dir" "$os-$arch staged archive" "$OUTPUT_DIR/manifest/SECRET-SCAN.md" >/dev/null
 
   # --- Verify: fresh extract + run --version + full CLI smoke ------------
   local verify_dir="$WORK_DIR/verify-${os}-${arch}"
@@ -475,8 +550,8 @@ package_artifact() {
 
   local reported_version
   reported_version="$(tuicr_smoke_exec "$WORK_DIR/home-version-check-$os" "$extracted_bin" --version)"
-  [[ "$reported_version" == "tuicr ${VERSION}" ]] \
-    || die "[$os] unexpected --version output: $reported_version"
+  [[ "$reported_version" == "$EXPECTED_REPORTED_VERSION" ]] \
+    || die "[$os] unexpected --version output: got '$reported_version', expected '$EXPECTED_REPORTED_VERSION'"
   tuicr_smoke_exec "$WORK_DIR/home-version-check-$os" "$extracted_bin" --help >/dev/null
 
   run_review_cli_smoke "$extracted_bin" "$os-$arch"
@@ -492,18 +567,39 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Clean-checkout source copy used for BOTH platform builds (not the live
+# working tree). This is a `git archive` of the exact packaged commit, so
+# only tracked files at that commit are present -- no `.tpatch` scratch
+# files, no untracked session/audit data, no `.git` internals, no local
+# env/config -- regardless of what else might exist untracked in the
+# working tree. The dirty-tree gate above already guarantees the tracked
+# tree matches this commit exactly.
+# ---------------------------------------------------------------------------
+make_clean_source_checkout() {
+  local dest_dir="$1"
+  mkdir -p "$dest_dir"
+  git -C "$ROOT_DIR" archive --format=tar "$SOURCE_SHA_FULL" | tar -x -C "$dest_dir"
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 run_prebuild_checks
 generate_dependency_snapshot "$OUTPUT_DIR/manifest"
 
+CLEAN_SRC_DIR="$WORK_DIR/clean-src"
+log "building a clean git-archive checkout of $SOURCE_SHA_SHORT (used for both platform builds)"
+make_clean_source_checkout "$CLEAN_SRC_DIR"
+: > "$OUTPUT_DIR/manifest/SECRET-SCAN.md"
+run_secret_scan "$CLEAN_SRC_DIR" "clean source checkout ($SOURCE_SHA_SHORT)" "$OUTPUT_DIR/manifest/SECRET-SCAN.md" >/dev/null
+
 if [[ "$SKIP_MACOS" -eq 0 ]]; then
   if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "x86_64" ]]; then
     log "skipping macOS build: this host is not macOS x86_64 ($(uname -s)/$(uname -m))"
   else
-    log "building macOS x86_64 (native, isolated toolchain: $RUSTC_VERSION)"
-    cargo build --release --locked
-    package_artifact "macos" "x86_64" "$ROOT_DIR/target/release/tuicr" \
+    log "building macOS x86_64 (native, isolated toolchain: $RUSTC_VERSION, clean checkout)"
+    (cd "$CLEAN_SRC_DIR" && cargo build --release --locked)
+    package_artifact "macos" "x86_64" "$CLEAN_SRC_DIR/target/release/tuicr" \
       "cargo build --release --locked" "x86_64-apple-darwin"
   fi
 fi
@@ -524,16 +620,17 @@ if [[ "$SKIP_LINUX" -eq 0 ]]; then
     mkdir -p "$LINUX_TARGET_DIR" "$LINUX_REGISTRY_DIR" "$LINUX_SRC_COPY_DIR"
 
     log "building Linux x86_64 in pinned container ($LINUX_BUILD_IMAGE @ $LINUX_BUILD_IMAGE_DIGEST)"
-    # Copy the source (read-only mount can't hold Cargo's own lock files /
-    # incremental caches) into a container-writable scratch dir. Only
-    # tracked source is present (the dirty-tree gate above already ran),
-    # so this copy is equivalent to a fresh clone at the packaged commit.
-    rsync -a --exclude target --exclude .git "$ROOT_DIR/" "$LINUX_SRC_COPY_DIR/"
+    # Copy the SAME clean git-archive checkout used for the macOS build
+    # (read-only mount can't hold Cargo's own lock files/incremental
+    # caches, so it still needs a container-writable copy) rather than a
+    # separate rsync of the live working tree.
+    cp -R "$CLEAN_SRC_DIR/." "$LINUX_SRC_COPY_DIR/"
     docker run --rm --platform "$LINUX_PLATFORM" \
       -v "$LINUX_SRC_COPY_DIR:/src" \
       -v "$LINUX_TARGET_DIR:/build-target" \
       -v "$LINUX_REGISTRY_DIR:/usr/local/cargo/registry" \
       -e CARGO_TARGET_DIR=/build-target \
+      -e TUICR_OFFLINE_CANDIDATE_SHA="$SOURCE_SHA_SHORT" \
       -w /src \
       "$LINUX_BUILD_IMAGE" \
       cargo build --release --locked >&2
@@ -571,28 +668,30 @@ log "writing manifest.json"
 python3 - \
   "$WORK_DIR/artifacts.json" \
   "$OUTPUT_DIR/manifest.json" \
-  "$PACKAGED_AT" "$REPO_REMOTE" "$SOURCE_BRANCH" "$SOURCE_SHA_FULL" "$SOURCE_SHA_SHORT" "$VERSION" \
+  "$PACKAGED_AT" "$REPO_REMOTE" "$SOURCE_BRANCH" "$SOURCE_SHA_FULL" "$SOURCE_SHA_SHORT" "$VERSION" "$FORK_VERSION" "$EXPECTED_REPORTED_VERSION" \
   "$RUSTC_VERSION" "$CARGO_VERSION" "$LINUX_BUILD_IMAGE" "$LINUX_BUILD_IMAGE_DIGEST" \
   "$FMT_RESULT" "$CLIPPY_RESULT" "$TEST_RESULT" "$TEST_PASSED" "$TEST_FAILED_COUNT" "$TEST_IGNORED" \
 <<'PYEOF'
 import json, sys
 
-(artifacts_path, out_path, packaged_at, repo_remote, branch, sha_full, sha_short, version,
- rustc_version, cargo_version, linux_image, linux_image_digest,
+(artifacts_path, out_path, packaged_at, repo_remote, branch, sha_full, sha_short, version, fork_version,
+ expected_reported_version, rustc_version, cargo_version, linux_image, linux_image_digest,
  fmt_result, clippy_result, test_result, test_passed, test_failed, test_ignored) = sys.argv[1:]
 
 with open(artifacts_path) as f:
     artifacts = json.load(f)
 
 manifest = {
-    "manifest_schema_version": 1,
+    "manifest_schema_version": 2,
     "generated_at_utc": packaged_at,
     "release_readiness": "OFFLINE_VALIDATED_ONLY",
     "not_release_ready_because": [
         "no live provider (GitHub/GitLab/Azure DevOps/Gitea/Forgejo) write validation was performed producing this archive",
         "no real Ubuntu-under-WSL validation was performed; the Linux artifact is a pinned-container build/smoke, not a WSL pass",
         "no Git tag, push, or GitHub Release was created",
-        "Cargo.toml repository/crate/binary identity is still unmodified upstream (agavra/tuicr); the packaged binary's automatic startup update-check phones home to crates.io by default, and its `tuicr update`/package-manager upgrade targets still resolve to real upstream, so running them would silently self-replace this fork binary (see docs/offline-candidate/README.md and the bundled config.no-update-check.toml sample)",
+        "binaries are not code-signed or notarized, and are not installable via any package manager (Homebrew/cargo/mise/apt/etc.) -- archives are extract-and-run only",
+        "only x86_64 is built for either OS; no arm64/Apple Silicon-native or universal binary is produced or claimed",
+        "the CI workflow's `update-test` job (.github/workflows/ci.yml) still performs a live end-to-end self-update test against real upstream agavra/tuicr GitHub releases; it was intentionally left unmodified per scope (see README.md) and is NOT a valid signal for this fork build, since this fork's `tuicr update` is hard-disabled and its --version format differs from what that job expects",
     ],
     "source": {
         "repository_remote": repo_remote,
@@ -600,12 +699,22 @@ manifest = {
         "commit_full": sha_full,
         "commit_short": sha_short,
         "tree_dirty": False,
-        "upstream_crate_version": version,
+        "upstream_base_version": version,
+        "fork_version": fork_version,
+        "expected_reported_binary_version": expected_reported_version,
         "note": (
-            "The binary's own --version output is identical to unmodified "
-            "upstream (Cargo.toml's version was not bumped for this fork). "
-            "Fork identity is established by this manifest's commit_full, "
-            "not by the binary."
+            "Fork identity is established BOTH in the binary itself (Cargo.toml "
+            "version bumped to a semver prerelease tag, e.g. 0.19.1-offline-candidate.1, "
+            "with the source commit short SHA embedded via build.rs and printed by "
+            "`tuicr --version` as `tuicr <fork_version>+<commit_short>`) AND in this "
+            "manifest. It does not impersonate an unmodified upstream release."
+        ),
+        "build_source_method": (
+            "Both platform builds compile from a clean `git archive <commit_full> | "
+            "tar -x` checkout of exactly the tracked source at this commit -- not the "
+            "live working tree -- so no .tpatch files, .git internals, untracked "
+            "session/audit/candidate data, or local env/config can be present in the "
+            "build input regardless of what else exists untracked on the packaging host."
         ),
     },
     "toolchain": {
@@ -616,6 +725,14 @@ manifest = {
         "linux_build_image": linux_image,
         "linux_build_image_digest": linux_image_digest,
         "linux_build_platform_flag": "linux/amd64",
+        "libgit2_provenance": (
+            "git2's vendored-libgit2 feature is enabled in Cargo.toml, so both "
+            "platforms compile libgit2 from the identical vendored C source bundled "
+            "in the libgit2-sys crate version pinned in Cargo.lock, rather than "
+            "linking whichever system libgit2 happens to be installed on the build "
+            "host. This is an informational pin, not a security certification of "
+            "that vendored copy."
+        ),
     },
     "pre_build_checks": {
         "fmt_check": fmt_result,
@@ -629,56 +746,77 @@ manifest = {
                 "vcs::git::libgit2::tests::should_discover_worktree_with_relativeworktrees_extension"
             ],
         },
+        "secret_scan_file": "manifest/SECRET-SCAN.md",
     },
     "artifacts": artifacts,
     "dependency_snapshot": {
         "generated_by": "cargo metadata --locked --format-version 1",
         "file": "manifest/cargo-metadata.json",
         "license_summary_file": "manifest/THIRD-PARTY-LICENSES.md",
+        "license_summary_disclaimer": "Audit aid only, not legal certification -- see the file's own header.",
     },
     "excluded_from_packaging": [
         "*.tpatch files",
+        "the .git directory itself (build source is a git-archive export, not the working tree)",
         "credentials, tokens, and provider API keys",
-        "user review-session data (~/.local/share/tuicr, ~/Library/Application Support/tuicr)",
-        "candidate/research data from sibling wayfinder worktrees",
+        "user review-session data (~/.local/share/tuicr-offline-candidate, ~/Library/Application Support/tuicr-offline-candidate, and any real upstream tuicr/ data directory)",
+        "candidate/research/audit data from sibling wayfinder worktrees",
         "built artifacts, target/ directories, and this script's own working directory",
     ],
     "known_risks": [
         {
-            "id": "unmodified-upstream-identity",
+            "id": "no-live-provider-validation",
             "severity": "high",
             "summary": (
-                "Cargo.toml repository/crate/binary name are unmodified upstream "
-                "(agavra/tuicr). The packaged binary auto-checks crates.io for a "
-                "newer version on every startup (suppressible via "
-                "--no-update-check or config.toml's no_update_check = true), and "
-                "`tuicr update` / `brew upgrade agavra/tap/tuicr` / `cargo install "
-                "tuicr --force` / `mise upgrade github:agavra/tuicr` all still "
-                "resolve to real upstream, so running any of them silently "
-                "self-replaces this fork binary with upstream, discarding the "
-                "fork's durable-thread feature with no warning."
+                "This build was never exercised against a real GitHub, GitLab, "
+                "Azure DevOps, Gitea, or Forgejo instance -- only offline fixture "
+                "review/thread/dry-run CLI smoke tests were run. Provider-specific "
+                "code paths that require live network calls are unvalidated."
+            ),
+            "mitigation": "See docs/offline-candidate/PROVIDER-CAPABILITIES.md.",
+        },
+        {
+            "id": "not-a-wsl-pass",
+            "severity": "medium",
+            "summary": (
+                "The Linux x86_64 artifact is built and smoke-tested in a pinned "
+                "Docker container, not on real Ubuntu-under-WSL. Container behavior "
+                "(filesystem, terminal/PTY handling, path conventions) can differ "
+                "from WSL in ways this build has not exercised."
+            ),
+            "mitigation": "Treat as an explicit blocker; do not claim WSL support.",
+        },
+        {
+            "id": "thread-only-rollback-hazard",
+            "severity": "medium",
+            "summary": (
+                "This fork's sessions are written at schema version 1.4 "
+                "(CURRENT_SESSION_VERSION), which can hold durable, provider-neutral "
+                "PersistedThread data that upstream 0.19.1 does not understand. If a "
+                "session containing thread-only state (no longer backed by legacy "
+                "per-line Comment fields) is opened and saved by upstream 0.19.1, "
+                "upstream can silently drop that thread-only state on save, since it "
+                "only knows how to round-trip the legacy fields."
             ),
             "mitigation": (
-                "Do not run `tuicr update` or any package-manager upgrade command "
-                "against this binary. Copy the bundled config.no-update-check.toml "
-                "into the config directory to suppress the automatic startup check."
+                "Always back up reviews/ before installing/running upstream 0.19.1 "
+                "against session files this fork created or touched. See "
+                "MIGRATION.md's 'Rolling back to upstream 0.19.1' section."
             ),
         },
         {
-            "id": "shared-data-directory-with-upstream",
-            "severity": "medium",
+            "id": "update_test_ci_job_not_fork_valid",
+            "severity": "low",
             "summary": (
-                "Review-session data directory is resolved via "
-                "ProjectDirs::from(\"\", \"\", \"tuicr\") -- an app identifier this "
-                "fork does not change. A real upstream tuicr install on the same "
-                "machine reads/writes the exact same reviews/ directory as this "
-                "fork build; there is no fork-specific data directory."
+                ".github/workflows/ci.yml's `update-test` job performs a live "
+                "end-to-end self-update test against real upstream agavra/tuicr "
+                "GitHub releases. It was intentionally left unmodified (out of scope "
+                "for this local packaging change per explicit instruction), but its "
+                "results say nothing about this fork build: `tuicr update` is hard-"
+                "disabled here, and --version's format differs from what that job's "
+                "assertions expect."
             ),
-            "mitigation": (
-                "See MIGRATION.md's 'shares its data directory with any real "
-                "upstream tuicr install' section: override HOME/XDG_DATA_HOME for "
-                "isolated testing, or back up reviews/ before switching installs."
-            ),
+            "mitigation": "Informational only; do not treat that CI job as a signal for this fork.",
         },
     ],
 }

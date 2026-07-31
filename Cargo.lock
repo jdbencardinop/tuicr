@@ -2815,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "tuicr"
-version = "0.19.1"
+version = "0.19.1-offline-candidate.1"
 dependencies = [
  "anyhow",
  "arboard",

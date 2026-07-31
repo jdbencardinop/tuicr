@@ -1,13 +1,15 @@
 {
   "$comment": "Template/example for the manifest.json produced by scripts/package-offline-candidate.sh. The script fills every @@PLACEHOLDER@@ and repeats the `artifacts` entry once per built platform. This file itself is never shipped inside an archive; it documents the manifest's shape for reviewers.",
-  "manifest_schema_version": 1,
+  "manifest_schema_version": 2,
   "generated_at_utc": "@@PACKAGED_AT@@",
   "release_readiness": "OFFLINE_VALIDATED_ONLY",
   "not_release_ready_because": [
     "no live provider (GitHub/GitLab/Azure DevOps/Gitea/Forgejo) write validation was performed producing this archive",
     "no real Ubuntu-under-WSL validation was performed; the Linux artifact is a pinned-container build/smoke, not a WSL pass",
     "no Git tag, push, or GitHub Release was created",
-    "Cargo.toml repository/crate/binary identity is still unmodified upstream (agavra/tuicr); the packaged binary's automatic startup update-check phones home to crates.io by default, and its `tuicr update`/package-manager upgrade targets still resolve to real upstream, so running them would silently self-replace this fork binary (see docs/offline-candidate/README.md and the bundled config.no-update-check.toml sample)"
+    "binaries are not code-signed or notarized, and are not installable via any package manager (Homebrew/cargo/mise/apt/etc.) -- archives are extract-and-run only",
+    "only x86_64 is built for either OS; no arm64/Apple Silicon-native or universal binary is produced or claimed",
+    "the CI workflow's `update-test` job (.github/workflows/ci.yml) still performs a live end-to-end self-update test against real upstream agavra/tuicr GitHub releases; it was intentionally left unmodified per scope (see README.md) and is NOT a valid signal for this fork build, since this fork's `tuicr update` is hard-disabled and its --version format differs from what that job expects"
   ],
   "source": {
     "repository_remote": "@@REPO_REMOTE@@",
@@ -15,8 +17,11 @@
     "commit_full": "@@SOURCE_SHA_FULL@@",
     "commit_short": "@@SOURCE_SHA_SHORT@@",
     "tree_dirty": false,
-    "upstream_crate_version": "@@VERSION@@",
-    "note": "The binary's own --version output is identical to unmodified upstream (Cargo.toml's version was not bumped for this fork). Fork identity is established by this manifest's commit_full, not by the binary."
+    "upstream_base_version": "@@VERSION@@",
+    "fork_version": "@@FORK_VERSION@@",
+    "expected_reported_binary_version": "tuicr @@FORK_VERSION@@+@@SOURCE_SHA_SHORT@@",
+    "note": "Fork identity is established BOTH in the binary itself (Cargo.toml version bumped to a semver prerelease tag, e.g. 0.19.1-offline-candidate.1, with the source commit short SHA embedded via build.rs and printed by `tuicr --version` as `tuicr <fork_version>+<commit_short>`) AND in this manifest. It does not impersonate an unmodified upstream release.",
+    "build_source_method": "Both platform builds compile from a clean `git archive <commit_full> | tar -x` checkout of exactly the tracked source at this commit -- not the live working tree -- so no .tpatch files, .git internals, untracked session/audit/candidate data, or local env/config can be present in the build input regardless of what else exists untracked on the packaging host."
   },
   "toolchain": {
     "rustc_version": "@@RUSTC_VERSION@@",
@@ -25,7 +30,8 @@
     "host_triple_linux_container": "x86_64-unknown-linux-gnu",
     "linux_build_image": "rust:1.97-bookworm",
     "linux_build_image_digest": "@@LINUX_IMAGE_DIGEST@@",
-    "linux_build_platform_flag": "linux/amd64"
+    "linux_build_platform_flag": "linux/amd64",
+    "libgit2_provenance": "git2's vendored-libgit2 feature is enabled in Cargo.toml, so both platforms compile libgit2 from the identical vendored C source bundled in the libgit2-sys crate version pinned in Cargo.lock, rather than linking whichever system libgit2 happens to be installed on the build host. This is an informational pin, not a security certification of that vendored copy."
   },
   "pre_build_checks": {
     "fmt_check": "@@FMT_RESULT@@",
@@ -38,7 +44,8 @@
       "known_pre_existing_failures": [
         "vcs::git::libgit2::tests::should_discover_worktree_with_relativeworktrees_extension"
       ]
-    }
+    },
+    "secret_scan_file": "manifest/SECRET-SCAN.md"
   },
   "artifacts": [
     {
@@ -51,35 +58,49 @@
       "binary_size_bytes": "@@BINARY_SIZE_BYTES@@",
       "build_command": "cargo build --release --locked",
       "build_target_triple": "x86_64-apple-darwin",
-      "reported_version": "@@VERSION@@",
+      "reported_version": "tuicr @@FORK_VERSION@@+@@SOURCE_SHA_SHORT@@",
       "extract_verified": "@@EXTRACT_VERIFIED@@",
       "fixture_smoke_verified": "@@SMOKE_VERIFIED@@"
     }
   ],
   "dependency_snapshot": {
     "generated_by": "cargo metadata --locked --format-version 1",
-    "file": "cargo-metadata.json",
-    "license_summary_file": "THIRD-PARTY-LICENSES.md"
+    "file": "manifest/cargo-metadata.json",
+    "license_summary_file": "manifest/THIRD-PARTY-LICENSES.md",
+    "license_summary_disclaimer": "Audit aid only, not legal certification -- see the file's own header."
   },
   "excluded_from_packaging": [
     "*.tpatch files",
+    "the .git directory itself (build source is a git-archive export, not the working tree)",
     "credentials, tokens, and provider API keys",
-    "user review-session data (~/.local/share/tuicr, ~/Library/Application Support/tuicr)",
-    "candidate/research data from sibling wayfinder worktrees",
+    "user review-session data (~/.local/share/tuicr-offline-candidate, ~/Library/Application Support/tuicr-offline-candidate, and any real upstream tuicr/ data directory)",
+    "candidate/research/audit data from sibling wayfinder worktrees",
     "built artifacts, target/ directories, and this script's own working directory"
   ],
   "known_risks": [
     {
-      "id": "unmodified-upstream-identity",
+      "id": "no-live-provider-validation",
       "severity": "high",
-      "summary": "Cargo.toml repository/crate/binary name are unmodified upstream (agavra/tuicr). The packaged binary auto-checks crates.io for a newer version on every startup (suppressible via --no-update-check or config.toml's no_update_check = true), and `tuicr update` / `brew upgrade agavra/tap/tuicr` / `cargo install tuicr --force` / `mise upgrade github:agavra/tuicr` all still resolve to real upstream, so running any of them silently self-replaces this fork binary with upstream, discarding the fork's durable-thread feature with no warning.",
-      "mitigation": "Do not run `tuicr update` or any package-manager upgrade command against this binary. Copy the bundled config.no-update-check.toml into the config directory to suppress the automatic startup check."
+      "summary": "This build was never exercised against a real GitHub, GitLab, Azure DevOps, Gitea, or Forgejo instance -- only offline fixture review/thread/dry-run CLI smoke tests were run. Provider-specific code paths that require live network calls are unvalidated.",
+      "mitigation": "See docs/offline-candidate/PROVIDER-CAPABILITIES.md."
     },
     {
-      "id": "shared-data-directory-with-upstream",
+      "id": "not-a-wsl-pass",
       "severity": "medium",
-      "summary": "Review-session data directory is resolved via ProjectDirs::from(\"\", \"\", \"tuicr\") -- an app identifier this fork does not change. A real upstream tuicr install on the same machine reads/writes the exact same reviews/ directory as this fork build; there is no fork-specific data directory.",
-      "mitigation": "See MIGRATION.md's 'shares its data directory with any real upstream tuicr install' section: override HOME/XDG_DATA_HOME for isolated testing, or back up reviews/ before switching installs."
+      "summary": "The Linux x86_64 artifact is built and smoke-tested in a pinned Docker container, not on real Ubuntu-under-WSL. Container behavior (filesystem, terminal/PTY handling, path conventions) can differ from WSL in ways this build has not exercised.",
+      "mitigation": "Treat as an explicit blocker; do not claim WSL support."
+    },
+    {
+      "id": "thread-only-rollback-hazard",
+      "severity": "medium",
+      "summary": "This fork's sessions are written at schema version 1.4 (CURRENT_SESSION_VERSION), which can hold durable, provider-neutral PersistedThread data that upstream 0.19.1 does not understand. If a session containing thread-only state (no longer backed by legacy per-line Comment fields) is opened and saved by upstream 0.19.1, upstream can silently drop that thread-only state on save, since it only knows how to round-trip the legacy fields.",
+      "mitigation": "Always back up reviews/ before installing/running upstream 0.19.1 against session files this fork created or touched. See MIGRATION.md's 'Rolling back to upstream 0.19.1' section."
+    },
+    {
+      "id": "update_test_ci_job_not_fork_valid",
+      "severity": "low",
+      "summary": ".github/workflows/ci.yml's `update-test` job performs a live end-to-end self-update test against real upstream agavra/tuicr GitHub releases. It was intentionally left unmodified (out of scope for this local packaging change per explicit instruction), but its results say nothing about this fork build: `tuicr update` is hard-disabled here, and --version's format differs from what that job's assertions expect.",
+      "mitigation": "Informational only; do not treat that CI job as a signal for this fork."
     }
   ]
 }

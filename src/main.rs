@@ -44,12 +44,20 @@ fn main() -> anyhow::Result<()> {
     // This also configures syntax highlighting colors before diff parsing
     let mut cli_args = profile::time("startup.parse_cli_args", parse_cli_args);
     if cli_args.update_command {
-        let outcome = match cli_args.update_version.as_ref() {
-            Some(version) => update::update_to_version(version)?,
-            None => update::update_installed()?,
-        };
-        println!("{outcome}");
-        return Ok(());
+        // Offline fork candidate: `tuicr update` (and pinned-version
+        // updates) are permanently disabled here so this binary can never
+        // silently replace itself with real upstream `agavra/tuicr` and
+        // discard the fork's durable-thread feature. The real
+        // update-installer logic in `tuicr::update` is intentionally left
+        // intact -- and still covered by its own test suite -- for
+        // potential future re-enablement, but this binary never calls it.
+        eprintln!(
+            "tuicr-offline-candidate: `tuicr update` is disabled in this offline fork build.\n\
+             This binary will never contact crates.io, GitHub Releases, Homebrew, cargo, or mise.\n\
+             Reinstall manually from the packaged offline-candidate archive if you need a newer build.\n\
+             See docs/offline-candidate/INSTALL.md and README.md for details."
+        );
+        std::process::exit(1);
     }
     if let Some(review_command) = cli_args.review_command.take() {
         tuicr::review_cli::run(review_command)?;

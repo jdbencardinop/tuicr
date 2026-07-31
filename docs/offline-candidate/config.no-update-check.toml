@@ -1,13 +1,15 @@
-# Offline-candidate config sample — disables the automatic startup
-# crates.io version check and reduces (but see INSTALL.md) update surface.
+# Offline-candidate config sample documenting the `no_update_check` key.
 #
-# This binary's `repository`/crate identity is still unmodified upstream
-# (`agavra/tuicr`) even though it was built from this fork's source, so its
-# background update-check and its `tuicr update` subcommand still resolve
-# to real upstream. Setting this does not disable `tuicr update` itself —
-# see INSTALL.md's "Do not run `tuicr update`" warning for that.
+# This build's automatic startup crates.io version check and its
+# `tuicr update` subcommand are both permanently disabled at the source
+# level, regardless of this setting -- see README.md's "`tuicr update` is
+# disabled in this build" section. Setting `no_update_check` below is
+# therefore a no-op for this specific binary; it is included only as a
+# documented, valid config sample (e.g. for anyone diffing this fork's
+# config against upstream's).
 #
-# Copy this file to your tuicr config directory as `config.toml` to apply
-# it (see MIGRATION.md for the per-OS config directory path), or merge the
-# `no_update_check = true` line into an existing config.toml there.
+# Copy this file to your tuicr-offline-candidate config directory as
+# `config.toml` to apply it (see MIGRATION.md for the per-OS config
+# directory path), or merge the `no_update_check = true` line into an
+# existing config.toml there.
 no_update_check = true

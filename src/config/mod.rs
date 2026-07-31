@@ -256,24 +256,27 @@ fn config_dir_from_parts(
     home: Option<PathBuf>,
     _appdata: Option<PathBuf>,
 ) -> Result<PathBuf> {
+    // Offline fork candidate: use a fork-specific directory name ("tuicr" ->
+    // "tuicr-offline-candidate") so config.toml/themes never collide with a
+    // real upstream `tuicr` install's config directory on the same machine.
     #[cfg(windows)]
     {
         let base = _appdata
             .filter(|p| !p.as_os_str().is_empty())
             .ok_or_else(|| anyhow!("Could not determine APPDATA for config directory"))?;
-        return Ok(base.join("tuicr"));
+        return Ok(base.join("tuicr-offline-candidate"));
     }
 
     #[cfg(not(windows))]
     {
         if let Some(base) = xdg_config_home.filter(|p| !p.as_os_str().is_empty()) {
-            return Ok(base.join("tuicr"));
+            return Ok(base.join("tuicr-offline-candidate"));
         }
 
         let home = home
             .filter(|p| !p.as_os_str().is_empty())
             .ok_or_else(|| anyhow!("Could not determine HOME for config directory"))?;
-        Ok(home.join(".config").join("tuicr"))
+        Ok(home.join(".config").join("tuicr-offline-candidate"))
     }
 }
 
@@ -1703,7 +1706,10 @@ scope_line = "no"
         )
         .expect("config path should resolve");
 
-        assert_eq!(path, PathBuf::from("/tmp/xdg-config/tuicr/config.toml"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/xdg-config/tuicr-offline-candidate/config.toml")
+        );
     }
 
     #[cfg(not(windows))]
@@ -1714,7 +1720,7 @@ scope_line = "no"
 
         assert_eq!(
             path,
-            PathBuf::from("/home/tester/.config/tuicr/config.toml")
+            PathBuf::from("/home/tester/.config/tuicr-offline-candidate/config.toml")
         );
     }
 
@@ -1730,7 +1736,7 @@ scope_line = "no"
 
         assert_eq!(
             path,
-            PathBuf::from("/home/tester/.config/tuicr/config.toml")
+            PathBuf::from("/home/tester/.config/tuicr-offline-candidate/config.toml")
         );
     }
 
@@ -1744,7 +1750,7 @@ scope_line = "no"
         )
         .expect("config path should resolve");
 
-        assert!(path.ends_with(Path::new("tuicr").join("config.toml")));
+        assert!(path.ends_with(Path::new("tuicr-offline-candidate").join("config.toml")));
     }
 
     #[cfg(not(windows))]
@@ -1757,7 +1763,10 @@ scope_line = "no"
         )
         .expect("themes dir should resolve");
 
-        assert_eq!(path, PathBuf::from("/tmp/xdg-config/tuicr/themes"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/xdg-config/tuicr-offline-candidate/themes")
+        );
     }
 
     #[cfg(not(windows))]
@@ -1766,7 +1775,10 @@ scope_line = "no"
         let path = themes_dir_from_parts(None, Some(PathBuf::from("/home/tester")), None)
             .expect("themes dir should resolve");
 
-        assert_eq!(path, PathBuf::from("/home/tester/.config/tuicr/themes"));
+        assert_eq!(
+            path,
+            PathBuf::from("/home/tester/.config/tuicr-offline-candidate/themes")
+        );
     }
 
     #[cfg(windows)]
@@ -1781,7 +1793,7 @@ scope_line = "no"
 
         assert_eq!(
             path,
-            PathBuf::from(r"C:\Users\tester\AppData\Roaming\tuicr\config.toml")
+            PathBuf::from(r"C:\Users\tester\AppData\Roaming\tuicr-offline-candidate\config.toml")
         );
     }
 
@@ -1797,7 +1809,7 @@ scope_line = "no"
 
         assert_eq!(
             path,
-            PathBuf::from(r"C:\Users\tester\AppData\Roaming\tuicr\themes")
+            PathBuf::from(r"C:\Users\tester\AppData\Roaming\tuicr-offline-candidate\themes")
         );
     }
 }
