@@ -28,54 +28,6 @@ use crate::forge::github::gh::parse_github_remote_url;
 use crate::forge::gitlab::glab::parse_gitlab_remote_url;
 use crate::forge::traits::ForgeRepository;
 
-/// Try to detect a GitHub forge repository for the local checkout at `repo_root`.
-///
-/// Looks at the `origin` remote first, then falls back to any remote whose URL
-/// parses as a GitHub host. Returns `None` when no GitHub remote is configured.
-pub fn detect_github_repository(repo_root: &Path) -> Option<ForgeRepository> {
-    let repo = Repository::discover(repo_root).ok()?;
-    if let Ok(remote) = repo.find_remote("origin")
-        && let Some(url) = remote.url()
-        && let Some(parsed) = parse_github_remote_url(url)
-    {
-        return Some(parsed);
-    }
-    let remotes = repo.remotes().ok()?;
-    for name in remotes.iter().flatten() {
-        if let Ok(remote) = repo.find_remote(name)
-            && let Some(url) = remote.url()
-            && let Some(parsed) = parse_github_remote_url(url)
-        {
-            return Some(parsed);
-        }
-    }
-    None
-}
-
-/// Try to detect a GitLab forge repository for the local checkout at `repo_root`.
-///
-/// Looks at the `origin` remote first, then falls back to any remote whose URL
-/// parses as a GitLab host. Returns `None` when no GitLab remote is configured.
-pub fn detect_gitlab_repository(repo_root: &Path) -> Option<ForgeRepository> {
-    let repo = Repository::discover(repo_root).ok()?;
-    if let Ok(remote) = repo.find_remote("origin")
-        && let Some(url) = remote.url()
-        && let Some(parsed) = parse_gitlab_remote_url(url)
-    {
-        return Some(parsed);
-    }
-    let remotes = repo.remotes().ok()?;
-    for name in remotes.iter().flatten() {
-        if let Ok(remote) = repo.find_remote(name)
-            && let Some(url) = remote.url()
-            && let Some(parsed) = parse_gitlab_remote_url(url)
-        {
-            return Some(parsed);
-        }
-    }
-    None
-}
-
 /// `repo_root`'s remote URLs, `origin` first, then every other remote.
 fn remote_urls(repo_root: &Path) -> Vec<String> {
     let Ok(repo) = Repository::discover(repo_root) else {
