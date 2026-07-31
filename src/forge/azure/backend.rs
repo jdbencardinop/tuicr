@@ -59,10 +59,10 @@ use crate::forge::remote_comments::{RemoteCommentSide, RemoteReviewComment, Remo
 use crate::forge::submit::SubmitEvent;
 use crate::forge::traits::ForgeRepository;
 use crate::forge::traits::{
-    CreateReviewRequest, ForgeBackend, ForgeFileLinesRequest, ForgeKind,
-    GhCreateReviewResponse as TraitCreateReviewResponse, PagedPullRequests, PullRequestCommit,
-    PullRequestDetails, PullRequestListQuery, PullRequestListScope, PullRequestReviewMetadata,
-    PullRequestTarget,
+    CreateReviewRequest, CreateThreadResponse, ForgeBackend, ForgeFileLinesRequest, ForgeKind,
+    GhCreateReviewResponse as TraitCreateReviewResponse, NewThreadRequest, PagedPullRequests,
+    PullRequestCommit, PullRequestDetails, PullRequestListQuery, PullRequestListScope,
+    PullRequestReviewMetadata, PullRequestTarget, ReplyResponse,
 };
 use crate::model::DiffLine;
 use crate::process::run_command_output;
@@ -538,6 +538,79 @@ impl AzureDevOpsBackend {
         }
     }
 
+    /// Build the `threadContext` anchor for the generic durable-thread
+    /// `ForgeBackend::create_thread` request (`NewThreadRequest`), the
+    /// counterpart to `Self::build_thread_context` above (which builds
+    /// from the bundled `create_review` submit flow's own
+    /// `submit::InlineComment` shape instead). `None` for a whole-PR
+    /// (`path: None`) or whole-file (`line: None`) anchor — Azure DevOps'
+    /// `threadContext` is only meaningful for a line/range anchor.
+    /// [`crate::model::thread::AnchorSide::Both`] (this codebase's
+    /// simultaneous-both-sides anchor — the same shape
+    /// `SideSupport::simultaneous_both_sides()` advertises this provider
+    /// supports) sets both left and right positions to the same
+    /// line/range, since `NewThreadRequest` carries only one `line`/
+    /// `range_start` pair, not independent per-side lines.
+    fn thread_context_for_new_request(
+        request: &NewThreadRequest<'_>,
+    ) -> Option<crate::forge::azure::models::AdoCommentThreadContext> {
+        use crate::forge::azure::models::{AdoCommentPosition, AdoCommentThreadContext};
+        use crate::model::thread::AnchorSide;
+
+        let path = request.path?;
+        let end_line = request.line?;
+        let start_line = request.range_start.unwrap_or(end_line);
+        let position = |line: u32| AdoCommentPosition { line, offset: 1 };
+        let (left_start, left_end, right_start, right_end) = match request.side {
+            Some(AnchorSide::Old) => (
+                Some(position(start_line)),
+                Some(position(end_line)),
+                None,
+                None,
+            ),
+            Some(AnchorSide::New) | None => (
+                None,
+                None,
+                Some(position(start_line)),
+                Some(position(end_line)),
+            ),
+            Some(AnchorSide::Both) => (
+                Some(position(start_line)),
+                Some(position(end_line)),
+                Some(position(start_line)),
+                Some(position(end_line)),
+            ),
+        };
+        Some(AdoCommentThreadContext {
+            file_path: format!("/{}", path.trim_start_matches('/')),
+            left_file_start: left_start,
+            left_file_end: left_end,
+            right_file_start: right_start,
+            right_file_end: right_end,
+        })
+    }
+
+    /// Parse the numeric thread ID back out of a durable
+    /// `provider_mapping["id"]` value (populated either by
+    /// [`ForgeBackend::create_thread`]'s own mapping or by
+    /// `crate::model::thread_store::thread_from_remote` from an imported
+    /// [`RemoteReviewThread::id`], which is itself `thread.id.to_string()`
+    /// — see `Self::list_review_threads`). Returns a typed error rather
+    /// than panicking/defaulting to `0` when the mapping is missing or
+    /// not a valid `u64` — e.g. a mapping durably persisted from some
+    /// other provider by mistake.
+    fn thread_id_from_mapping(mapping: &serde_json::Value) -> Result<u64> {
+        mapping
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or_else(|| {
+                TuicrError::Forge(
+                    "provider mapping is missing a valid Azure DevOps thread `id`".to_string(),
+                )
+            })
+    }
+
     fn event_to_vote(event: SubmitEvent) -> Option<AdoVote> {
         match event {
             SubmitEvent::Comment => None,
@@ -761,6 +834,12 @@ impl ForgeBackend for AzureDevOpsBackend {
                             // rather than guessing an unverified deep-link
                             // query-string shape.
                             url: String::new(),
+                            // Azure DevOps thread-comment IDs are already
+                            // the same numeric identifier `reply_to_thread`
+                            // posts against (no GraphQL-vs-REST id split
+                            // like GitHub's), so there is no separate
+                            // REST-compatible id to surface here.
+                            rest_id: None,
                         })
                         .collect(),
                 }
@@ -908,6 +987,100 @@ impl ForgeBackend for AzureDevOpsBackend {
             )),
         }
     }
+
+    /// Generic durable-thread creation (`crate::forge::dryrun`'s
+    /// `CreateThread` operation / `crate::forge::publish::execute_plan`).
+    /// Delegates to `Self::create_thread_via`, the same transport
+    /// `create_review`'s bundled flow and the standalone public
+    /// `AzureDevOpsBackend::create_thread` wrapper both use — so a durable
+    /// thread created through the generic pipeline is indistinguishable
+    /// on the wire from one created through either of those. `mapping`
+    /// carries `"id"` (the numeric thread ID, parsed back out by
+    /// [`Self::reply_to_thread`]/[`Self::set_thread_resolution`] below,
+    /// mirroring GitLab's `provider_mapping["id"]` convention) so a thread
+    /// created this way round-trips through the same durable-mapping shape
+    /// `crate::model::thread_store::thread_from_remote` already produces
+    /// for threads *imported* via `list_review_threads`.
+    fn create_thread(
+        &self,
+        pr: &PullRequestDetails,
+        request: NewThreadRequest<'_>,
+    ) -> Result<CreateThreadResponse> {
+        let thread_context = Self::thread_context_for_new_request(&request);
+        let client = self.client_for(&pr.repository)?;
+        let created = self.create_thread_via(
+            &client,
+            &pr.repository,
+            pr.number,
+            request.body,
+            thread_context,
+        )?;
+        let root_comment_id = created
+            .comments
+            .first()
+            .map(|c| c.id.to_string())
+            .unwrap_or_else(|| created.id.to_string());
+        Ok(CreateThreadResponse {
+            mapping: serde_json::json!({
+                "id": created.id.to_string(),
+                "status": created.status,
+                "threadContext": created.thread_context,
+            }),
+            root_comment_id,
+        })
+    }
+
+    /// Generic durable-thread reply (`crate::forge::publish::execute_plan`'s
+    /// `Reply` operation). Reads the thread ID back out of
+    /// `provider_mapping["id"]` — populated either by [`Self::create_thread`]
+    /// above or by `crate::model::thread_store::thread_from_remote` from an
+    /// imported [`RemoteReviewThread::id`] — and delegates to the same
+    /// `Self::post_reply_comment` transport
+    /// `AzureDevOpsBackend::reply_to_thread` (the standalone, directly
+    /// callable inherent method) uses, so both paths post through
+    /// identical wire behavior.
+    fn reply_to_thread(
+        &self,
+        pr: &PullRequestDetails,
+        provider_mapping: &serde_json::Value,
+        body: &str,
+    ) -> Result<ReplyResponse> {
+        let thread_id = Self::thread_id_from_mapping(provider_mapping)?;
+        let comment = self.post_reply_comment(pr, thread_id, body)?;
+        Ok(ReplyResponse {
+            comment_id: comment.id.to_string(),
+        })
+    }
+
+    /// Generic durable-thread resolve/reopen
+    /// (`crate::forge::publish::execute_plan`'s `Resolve`/`Reopen`/
+    /// `Dismiss` operations). `resolved: true` maps to Azure's `Fixed`
+    /// status (the closest native analog to "this feedback has been
+    /// addressed" — see `AdoThreadStatus::is_resolved`'s doc comment for
+    /// the full 7-status collapse table); `resolved: false` (reopen) maps
+    /// to `Active`. Returns the actually-observed post-update
+    /// `is_resolved` state (derived from the response's real `status`,
+    /// not the requested boolean blindly echoed back), matching this
+    /// module's "never guess/assume success" convention elsewhere (e.g.
+    /// `list_review_threads`'s stale-iteration detection).
+    fn set_thread_resolution(
+        &self,
+        pr: &PullRequestDetails,
+        provider_mapping: &serde_json::Value,
+        resolved: bool,
+    ) -> Result<serde_json::Value> {
+        let thread_id = Self::thread_id_from_mapping(provider_mapping)?;
+        let status = if resolved {
+            AdoThreadStatus::Fixed
+        } else {
+            AdoThreadStatus::Active
+        };
+        let updated = self.patch_thread_status(pr, thread_id, status)?;
+        let mut mapping = provider_mapping.clone();
+        mapping["is_resolved"] = serde_json::Value::Bool(updated.status.is_resolved());
+        mapping["status"] = serde_json::to_value(updated.status).unwrap_or(serde_json::Value::Null);
+        Ok(mapping)
+    }
 }
 
 /// Create a new thread directly, cast/update the current viewer's
@@ -947,6 +1120,22 @@ impl AzureDevOpsBackend {
         thread_id: u64,
         body: &str,
     ) -> Result<()> {
+        self.post_reply_comment(pr, thread_id, body)?;
+        Ok(())
+    }
+
+    /// Shared transport for posting a reply comment onto an existing
+    /// thread. Returns the created comment (unlike the public
+    /// `reply_to_thread` above, which only reports success/failure) so the
+    /// generic durable-thread `ForgeBackend::reply_to_thread` impl below
+    /// can report the new comment's provider-native ID back to the
+    /// publish ledger, exactly like GitHub/GitLab's own `ReplyResponse`.
+    fn post_reply_comment(
+        &self,
+        pr: &PullRequestDetails,
+        thread_id: u64,
+        body: &str,
+    ) -> Result<crate::forge::azure::models::AdoComment> {
         let client = self.client_for(&pr.repository)?;
         let path = with_api_version(
             &format!(
@@ -956,13 +1145,12 @@ impl AzureDevOpsBackend {
             ),
             &[],
         );
-        let _: crate::forge::azure::models::AdoComment = client.post_json(
+        client.post_json(
             &path,
             &AdoCreateCommentRequest {
                 content: body.to_string(),
             },
-        )?;
-        Ok(())
+        )
     }
 
     /// Update a thread's status (`PATCH .../threads/{id}`). Supported per
@@ -973,6 +1161,21 @@ impl AzureDevOpsBackend {
         thread_id: u64,
         status: AdoThreadStatus,
     ) -> Result<()> {
+        self.patch_thread_status(pr, thread_id, status)?;
+        Ok(())
+    }
+
+    /// Shared transport for `PATCH .../threads/{id}`, returning the
+    /// updated thread (unlike the public `update_thread_status` above) so
+    /// the generic `ForgeBackend::set_thread_resolution` impl below can
+    /// report the real post-update `is_resolved` state rather than
+    /// blindly trusting the request succeeded as requested.
+    fn patch_thread_status(
+        &self,
+        pr: &PullRequestDetails,
+        thread_id: u64,
+        status: AdoThreadStatus,
+    ) -> Result<AdoCommentThread> {
         let client = self.client_for(&pr.repository)?;
         let path = with_api_version(
             &format!(
@@ -982,9 +1185,7 @@ impl AzureDevOpsBackend {
             ),
             &[],
         );
-        let _: AdoCommentThread =
-            client.patch_json(&path, &AdoUpdateThreadStatusRequest { status })?;
-        Ok(())
+        client.patch_json(&path, &AdoUpdateThreadStatusRequest { status })
     }
 
     /// Directly cast/reset a reviewer vote (used by `:submit waiting` /

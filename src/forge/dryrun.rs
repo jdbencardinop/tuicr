@@ -5,8 +5,10 @@
 //! [`ProviderCapabilities`] profile and returns an exact per-operation
 //! [`DryRunPlan`]. It performs no I/O, needs no credentials, and never
 //! contacts a provider — it is safe to call for any of the five profiles in
-//! [`crate::forge::capabilities`], including the three that have no real
-//! transport yet.
+//! [`crate::forge::capabilities`], and its outcome always matches what
+//! `crate::forge::publish::execute_plan` will actually do against that
+//! provider's real transport (see `crate::forge::traits::ForgeBackend`'s
+//! `create_thread`/`reply_to_thread`/`set_thread_resolution`).
 //!
 //! Every comment, reply, and resolution/dismissal change in the session
 //! produces exactly one [`PlannedOperation`] with one of exactly six

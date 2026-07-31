@@ -34,7 +34,7 @@ pub mod client;
 mod live_tests;
 pub mod models;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 pub mod url_encode;
 pub mod version;
 

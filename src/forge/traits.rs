@@ -7,29 +7,31 @@ use crate::forge::remote_comments::RemoteReviewThread;
 use crate::forge::submit::SubmitEvent;
 use crate::model::{DiffLine, FileStatus};
 
-/// A forge/host family this tool knows the shape of. Only `GitHub` and
-/// `GitLab` currently have a working transport (see
-/// `crate::forge::registry::create_backend`); the other three are
-/// placeholder identities so capability profiles
+/// A forge/host family this tool knows the shape of. Every variant has a
+/// working transport (see `crate::forge::registry::create_backend`):
+/// `GitHub`/`GitLab` shell out to the existing `gh`/`glab` CLIs;
+/// `AzureDevOps` and the `Gitea`/`Forgejo` family use their own HTTP
+/// transports (`crate::forge::azure::backend`,
+/// `crate::forge::giteafj::backend`). Capability profiles
 /// (`crate::forge::capabilities`) and the dry-run publication planner
-/// (`crate::forge::dryrun`) can be modeled and tested ahead of their real
-/// HTTP adapters landing. Instantiating a transport for a placeholder kind
-/// always returns a typed error — never a panic, and never a silent
-/// fallback to a different kind.
+/// (`crate::forge::dryrun`) describe exactly what each transport actually
+/// supports — never a lowest-common-denominator guess. Instantiating a
+/// transport for an unregistered kind still always returns a typed error —
+/// never a panic, and never a silent fallback to a different kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForgeKind {
     GitHub,
     GitLab,
-    /// Placeholder only — no transport. See
-    /// `docs/follow-on-map/tickets/12-implement-azure-adapter.md`.
+    /// See `docs/follow-on-map/tickets/12-implement-azure-adapter.md` for
+    /// the adapter's implementation/evidence trail.
     AzureDevOps,
-    /// Placeholder only — no transport. Shares route/shape ancestry with
-    /// `Forgejo`, but ships its own capability profile: they are one
-    /// adapter family with divergent profiles, not one shared profile. See
+    /// Shares route/shape ancestry with `Forgejo`, but ships its own
+    /// capability profile: they are one adapter family with divergent
+    /// profiles, not one shared profile. See
     /// `docs/follow-on-map/tickets/13-implement-gitea-forgejo-adapter.md`.
     Gitea,
-    /// Placeholder only — no transport. See `Gitea`'s doc comment.
+    /// See `Gitea`'s doc comment.
     Forgejo,
 }
 
@@ -104,9 +106,8 @@ impl ForgeRepository {
         }
     }
 
-    /// Placeholder-kind constructor — see [`ForgeKind::AzureDevOps`]. Useful
-    /// for capability/dry-run fixtures; `registry::create_backend` refuses
-    /// to build a transport for it.
+    /// See [`ForgeKind::AzureDevOps`]; `registry::create_backend` builds a
+    /// real `AzureDevOpsBackend` transport for a repository of this kind.
     pub fn azure_devops(
         host: impl Into<String>,
         owner: impl Into<String>,
@@ -120,7 +121,8 @@ impl ForgeRepository {
         }
     }
 
-    /// Placeholder-kind constructor — see [`ForgeKind::Gitea`].
+    /// See [`ForgeKind::Gitea`]; `registry::create_backend` builds a real
+    /// `GiteaForgejoBackend` transport for a repository of this kind.
     pub fn gitea(
         host: impl Into<String>,
         owner: impl Into<String>,
@@ -134,7 +136,7 @@ impl ForgeRepository {
         }
     }
 
-    /// Placeholder-kind constructor — see [`ForgeKind::Forgejo`].
+    /// See [`ForgeKind::Forgejo`]; shares [`Self::gitea`]'s doc comment.
     pub fn forgejo(
         host: impl Into<String>,
         owner: impl Into<String>,
@@ -608,9 +610,11 @@ pub trait ForgeBackend {
     /// executes through this method.
     ///
     /// Default returns [`TuicrError::UnsupportedOperation`]; only backends
-    /// with a verified single-comment-thread endpoint (GitHub, GitLab)
-    /// override it. Placeholder kinds (Azure DevOps, Gitea, Forgejo) are
-    /// left on this default until their own tickets add real transports.
+    /// with a verified single-comment-thread endpoint (GitHub, GitLab,
+    /// Azure DevOps) override it. Gitea/Forgejo remain on this default
+    /// until a future ticket adds a verified reply/create-thread route on
+    /// that stable pin (see `crate::forge::capabilities::gitea_1_24`'s doc
+    /// comment: "no verified reply/resolve route on this stable pin").
     fn create_thread(
         &self,
         _pr: &PullRequestDetails,
@@ -627,8 +631,8 @@ pub trait ForgeBackend {
     /// [`Self::create_thread`]'s `mapping`/`root_comment_id`, or from
     /// importing the thread via [`Self::list_review_threads`]. Backends read
     /// whatever keys they need from it (never body/path heuristics) —
-    /// GitHub reads `root_comment_id`; GitLab reads `id` (the discussion
-    /// ID).
+    /// GitHub reads `root_comment_id`; GitLab and Azure DevOps read `id`
+    /// (the discussion/thread ID).
     ///
     /// Default returns [`TuicrError::UnsupportedOperation`].
     fn reply_to_thread(

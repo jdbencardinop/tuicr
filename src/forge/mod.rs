@@ -13,6 +13,8 @@ pub mod dryrun;
 pub mod giteafj;
 pub mod github;
 pub mod gitlab;
+#[cfg(test)]
+mod integration_tests;
 pub mod pr_open;
 pub mod publish;
 pub mod registry;

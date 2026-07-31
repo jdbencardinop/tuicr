@@ -63,7 +63,7 @@ mod contract_tests;
 mod live_tests;
 pub mod models;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 use crate::error::{Result, TuicrError};
 use crate::forge::traits::{ForgeRepository, PullRequestTarget};
