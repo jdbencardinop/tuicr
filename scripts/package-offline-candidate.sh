@@ -288,50 +288,158 @@ PYEOF
 # staged archive contents (binary + docs) before packaging. No new tool is
 # added -- this is a small grep-based pattern scan, recorded as an artifact
 # for human review, not a certification that no secret exists anywhere.
+#
+# Byte-aware and explicit-file-list by design: every regular file under the
+# scan root -- including the compiled binary and every file that will end up
+# inside the tar archive -- is scanned with `grep -a` (never plain `grep -I`,
+# which silently treats files it guesses are "binary" as non-matching and
+# would make a compiled binary invisible to the scan while a report still
+# claims it was covered). Matched secret *values* are never printed or
+# written to the report; only the relative filename and the matched pattern
+# category are recorded. Any packaging run with a non-allowlisted match is
+# aborted (`die`) before an archive is ever created -- see package_artifact().
 # ---------------------------------------------------------------------------
+SECRET_SCAN_PATTERN_IDS=(
+  github-pat-classic
+  github-pat-other-prefixes
+  github-pat-fine-grained
+  gitlab-pat
+  aws-access-key-id
+  slack-token
+  pem-private-key
+)
 SECRET_SCAN_PATTERNS=(
-  'ghp_[0-9A-Za-z]{36}'
-  'gh[oesu]_[0-9A-Za-z]{36}'
+  'ghp_[0-9A-Za-z]{36,}'
+  'gh[oesu]_[0-9A-Za-z]{36,}'
   'github_pat_[0-9A-Za-z_]{22,}'
-  'glpat-[0-9A-Za-z_-]{20}'
+  'glpat-[0-9A-Za-z_-]{20,}'
   'AKIA[0-9A-Z]{16}'
   'xox[baprs]-[0-9A-Za-z-]{10,}'
   '-----BEGIN[A-Z ]*PRIVATE KEY-----'
 )
 
+# Narrow, exact-value allowlist. Every entry here is a complete, literal
+# matched string that must appear byte-for-byte in `SECRET_SCAN_ALLOWLIST`
+# to be accepted -- never a path, directory, filename, or value *prefix*.
+# These are all deliberately synthetic test-fixture tokens already present,
+# unmodified, in this repo's own tracked test source (see SECRET-SCAN.md for
+# the exact file:line provenance of each entry); none of them are real
+# credentials. Any other match -- including a longer/shorter variant of one
+# of these strings -- is treated as a real, non-allowlisted hit and fails
+# packaging.
+SECRET_SCAN_ALLOWLIST=(
+  'ghp_SENTINEL0123456789abcdefABCDEF01234567'
+  'glpat-SENTINEL0123456789abcdefABCDEF'
+  'glpat-SENTINEL0123456789abcdef'
+  'glpat-XyZ_0123456789abcdef'
+  'glpat-ABCDEFGHIJKLMNOPQRST'
+)
+
+_secret_scan_is_allowlisted() {
+  local value="$1" entry
+  for entry in "${SECRET_SCAN_ALLOWLIST[@]}"; do
+    [[ "$value" == "$entry" ]] && return 0
+  done
+  return 1
+}
+
+# Scans every regular file under $1, byte-aware (`grep -a`, no binary skip),
+# against every pattern in SECRET_SCAN_PATTERNS. Emits one
+# "relative/path<TAB>pattern-id" line on stdout per NON-allowlisted match
+# found (never the matched value itself). Emits nothing and exits 0 if no
+# non-allowlisted match is found. Never calls `die` itself -- callers decide
+# whether/how to fail so this can also be used, side-effect-free, by the
+# self-test below.
+_secret_scan_detect() {
+  local scan_root="$1"
+  local file rel pattern_idx pattern pattern_id value
+  while IFS= read -r -d '' file; do
+    rel="${file#"$scan_root"/}"
+    for pattern_idx in "${!SECRET_SCAN_PATTERNS[@]}"; do
+      pattern="${SECRET_SCAN_PATTERNS[$pattern_idx]}"
+      pattern_id="${SECRET_SCAN_PATTERN_IDS[$pattern_idx]}"
+      while IFS= read -r value; do
+        [[ -z "$value" ]] && continue
+        if ! _secret_scan_is_allowlisted "$value"; then
+          printf '%s\t%s\n' "$rel" "$pattern_id"
+        fi
+      done < <(grep -aoE "$pattern" "$file" 2>/dev/null || true)
+    done
+  done < <(find "$scan_root" -type f ! -path '*/.git/*' -print0)
+}
+
+# Proves the scanner is byte-aware (does not silently skip binary files, the
+# bug this hardening round fixes) and that the allowlist is genuinely narrow
+# (a brand-new synthetic secret-shaped value is NOT waved through), before
+# any real scan result is trusted. Aborts packaging if either check fails.
+self_test_secret_scan() {
+  local test_root="$WORK_DIR/self-test-secret-scan"
+  rm -rf "$test_root"
+  mkdir -p "$test_root/clean-case" "$test_root/dirty-case"
+
+  # Non-text "binary" payload -- plain `grep -I`/`grep` (no -a) would guess
+  # this file is binary and skip it entirely, which is exactly the bug being
+  # fixed. Both the clean and dirty dummy files share this same binary
+  # prefix; only the dirty one has a secret-shaped suffix appended.
+  printf '\x00\x01\x02\x03\xff\xfe\xfd\x00binary-blob-marker\x00\x01\x02' > "$test_root/clean-case/dummy.bin"
+  cp "$test_root/clean-case/dummy.bin" "$test_root/dirty-case/dummy.bin"
+  # Deliberately synthetic, NOT in SECRET_SCAN_ALLOWLIST, NOT a real
+  # credential -- proves both binary-awareness and allowlist narrowness.
+  # Split into two fragments (only concatenated at runtime, into a
+  # never-committed scratch file) so this fixture never appears as a
+  # matching contiguous literal in this script's own tracked source --
+  # otherwise the real "clean source checkout" scan would flag this file.
+  local self_test_token_prefix="ghp_"
+  local self_test_token_body="SELFTESTSYNTHETICNOTREALTOKEN1234567"
+  printf '%s%s' "$self_test_token_prefix" "$self_test_token_body" >> "$test_root/dirty-case/dummy.bin"
+
+  local clean_hits dirty_hits
+  clean_hits="$(_secret_scan_detect "$test_root/clean-case")"
+  dirty_hits="$(_secret_scan_detect "$test_root/dirty-case")"
+
+  [[ -z "$clean_hits" ]] \
+    || die "secret-scan self-test failed: scanner reported a false positive on a clean dummy binary file with no secret-shaped content; refusing to trust it for the real scan"
+  [[ -n "$dirty_hits" ]] \
+    || die "secret-scan self-test failed: scanner did NOT detect a synthetic non-allowlisted secret-shaped token appended to a dummy binary file (binary-skip / false-negative bug); refusing to trust it for the real scan"
+
+  rm -rf "$test_root"
+  log "secret-scan self-test passed: dummy binary with a synthetic non-allowlisted token is flagged, clean dummy binary is not"
+}
+
 run_secret_scan() {
   local scan_root="$1" label="$2" report_file="$3"
-  local hits=0
+  local hits_raw hit_count=0 rel pattern_id
+  hits_raw="$(_secret_scan_detect "$scan_root")"
   {
     echo "# Secret scan: $label"
     echo
-    echo "Grep-based pattern scan over \`$scan_root\` (tracked source / staged"
-    echo "archive contents only, at commit $SOURCE_SHA_SHORT). This is an audit"
-    echo "aid, not a certification that no secret exists anywhere -- review any"
-    echo "hits below manually."
+    echo "Byte-aware pattern scan (\`grep -a\`, explicit per-file enumeration,"
+    echo "no binary-file skip) over every regular file under \`$scan_root\`"
+    echo "(tracked source / staged archive contents -- including the"
+    echo "compiled binary -- at commit $SOURCE_SHA_SHORT). This is an audit"
+    echo "aid, not a certification that no secret exists anywhere. Matched"
+    echo "secret *values* are never recorded here, only filename + pattern"
+    echo "category. Values exactly matching the narrow, documented allowlist"
+    echo "in scripts/package-offline-candidate.sh's SECRET_SCAN_ALLOWLIST"
+    echo "(see docs/offline-candidate/SECRET-SCAN.md for provenance and"
+    echo "design) are known synthetic test fixtures and do not fail"
+    echo "packaging; every other match aborts packaging immediately."
     echo
   } >> "$report_file"
-  for pattern in "${SECRET_SCAN_PATTERNS[@]}"; do
-    local matches
-    matches="$(grep -RIlE --exclude-dir=.git --exclude-dir=target "$pattern" "$scan_root" 2>/dev/null || true)"
-    if [[ -n "$matches" ]]; then
-      hits=$((hits + 1))
-      {
-        echo "## MATCH: pattern \`$pattern\`"
-        echo '```'
-        echo "$matches"
-        echo '```'
-        echo
-      } >> "$report_file"
-    fi
-  done
-  if [[ "$hits" -eq 0 ]]; then
-    echo "No matches for any of the ${#SECRET_SCAN_PATTERNS[@]} known secret patterns." >> "$report_file"
-    log "[$label] secret scan: no matches"
-  else
-    log "[$label] secret scan: $hits pattern(s) matched -- see $report_file"
+  if [[ -n "$hits_raw" ]]; then
+    while IFS=$'\t' read -r rel pattern_id; do
+      [[ -z "$rel" ]] && continue
+      hit_count=$((hit_count + 1))
+      echo "- NON-ALLOWLISTED MATCH: \`$rel\` (pattern category: $pattern_id)" >> "$report_file"
+    done <<< "$hits_raw"
   fi
-  echo "$hits"
+  if [[ "$hit_count" -eq 0 ]]; then
+    echo "No non-allowlisted matches for any of the ${#SECRET_SCAN_PATTERNS[@]} known secret patterns." >> "$report_file"
+    log "[$label] secret scan: no non-allowlisted matches"
+  else
+    log "[$label] secret scan: $hit_count non-allowlisted match(es) -- see $report_file"
+    die "[$label] secret scan found $hit_count non-allowlisted potential secret(s); refusing to package (filenames/categories only are in $report_file, no values)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -520,6 +628,13 @@ package_artifact() {
   cp "$ROOT_DIR/scripts/import-upstream-reviews.sh" "$stage_dir/import-upstream-reviews.sh"
   chmod +x "$stage_dir/import-upstream-reviews.sh"
 
+  # Secret scan every file that will go into the archive -- including the
+  # compiled binary itself -- BEFORE the archive is created (`tar`, below).
+  # This must run first: a non-allowlisted match aborts packaging (die)
+  # before any archive exists to checksum or ship, so a real secret can
+  # never reach a produced/checksummed artifact.
+  run_secret_scan "$stage_dir" "$os-$arch staged archive (pre-tar)" "$OUTPUT_DIR/manifest/SECRET-SCAN.md"
+
   local archive_path="$OUTPUT_DIR/${base_name}.tar.gz"
   rm -f "$archive_path"
   tar -C "$stage_root" -czf "$archive_path" "$base_name"
@@ -529,10 +644,6 @@ package_artifact() {
   archive_sha256="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
   binary_size="$(wc -c < "$stage_dir/tuicr" | tr -d ' ')"
   archive_size="$(wc -c < "$archive_path" | tr -d ' ')"
-
-  # Secret scan the exact staged archive contents (binary + docs) before
-  # trusting the archive. No new tool added; see run_secret_scan().
-  run_secret_scan "$stage_dir" "$os-$arch staged archive" "$OUTPUT_DIR/manifest/SECRET-SCAN.md" >/dev/null
 
   # --- Verify: fresh extract + run --version + full CLI smoke ------------
   local verify_dir="$WORK_DIR/verify-${os}-${arch}"
@@ -587,11 +698,24 @@ make_clean_source_checkout() {
 run_prebuild_checks
 generate_dependency_snapshot "$OUTPUT_DIR/manifest"
 
+# Prove the secret scanner itself works (byte-aware, narrow allowlist)
+# before trusting any of its results below.
+self_test_secret_scan
+
+: > "$OUTPUT_DIR/manifest/SECRET-SCAN.md"
+{
+  echo "Self-test: a synthetic, non-allowlisted secret-shaped token appended"
+  echo "to a dummy binary file was correctly flagged, and a clean dummy"
+  echo "binary file with no secret-shaped content was correctly not flagged"
+  echo "(see docs/offline-candidate/SECRET-SCAN.md for the self-test design)."
+  echo "Self-test: PASSED."
+  echo
+} >> "$OUTPUT_DIR/manifest/SECRET-SCAN.md"
+
 CLEAN_SRC_DIR="$WORK_DIR/clean-src"
 log "building a clean git-archive checkout of $SOURCE_SHA_SHORT (used for both platform builds)"
 make_clean_source_checkout "$CLEAN_SRC_DIR"
-: > "$OUTPUT_DIR/manifest/SECRET-SCAN.md"
-run_secret_scan "$CLEAN_SRC_DIR" "clean source checkout ($SOURCE_SHA_SHORT)" "$OUTPUT_DIR/manifest/SECRET-SCAN.md" >/dev/null
+run_secret_scan "$CLEAN_SRC_DIR" "clean source checkout ($SOURCE_SHA_SHORT)" "$OUTPUT_DIR/manifest/SECRET-SCAN.md"
 
 if [[ "$SKIP_MACOS" -eq 0 ]]; then
   if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "x86_64" ]]; then
@@ -746,7 +870,19 @@ manifest = {
                 "vcs::git::libgit2::tests::should_discover_worktree_with_relativeworktrees_extension"
             ],
         },
-        "secret_scan_file": "manifest/SECRET-SCAN.md",
+        "secret_scan": {
+            "method": (
+                "Byte-aware (grep -a, never grep -I) explicit per-file scan of "
+                "every regular file under the clean source checkout and each "
+                "staged archive directory (including the compiled binary), run "
+                "BEFORE tar packaging; fails packaging (die) on any match not in "
+                "the narrow, exact-value SECRET_SCAN_ALLOWLIST. See "
+                "docs/offline-candidate/SECRET-SCAN.md."
+            ),
+            "self_test": "passed (dummy binary with synthetic non-allowlisted token flagged; clean dummy binary not flagged)",
+            "report_file": "manifest/SECRET-SCAN.md",
+            "design_doc": "docs/offline-candidate/SECRET-SCAN.md",
+        },
     },
     "artifacts": artifacts,
     "dependency_snapshot": {

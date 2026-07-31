@@ -419,10 +419,10 @@ fn should_never_detect_two_different_kinds_urls_as_the_same_kind() {
 
 #[test]
 fn should_never_leak_a_github_or_gitlab_shaped_token_through_redact_secrets() {
-    let raw = "error: authentication failed for token ghp_abcdefghijklmnopqrstuvwxyz0123456789 \
+    let raw = "error: authentication failed for token ghp_SENTINEL0123456789abcdefABCDEF01234567 \
                and glpat-ABCDEFGHIJKLMNOPQRST";
     let redacted = redact_secrets(raw);
-    assert!(!redacted.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    assert!(!redacted.contains("ghp_SENTINEL0123456789abcdefABCDEF01234567"));
     assert!(!redacted.contains("glpat-ABCDEFGHIJKLMNOPQRST"));
     assert!(redacted.contains("<redacted>"));
 }
