@@ -2828,6 +2828,7 @@ dependencies = [
  "flate2",
  "git2",
  "ignore",
+ "percent-encoding",
  "ratatui",
  "self-replace",
  "semver",

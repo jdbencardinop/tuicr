@@ -4,8 +4,9 @@
 //! These are `#[ignore]`d by default — they never run under a plain
 //! `cargo test` and never touch any external/hosted provider. They only
 //! activate when a caller (a shell harness that has already provisioned a
-//! disposable local container, e.g. via `fixtures/providers/{gitea,forgejo}
-//! /run.sh`'s own primitives) sets every one of:
+//! disposable local Gitea/Forgejo container, started from the stock
+//! `gitea/gitea:1.24`/`codeberg.org/forgejo/forgejo:16` images with a
+//! token-bearing user and an open PR seeded) sets every one of:
 //!
 //! - `TUICR_LIVE_KIND` = `gitea` | `forgejo`
 //! - `TUICR_LIVE_HOST` = e.g. `http://127.0.0.1:34521` (explicit scheme —

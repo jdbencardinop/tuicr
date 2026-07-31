@@ -1,0 +1,34 @@
+{
+  "provider": "forgejo",
+  "server_version": "16.0.1+gitea-1.22.0",
+  "image": "codeberg.org/forgejo/forgejo:16",
+  "pending_review_supported": true,
+  "pending_review_http_status": 200,
+  "add_comment_to_review_endpoint_supported": true,
+  "add_comment_to_review_endpoint_status": 200,
+  "extra_lines_count_behavior": "accepted",
+  "extra_lines_count_note": "HTTP 200 creating the range comment; verdict is accepted (field echoed with value 5), ignored (HTTP 200 but field/range dropped), or rejected (non-200).",
+  "swagger_status": 200,
+  "swagger_declares_extra_lines_count": "declared",
+  "swagger_has_dedicated_reply_endpoint": false,
+  "swagger_has_dedicated_resolve_endpoint": false,
+  "swagger_review_paths": [
+    { "path": "/repos/{owner}/{repo}/pulls/{index}/requested_reviewers", "methods": ["delete", "post"] },
+    { "path": "/repos/{owner}/{repo}/pulls/{index}/reviews", "methods": ["get", "post"] },
+    { "path": "/repos/{owner}/{repo}/pulls/{index}/reviews/{id}", "methods": ["delete", "get", "post"] },
+    { "path": "/repos/{owner}/{repo}/pulls/{index}/reviews/{id}/comments", "methods": ["get", "post"] },
+    { "path": "/repos/{owner}/{repo}/pulls/{index}/reviews/{id}/comments/{comment}", "methods": ["delete", "get"] },
+    { "path": "/repos/{owner}/{repo}/pulls/{index}/reviews/{id}/dismissals", "methods": ["post"] },
+    { "path": "/repos/{owner}/{repo}/pulls/{index}/reviews/{id}/undismissals", "methods": ["post"] },
+    { "path": "/repos/{owner}/{repo}/reviewers", "methods": ["get"] }
+  ],
+  "request_changes_expected_status": 200,
+  "request_changes_state": "REQUEST_CHANGES",
+  "request_changes_submit_status": 200,
+  "unsupported_endpoint_probes": [
+    { "operation": "reply", "method": "POST", "http_status": "405", "supported": false, "explicit_unsupported": true },
+    { "operation": "resolve", "method": "POST", "http_status": "405", "supported": false, "explicit_unsupported": true },
+    { "operation": "unresolve", "method": "POST", "http_status": "405", "supported": false, "explicit_unsupported": true },
+    { "operation": "edit", "method": "PATCH", "http_status": "405", "supported": false, "explicit_unsupported": true }
+  ]
+}

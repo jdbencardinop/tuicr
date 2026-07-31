@@ -35,6 +35,7 @@ mod live_tests;
 pub mod models;
 #[cfg(test)]
 mod test_support;
+pub mod url_encode;
 pub mod version;
 
 use crate::forge::traits::{ForgeKind, ForgeRepository};

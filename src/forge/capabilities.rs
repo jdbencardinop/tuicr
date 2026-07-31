@@ -6,13 +6,13 @@
 //! Forgejo adapters — can ask "what can this exact host/version do" without
 //! ever assuming a lowest-common-denominator shape across providers.
 //!
-//! Every profile constructor cites the evidence it is built from. See
-//! `docs/findings/providers/provider-semantics.md` and
-//! `docs/findings/providers/smoke-tests.md` in the companion research
-//! repository, plus the reproducible live harness results in
-//! `fixtures/providers/results-examples/{forgejo-16.0.1,gitea-1.24.7}.example.json`.
-//! Nothing here claims a capability beyond what that evidence states —
-//! unverified behavior is modeled as `Unsupported`/`None`, not guessed.
+//! Every profile constructor cites the evidence it is built from. For the
+//! Gitea/Forgejo family, see the vendored, sanitized live-evidence fixtures
+//! in `src/forge/giteafj/fixtures/` (`README.md` there explains their
+//! provenance and lists the official upstream Gitea/Forgejo source also
+//! consulted). Nothing here claims a capability beyond what that evidence
+//! states — unverified behavior is modeled as `Unsupported`/`None`, not
+//! guessed.
 
 use serde::{Deserialize, Serialize};
 
@@ -95,7 +95,7 @@ pub struct PendingReviewSupport {
     /// shot. Live-proven divergence: Forgejo 16 supports this (its Swagger
     /// exposes `POST .../reviews/{id}/comments`); Gitea 1.24 does not (`GET`
     /// only on that route) — see
-    /// `fixtures/providers/results-examples/{forgejo-16.0.1,gitea-1.24.7}.example.json`,
+    /// `src/forge/giteafj/fixtures/capability-evidence-{forgejo-16.0.1,gitea-1.24.7}.json`,
     /// keys `add_comment_to_review_endpoint_supported`.
     pub incremental_comments: bool,
 }
@@ -352,8 +352,9 @@ pub fn azure_devops() -> ProviderCapabilities {
     }
 }
 
-/// Gitea 1.24 (live-evidenced against the `1.24.7` stable pin via
-/// `fixtures/providers/gitea/run.sh`): native pending review created in one
+/// Gitea 1.24 (live-evidenced against the `1.24.7` stable pin; see
+/// `src/forge/giteafj/fixtures/capability-evidence-gitea-1.24.7.json`):
+/// native pending review created in one
 /// shot only (no incremental add-comment route), silently drops
 /// `extra_lines_count` range data rather than rejecting it (modeled as
 /// `RangeSupport::None`, not a lossy `SameSide`), native request-changes,
@@ -381,8 +382,9 @@ pub fn gitea_1_24() -> ProviderCapabilities {
     }
 }
 
-/// Forgejo 16 (live-evidenced against the `16.0.1+gitea-1.22.0` stable pin
-/// via `fixtures/providers/forgejo/run.sh`): same shared surface as Gitea
+/// Forgejo 16 (live-evidenced against the `16.0.1+gitea-1.22.0` stable pin;
+/// see `src/forge/giteafj/fixtures/capability-evidence-forgejo-16.0.1.json`):
+/// same shared surface as Gitea
 /// 1.24 except it accepts `extra_lines_count` range data (modeled as
 /// `RangeSupport::SameSide`) and supports adding comments to an
 /// already-created pending review.
@@ -414,12 +416,13 @@ fn gitea_1_24_with_kind(kind: ForgeKind) -> ProviderCapabilities {
 /// kind (Gitea `1.24.7`, Forgejo `16.0.1`). A `Some` version must bucket
 /// into the evidenced release line for that provider — Gitea buckets on
 /// `major.minor` (only `1.24.x` is evidenced), while Forgejo buckets on
-/// `major` only, since the evidence docs describe the whole stable "16"
+/// `major` only, since the vendored evidence (see
+/// `src/forge/giteafj/fixtures/`) describes the whole stable "16"
 /// line rather than a single `16.0` patch pin. This module never
-/// extrapolates capabilities for an untested Gitea/Forgejo release, per
-/// `provider-semantics.md`: "Never assume every Forgejo extension exists in
-/// Gitea" (and, symmetrically, never assume a tested version's behavior
-/// carries to an untested one either).
+/// extrapolates capabilities for an untested Gitea/Forgejo release: never
+/// assume every Forgejo extension exists in Gitea, and symmetrically,
+/// never assume a tested version's behavior carries to an untested one
+/// either.
 pub fn capabilities_for(
     kind: ForgeKind,
     version: Option<&ProviderVersion>,
@@ -437,20 +440,19 @@ pub fn capabilities_for(
             }
             Some(v) => Err(TuicrError::UnsupportedOperation(format!(
                 "no evidence-backed capability profile for gitea version {:?}; only 1.24.x is \
-                 live-evidenced (see fixtures/providers/results-examples/gitea-1.24.7.example.json)",
+                 live-evidenced (see src/forge/giteafj/fixtures/capability-evidence-gitea-1.24.7.json)",
                 v.0
             ))),
         },
         ForgeKind::Forgejo => match version {
             None => Ok(forgejo_16()),
-            // Forgejo's evidence is scoped to the stable "16" release line
-            // (see provider-semantics.md / smoke-tests.md: "targeting
-            // stable 16"), not a single major.minor patch pin, so bucket on
-            // major version only.
+            // Forgejo's evidence is scoped to the stable "16" release line,
+            // not a single major.minor patch pin, so bucket on major
+            // version only.
             Some(v) if v.major_minor().map(|(major, _)| major) == Some(16) => Ok(forgejo_16()),
             Some(v) => Err(TuicrError::UnsupportedOperation(format!(
                 "no evidence-backed capability profile for forgejo version {:?}; only 16.x is \
-                 live-evidenced (see fixtures/providers/results-examples/forgejo-16.0.1.example.json)",
+                 live-evidenced (see src/forge/giteafj/fixtures/capability-evidence-forgejo-16.0.1.json)",
                 v.0
             ))),
         },
@@ -587,5 +589,91 @@ mod tests {
             let restored: ProviderCapabilities = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(caps, restored);
         }
+    }
+
+    /// Cross-checks `gitea_1_24()`/`forgejo_16()` against the vendored,
+    /// sanitized live-evidence fixtures they're built from
+    /// (`src/forge/giteafj/fixtures/capability-evidence-*.json`) — proving
+    /// every capability field this module claims for the Gitea/Forgejo
+    /// family traces back to a concrete, in-repo evidence artifact rather
+    /// than an unverifiable comment.
+    #[test]
+    fn should_match_gitea_capabilities_to_vendored_evidence_fixture() {
+        let evidence: serde_json::Value = serde_json::from_str(include_str!(
+            "giteafj/fixtures/capability-evidence-gitea-1.24.7.json"
+        ))
+        .expect("valid evidence JSON");
+        let caps = gitea_1_24();
+
+        assert_eq!(evidence["server_version"], "1.24.7");
+        assert_eq!(caps.version, Some(ProviderVersion::new("1.24.7")));
+
+        assert_eq!(evidence["extra_lines_count_behavior"], "ignored");
+        assert_eq!(
+            caps.range,
+            RangeSupport::None,
+            "evidence says Gitea 1.24 ignores extra_lines_count (silent drop), \
+             which must never be modeled as a lossy SameSide"
+        );
+
+        assert_eq!(evidence["pending_review_supported"], true);
+        assert!(caps.pending_review.supported);
+        assert_eq!(evidence["add_comment_to_review_endpoint_supported"], false);
+        assert!(!caps.pending_review.incremental_comments);
+
+        assert_eq!(evidence["request_changes_state"], "REQUEST_CHANGES");
+        assert_eq!(caps.request_changes, RequestChangesSupport::Native);
+
+        for probe in evidence["unsupported_endpoint_probes"]
+            .as_array()
+            .expect("probe array")
+        {
+            assert_eq!(
+                probe["supported"], false,
+                "every probed reply/resolve/unresolve/edit route returned 405 on \
+                 the live stable pin"
+            );
+        }
+        assert_eq!(caps.reply, ReplySupport::Unsupported);
+        assert_eq!(caps.thread_resolution, ThreadResolutionLevel::None);
+    }
+
+    #[test]
+    fn should_match_forgejo_capabilities_to_vendored_evidence_fixture() {
+        let evidence: serde_json::Value = serde_json::from_str(include_str!(
+            "giteafj/fixtures/capability-evidence-forgejo-16.0.1.json"
+        ))
+        .expect("valid evidence JSON");
+        let caps = forgejo_16();
+
+        assert_eq!(evidence["server_version"], "16.0.1+gitea-1.22.0");
+
+        assert_eq!(evidence["extra_lines_count_behavior"], "accepted");
+        assert_eq!(
+            caps.range,
+            RangeSupport::SameSide,
+            "evidence says Forgejo 16 accepts and echoes back extra_lines_count"
+        );
+
+        assert_eq!(evidence["pending_review_supported"], true);
+        assert!(caps.pending_review.supported);
+        assert_eq!(evidence["add_comment_to_review_endpoint_supported"], true);
+        assert!(caps.pending_review.incremental_comments);
+
+        assert_eq!(evidence["request_changes_state"], "REQUEST_CHANGES");
+        assert_eq!(caps.request_changes, RequestChangesSupport::Native);
+
+        for probe in evidence["unsupported_endpoint_probes"]
+            .as_array()
+            .expect("probe array")
+        {
+            assert_eq!(
+                probe["supported"], false,
+                "every probed reply/resolve/unresolve/edit route returned 405 on \
+                 the live stable pin"
+            );
+        }
+        assert_eq!(caps.reply, ReplySupport::Unsupported);
+        assert_eq!(caps.thread_resolution, ThreadResolutionLevel::None);
     }
 }

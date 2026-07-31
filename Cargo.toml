@@ -44,6 +44,12 @@ clap = { version = "4", features = ["derive"] }
 # Utilities
 directories = "6.0"
 ureq = { version = "3", features = ["json"] }
+# Percent-encode dynamic path segments/query values built for the Gitea/
+# Forgejo REST transport (`src/forge/giteafj/`). Already resolved
+# transitively at this exact version via `ureq`'s own dependency tree
+# (see `Cargo.lock`), so this only promotes an already-present, already-
+# audited crate to a direct dependency rather than adding a new one.
+percent-encoding = "2.3"
 unicode-width = "0.2"
 uuid = { version = "1.0", features = ["v4"] }
 arboard = { version = "3.4", features = ["wayland-data-control"] }

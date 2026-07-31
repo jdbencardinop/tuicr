@@ -5,9 +5,10 @@
 //! shelling out to a CLI, since neither Gitea nor Forgejo ships a
 //! ubiquitous, review-API-capable CLI equivalent to `gh`/`glab` that this
 //! codebase can assume is installed. Auth is a bearer-style `token <sha1>`
-//! header (`Authorization: token ...`), the format both APIs document and
-//! the one `fixtures/providers/lib/lifecycle.sh`'s `token_auth` helper uses
-//! against the live disposable harnesses.
+//! header (`Authorization: token ...`), the format both APIs document —
+//! see the Gitea/Forgejo Swagger `securityDefinitions` (`AuthorizationHeaderToken`,
+//! `Authorization: token <TOKEN>`) — and verified live against disposable
+//! Gitea 1.24/Forgejo 16 containers during this adapter's development.
 //!
 //! `http_status_as_error(false)` is set deliberately: this module always
 //! wants the response body alongside the status code (error bodies carry

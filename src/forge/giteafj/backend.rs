@@ -6,8 +6,10 @@
 //! actually diverges (range-comment handling, incremental pending-review
 //! comments, request-changes support) is gated through
 //! `crate::forge::capabilities::capabilities_for`, which already encodes
-//! the evidence-backed difference. See `docs/findings/providers/
-//! provider-semantics.md` for the underlying evidence.
+//! the evidence-backed difference. See `src/forge/giteafj/fixtures/` (the
+//! sanitized, in-repo vendored copies of that live evidence) and
+//! `src/forge/capabilities.rs`'s `gitea_1_24()`/`forgejo_16()` doc comments
+//! for the underlying evidence.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,6 +23,9 @@ use crate::forge::giteafj::client::{GfHttpClient, require_success};
 use crate::forge::giteafj::models::{
     GfCommit, GfCreateReviewComment, GfCreateReviewRequest, GfCreateReviewResponse, GfPullRequest,
     GfReview, GfReviewComment, GfUser,
+};
+use crate::forge::giteafj::url_encode::{
+    encode_path_segment, encode_path_segments, encode_query_value,
 };
 use crate::forge::giteafj::version::{fetch_version, verify_kind_matches};
 use crate::forge::remote_comments::{
@@ -214,7 +219,11 @@ impl GiteaForgejoBackend {
     }
 
     fn base_path(repo: &ForgeRepository) -> String {
-        format!("/api/v1/repos/{}/{}", repo.owner, repo.name)
+        format!(
+            "/api/v1/repos/{}/{}",
+            encode_path_segment(&repo.owner),
+            encode_path_segment(&repo.name)
+        )
     }
 
     /// Turn one `limit={page_size}`-bounded page of raw rows into a
@@ -222,7 +231,7 @@ impl GiteaForgejoBackend {
     /// math can be unit-tested without a live/mock HTTP round trip.
     /// Gitea/Forgejo's `page`/`limit` pagination has no documented
     /// total-count field or `Link` header this codebase has live evidence
-    /// for (see `docs/findings/providers/`), so "received a full page"
+    /// for, so "received a full page"
     /// (`rows.len() >= page_size`) is the standard, self-correcting
     /// heuristic for "there may be more" — a false positive here only
     /// costs one extra empty-page fetch on the next call, never drops
@@ -320,8 +329,8 @@ impl GiteaForgejoBackend {
         let endpoint = format!(
             "{}/raw/{}?ref={}",
             Self::base_path(&request.repository),
-            path_str,
-            request.sha(),
+            encode_path_segments(&path_str),
+            encode_query_value(request.sha()),
         );
         let response = client.get(&endpoint)?;
         require_success(&response, &endpoint)?;
@@ -384,7 +393,7 @@ impl GiteaForgejoBackend {
         // this keeps write-path behavior identical to what Gitea itself
         // does when it silently drops `extra_lines_count`
         // (`extra_lines_count_behavior: "ignored"` in
-        // `fixtures/providers/results-examples/gitea-1.24.7.example.json`):
+        // `src/forge/giteafj/fixtures/capability-evidence-gitea-1.24.7.json`):
         // a single-line comment anchored at the range start.
         let anchor_line = comment.start_line.unwrap_or(comment.line);
         let (old_position, new_position) = match comment.side {
@@ -635,8 +644,10 @@ impl ForgeBackend for GiteaForgejoBackend {
 
         let client = self.client_for(&pr.repository)?;
         let path = format!(
-            "{}/compare/{start_sha}...{end_sha}?output=diff",
-            Self::base_path(&pr.repository)
+            "{}/compare/{}...{}?output=diff",
+            Self::base_path(&pr.repository),
+            encode_path_segment(start_sha),
+            encode_path_segment(end_sha)
         );
         let response = client.get(&path)?;
         if response.is_success() {
@@ -781,6 +792,41 @@ impl ForgeBackend for GiteaForgejoBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serializes tests that must set `$GITEA_TOKEN`/`$FORGEJO_TOKEN` (a
+    /// process-wide env var) so parallel `cargo test` threads never race
+    /// each other's set/restore. Every other test in this module reaches
+    /// `capabilities_for` directly with a hand-built `GfHttpClient`
+    /// instead of going through `client_for`'s token resolution, so this
+    /// is only needed by the two full-round-trip URL-encoding tests below
+    /// that must exercise the real `client_for` path.
+    fn token_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Set `$GITEA_TOKEN` for the duration of `body`, restoring whatever
+    /// value (or absence) was previously there afterward. Holds
+    /// [`token_env_lock`] for the whole call so concurrent test threads
+    /// can't observe or clobber each other's temporary value.
+    fn with_gitea_token<T>(body: impl FnOnce() -> T) -> T {
+        let _guard = token_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var("GITEA_TOKEN").ok();
+        // SAFETY: serialized by `token_env_lock` above, so no other thread
+        // observes a torn/concurrent mutation of this process-wide var.
+        unsafe {
+            std::env::set_var("GITEA_TOKEN", "mock-token");
+        }
+        let result = body();
+        unsafe {
+            match &previous {
+                Some(value) => std::env::set_var("GITEA_TOKEN", value),
+                None => std::env::remove_var("GITEA_TOKEN"),
+            }
+        }
+        result
+    }
 
     #[test]
     fn should_reject_repository_with_mismatched_kind() {
@@ -967,7 +1013,7 @@ mod tests {
             "/api/v1/version".to_string(),
             (200u16, r#"{"version":"1.20.0"}"#.to_string()),
         );
-        let base_url = start_mock_server(responses);
+        let (base_url, _requests) = start_mock_server(responses);
 
         let backend = GiteaForgejoBackend::new(ForgeKind::Gitea, None);
         let repo = ForgeRepository::gitea(&base_url, "owner", "repo");
@@ -996,7 +1042,7 @@ mod tests {
             "/api/v1/version".to_string(),
             (200u16, r#"{"version":"16.0.1+gitea-1.22.0"}"#.to_string()),
         );
-        let base_url = start_mock_server(responses);
+        let (base_url, _requests) = start_mock_server(responses);
 
         // Configured as Gitea, but the live server is Forgejo-fingerprinted.
         let backend = GiteaForgejoBackend::new(ForgeKind::Gitea, None);
@@ -1023,7 +1069,7 @@ mod tests {
             "/api/v1/version".to_string(),
             (200u16, r#"{"version":"1.24.7"}"#.to_string()),
         );
-        let base_url = start_mock_server(responses);
+        let (base_url, _requests) = start_mock_server(responses);
 
         let backend = GiteaForgejoBackend::new(ForgeKind::Gitea, None);
         let repo = ForgeRepository::gitea(&base_url, "owner", "repo");
@@ -1036,5 +1082,134 @@ mod tests {
             .capabilities_for(&client, &repo)
             .expect("second call must hit the cache, not the network");
         assert_eq!(first.range, second.range);
+    }
+
+    /// End-to-end (through the real `GfHttpClient`/`ureq` stack against a
+    /// mock TCP server, not just a pure-string assertion) proof that
+    /// `fetch_file_via_api` percent-encodes the file path and ref before
+    /// they reach the wire: a raw, unencoded interpolation would either
+    /// truncate the request at `#`/`?`, corrupt it with a literal space,
+    /// or otherwise fail to match the path this test registers a response
+    /// for, so a passing `expect` here proves the *exact* encoded
+    /// request-target was sent. Exercises every character class called
+    /// out by the audit: space, `#`, `?`, `%`, and unicode.
+    #[test]
+    fn should_percent_encode_special_characters_in_file_path_and_ref() {
+        use crate::forge::giteafj::test_support::start_mock_server;
+        use crate::model::FileStatus;
+        use std::collections::HashMap;
+
+        with_gitea_token(|| {
+            let raw_path = "docs/notes #1 100%?.md";
+            let raw_ref = "feature branch#ünïcode";
+            let expected_path_segment = "docs/notes%20%231%20100%25%3F.md";
+            let expected_ref_query = "feature%20branch%23%C3%BCn%C3%AFcode";
+
+            let mut responses = HashMap::new();
+            responses.insert(
+                "/api/v1/version".to_string(),
+                (200u16, r#"{"version":"1.24.7"}"#.to_string()),
+            );
+            let expected_request = format!(
+                "/api/v1/repos/owner/repo/raw/{expected_path_segment}?ref={expected_ref_query}"
+            );
+            responses.insert(
+                expected_request.clone(),
+                (200u16, "file contents".to_string()),
+            );
+            let (base_url, requests) = start_mock_server(responses);
+
+            let repo = ForgeRepository::gitea(&base_url, "owner", "repo");
+            let backend = GiteaForgejoBackend::new(ForgeKind::Gitea, None);
+            let request = ForgeFileLinesRequest {
+                repository: repo,
+                base_sha: raw_ref.to_string(),
+                head_sha: raw_ref.to_string(),
+                path: PathBuf::from(raw_path),
+                status: FileStatus::Modified,
+                side: crate::forge::traits::ForgeFileSide::Head,
+                start_line: 1,
+                end_line: 1,
+            };
+
+            let body = backend
+                .fetch_file_via_api(&request)
+                .expect("request must reach the exact registered encoded path");
+            assert_eq!(body, "file contents");
+
+            let seen = requests.lock().expect("lock captured requests");
+            assert!(
+                seen.contains(&expected_request),
+                "expected the exact encoded request-target {expected_request:?} in {seen:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn should_percent_encode_owner_and_repo_in_base_path() {
+        let repo = ForgeRepository::gitea("http://example.com", "my org", "repo#1");
+        assert_eq!(
+            GiteaForgejoBackend::base_path(&repo),
+            "/api/v1/repos/my%20org/repo%231"
+        );
+    }
+
+    /// Same wire-level proof as
+    /// `should_percent_encode_special_characters_in_file_path_and_ref`,
+    /// but for the commit-range compare endpoint: confirms `start_sha`/
+    /// `end_sha` are percent-encoded individually (as single path-segment
+    /// tokens — never split on `/`, since these are documented as commit
+    /// SHAs, not slash-containing ref names) while the literal `...`
+    /// separator between them and the `compare/`/`?output=diff` structure
+    /// stay intact.
+    #[test]
+    fn should_percent_encode_shas_in_compare_endpoint() {
+        use crate::forge::giteafj::test_support::start_mock_server;
+        use std::collections::HashMap;
+
+        with_gitea_token(|| {
+            let mut responses = HashMap::new();
+            responses.insert(
+                "/api/v1/version".to_string(),
+                (200u16, r#"{"version":"1.24.7"}"#.to_string()),
+            );
+            let expected_request =
+                "/api/v1/repos/owner/repo/compare/weird%20sha%231...another%3Fsha?output=diff"
+                    .to_string();
+            responses.insert(expected_request.clone(), (200u16, "diff body".to_string()));
+            let (base_url, requests) = start_mock_server(responses);
+
+            let repo = ForgeRepository::gitea(&base_url, "owner", "repo");
+            let backend = GiteaForgejoBackend::new(ForgeKind::Gitea, None);
+            let pr = PullRequestDetails {
+                repository: repo,
+                number: 1,
+                title: String::new(),
+                url: String::new(),
+                state: "open".to_string(),
+                is_draft: false,
+                author: None,
+                head_ref_name: String::new(),
+                base_ref_name: String::new(),
+                head_sha: String::new(),
+                base_sha: String::new(),
+                body: String::new(),
+                updated_at: None,
+                closed: false,
+                merged_at: None,
+                diff_start_sha: None,
+            };
+
+            let diff = backend
+                .get_pull_request_commit_range_diff(&pr, "weird sha#1", "another?sha")
+                .expect("request must reach the exact registered encoded compare path");
+            assert_eq!(diff, "diff body");
+
+            let seen = requests.lock().expect("lock captured requests");
+            assert!(
+                seen.contains(&expected_request),
+                "expected the exact encoded compare request-target {expected_request:?} in {seen:?}"
+            );
+        });
     }
 }

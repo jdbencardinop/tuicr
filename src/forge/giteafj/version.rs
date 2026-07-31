@@ -2,12 +2,12 @@
 //!
 //! Forgejo's version string carries a `+gitea-<base>` build-metadata suffix
 //! (e.g. `"16.0.1+gitea-1.22.0"`); Gitea's does not (e.g. `"1.24.7"`) — see
-//! `fixtures/providers/results-examples/{forgejo-16.0.1,gitea-1.24.7}.example.json`,
-//! key `server_version`, and `fixtures/providers/lib/lifecycle.sh`'s
-//! `jget "$HTTP_BODY" "version"` call against the real `/api/v1/version`
-//! response. This module uses that fingerprint to catch operator
-//! misconfiguration (e.g. `--provider forgejo` pointed at a plain Gitea
-//! host) as a typed error instead of silently applying the wrong
+//! the vendored, sanitized `GET /api/v1/version` response fixtures in
+//! `src/forge/giteafj/fixtures/version-{gitea-1.24.7,forgejo-16.0.1}.json`
+//! (`version` key), captured live against disposable stable Gitea 1.24 and
+//! Forgejo 16 containers. This module uses that fingerprint to catch
+//! operator misconfiguration (e.g. `--provider forgejo` pointed at a plain
+//! Gitea host) as a typed error instead of silently applying the wrong
 //! capability profile.
 
 use crate::error::{Result, TuicrError};
@@ -80,5 +80,30 @@ mod tests {
         let version = ProviderVersion::new("16.0.1+gitea-1.22.0");
         let err = verify_kind_matches(ForgeKind::Gitea, &version).unwrap_err();
         assert!(matches!(err, TuicrError::UnsupportedOperation(_)));
+    }
+
+    /// Deserializes the vendored, sanitized live `/api/v1/version`
+    /// response fixtures (`src/forge/giteafj/fixtures/version-*.json`) and
+    /// feeds them through the exact same `verify_kind_matches` fingerprint
+    /// logic production code uses — proving the fingerprint check works
+    /// against the real response shape, not just hand-written literals.
+    #[test]
+    fn should_parse_and_fingerprint_vendored_gitea_version_fixture() {
+        let raw = include_str!("fixtures/version-gitea-1.24.7.json");
+        let parsed: GfVersionResponse = serde_json::from_str(raw).expect("valid version JSON");
+        let version = ProviderVersion::new(parsed.version);
+        assert_eq!(version.0, "1.24.7");
+        assert!(verify_kind_matches(ForgeKind::Gitea, &version).is_ok());
+        assert!(verify_kind_matches(ForgeKind::Forgejo, &version).is_err());
+    }
+
+    #[test]
+    fn should_parse_and_fingerprint_vendored_forgejo_version_fixture() {
+        let raw = include_str!("fixtures/version-forgejo-16.0.1.json");
+        let parsed: GfVersionResponse = serde_json::from_str(raw).expect("valid version JSON");
+        let version = ProviderVersion::new(parsed.version);
+        assert_eq!(version.0, "16.0.1+gitea-1.22.0");
+        assert!(verify_kind_matches(ForgeKind::Forgejo, &version).is_ok());
+        assert!(verify_kind_matches(ForgeKind::Gitea, &version).is_err());
     }
 }
