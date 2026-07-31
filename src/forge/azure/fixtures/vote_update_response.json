@@ -1,0 +1,7 @@
+{
+  "id": "eeeeeeee-0000-4000-8000-000000000005",
+  "displayName": "Auto Reviewer",
+  "uniqueName": "auto@contoso.example",
+  "vote": 10,
+  "isRequired": true
+}

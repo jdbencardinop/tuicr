@@ -1,0 +1,102 @@
+{
+  "value": [
+    {
+      "id": 101,
+      "status": "active",
+      "isDeleted": false,
+      "comments": [
+        {
+          "id": 1,
+          "parentCommentId": 0,
+          "author": {
+            "id": "dddddddd-0000-4000-8000-000000000004",
+            "displayName": "Sam Approver",
+            "uniqueName": "sam@contoso.example",
+            "url": ""
+          },
+          "content": "Should this be configurable?",
+          "publishedDate": "2024-01-15T11:00:00Z",
+          "isDeleted": false
+        }
+      ],
+      "threadContext": {
+        "filePath": "/src/lib.rs",
+        "rightFileStart": { "line": 10, "offset": 1 },
+        "rightFileEnd": { "line": 10, "offset": 1 }
+      },
+      "pullRequestThreadContext": {
+        "changeTrackingId": 1,
+        "iterationContext": {
+          "firstComparingIteration": 1,
+          "secondComparingIteration": 2
+        }
+      }
+    },
+    {
+      "id": 102,
+      "status": "active",
+      "isDeleted": false,
+      "comments": [
+        {
+          "id": 2,
+          "parentCommentId": 0,
+          "author": {
+            "id": "dddddddd-0000-4000-8000-000000000004",
+            "displayName": "Sam Approver",
+            "uniqueName": "sam@contoso.example",
+            "url": ""
+          },
+          "content": "This base-side line looks stale now.",
+          "publishedDate": "2024-01-15T11:05:00Z",
+          "isDeleted": false
+        }
+      ],
+      "threadContext": {
+        "filePath": "/src/main.rs",
+        "leftFileStart": { "line": 5, "offset": 1 },
+        "leftFileEnd": { "line": 5, "offset": 1 }
+      },
+      "pullRequestThreadContext": {
+        "changeTrackingId": 2,
+        "iterationContext": {
+          "firstComparingIteration": 1,
+          "secondComparingIteration": 1
+        }
+      }
+    },
+    {
+      "id": 103,
+      "status": "fixed",
+      "isDeleted": false,
+      "comments": [
+        {
+          "id": 3,
+          "parentCommentId": 0,
+          "author": {
+            "id": "aaaaaaaa-0000-4000-8000-000000000001",
+            "displayName": "Jane Reviewer",
+            "uniqueName": "jane@contoso.example",
+            "url": ""
+          },
+          "content": "Overall this looks good, nice work.",
+          "publishedDate": "2024-01-15T12:00:00Z",
+          "isDeleted": false
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "status": "active",
+      "isDeleted": true,
+      "comments": [
+        {
+          "id": 4,
+          "parentCommentId": 0,
+          "content": "deleted thread, should never surface",
+          "isDeleted": false
+        }
+      ]
+    }
+  ],
+  "count": 4
+}

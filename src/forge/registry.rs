@@ -3,16 +3,18 @@
 //!
 //! This replaces the previously closed `ForgeKind` match in
 //! `crate::app::create_forge_backend`. GitHub and GitLab construct their
-//! existing `gh`/`glab` transports; Azure DevOps, Gitea, and Forgejo are
-//! registered identities with capability profiles
-//! (`crate::forge::capabilities`) but no transport — attempting to build a
-//! backend for one of them returns
-//! `Err(TuicrError::UnsupportedOperation(_))`, never a panic and never a
-//! silent fallback to a different kind.
+//! existing `gh`/`glab` transports; Gitea, Forgejo, and Azure DevOps use
+//! their own HTTP transports (`crate::forge::giteafj::backend`,
+//! `crate::forge::azure::backend`). Every kind currently has a working
+//! transport; this factory is kept in case a future kind is registered
+//! with capabilities only (see `capabilities_for`) before its transport
+//! lands — such a kind would return
+//! `Err(TuicrError::UnsupportedOperation(_))` here, never a panic and
+//! never a silent fallback to a different kind.
 
 use std::path::PathBuf;
 
-use crate::error::{Result, TuicrError};
+use crate::error::Result;
 use crate::forge::capabilities::{ProviderCapabilities, ProviderVersion, capabilities_for};
 use crate::forge::traits::{ForgeBackend, ForgeKind, ForgeRepository};
 
@@ -28,14 +30,13 @@ pub fn capabilities(
 
 /// Construct a transport for `repo`.
 ///
-/// Returns `Ok` for `ForgeKind::GitHub`/`ForgeKind::GitLab`, reusing the
-/// existing `gh`/`glab`-shelling backends unchanged, and for
-/// `ForgeKind::Gitea`/`ForgeKind::Forgejo`, which use the shared
-/// `crate::forge::giteafj::backend::GiteaForgejoBackend` HTTP transport.
-/// Returns a typed `Err(TuicrError::UnsupportedOperation(_))` for the
-/// remaining placeholder kind (`AzureDevOps`) — no transport exists for it
-/// yet, and this factory must never panic or silently substitute another
-/// kind's backend.
+/// Returns `Ok` for every currently-registered `ForgeKind`:
+/// `GitHub`/`GitLab` reuse the existing `gh`/`glab`-shelling backends
+/// unchanged; `Gitea`/`Forgejo` share
+/// `crate::forge::giteafj::backend::GiteaForgejoBackend`;
+/// `AzureDevOps` uses `crate::forge::azure::backend::AzureDevOpsBackend`.
+/// This factory must never panic or silently substitute another kind's
+/// backend.
 pub fn create_backend(
     repo: &ForgeRepository,
     local_checkout: Option<PathBuf>,
@@ -60,11 +61,12 @@ pub fn create_backend(
                     .with_local_checkout(local_checkout),
             ))
         }
-        ForgeKind::AzureDevOps => Err(TuicrError::UnsupportedOperation(format!(
-            "{} has no transport yet; only capability profiles and dry-run planning are \
-             supported for it (see docs/follow-on-map/tickets/12-implement-azure-adapter.md)",
-            repo.kind.provider_key()
-        ))),
+        ForgeKind::AzureDevOps => {
+            use crate::forge::azure::backend::AzureDevOpsBackend;
+            Ok(Box::new(
+                AzureDevOpsBackend::new(Some(repo.clone())).with_local_checkout(local_checkout),
+            ))
+        }
     }
 }
 
@@ -85,13 +87,9 @@ mod tests {
     }
 
     #[test]
-    fn should_return_typed_error_for_azure_devops_placeholder() {
+    fn should_build_azure_devops_backend() {
         let repo = ForgeRepository::azure_devops("dev.azure.com", "org", "project");
-        let err = match create_backend(&repo, None) {
-            Ok(_) => panic!("expected no Azure DevOps transport yet"),
-            Err(err) => err,
-        };
-        assert!(matches!(err, TuicrError::UnsupportedOperation(_)));
+        assert!(create_backend(&repo, None).is_ok());
     }
 
     #[test]
@@ -107,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn should_look_up_capabilities_for_every_kind_without_a_transport() {
+    fn should_look_up_capabilities_for_every_kind() {
         for repo in [
             ForgeRepository::github("github.com", "a", "b"),
             ForgeRepository::gitlab("gitlab.com", "a", "b"),

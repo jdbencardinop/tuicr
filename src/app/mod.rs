@@ -39,31 +39,26 @@ pub const GAP_EXPAND_BATCH: usize = 20;
 /// Create a forge backend for the given repository, via the bounded
 /// provider registry (`crate::forge::registry::create_backend`).
 ///
-/// `registry::create_backend` is the typed-`Result` API: it returns
-/// `Err(TuicrError::UnsupportedOperation(_))` — never a panic, never a
-/// silent fallback to a different kind — for the placeholder
-/// `ForgeKind::AzureDevOps`/`Gitea`/`Forgejo` identities, which have no
-/// transport yet. This wrapper `.expect()`s that result instead of
-/// threading a `Result` through its many TUI call sites, because every
-/// `ForgeRepository` reaching this function today is produced by
-/// `crate::forge::detect_forge_repository`/`local_checkout_for_repo`
-/// (GitHub/GitLab remote-URL parsing only) or by a persisted PR session
-/// created through one of those two paths — so `repo.kind` here is
-/// currently always `GitHub` or `GitLab`, for which `create_backend` never
-/// errors. Callers that *do* need to build a backend/capabilities for a
-/// placeholder kind (fixtures, the `review publish --dry-run` CLI path)
-/// should call `crate::forge::registry` directly instead of through this
-/// TUI-only convenience wrapper.
+/// `registry::create_backend` is the typed-`Result` API; today it returns
+/// `Ok` for every registered `ForgeKind` (`GitHub`, `GitLab`, `Gitea`,
+/// `Forgejo`, `AzureDevOps`) since all five have transports. This wrapper
+/// `.expect()`s that result instead of threading a `Result` through its
+/// many TUI call sites, so that if a *future* kind is registered with a
+/// capability profile but no transport yet, this convenience wrapper fails
+/// loudly (a clear panic message) rather than silently. Callers that need
+/// to build a backend/capabilities for such a transport-less kind ahead of
+/// its landing (fixtures, the `review publish --dry-run` CLI path) should
+/// call `crate::forge::registry` directly instead of through this TUI-only
+/// convenience wrapper.
 fn create_forge_backend(
     repo: &ForgeRepository,
     local_checkout: Option<PathBuf>,
 ) -> Box<dyn ForgeBackend> {
     crate::forge::registry::create_backend(repo, local_checkout).unwrap_or_else(|err| {
         panic!(
-            "create_forge_backend: {} (TUI code paths only ever detect GitHub/GitLab \
-             repositories today; this indicates a new caller started passing a placeholder \
-             ForgeKind through the TUI path — such a caller should use \
-             crate::forge::registry::create_backend directly and handle the Err)",
+            "create_forge_backend: {} (every registered ForgeKind has a transport today; this \
+             indicates a new placeholder kind was registered without one — such a caller should \
+             use crate::forge::registry::create_backend directly and handle the Err)",
             err
         )
     })

@@ -1,0 +1,25 @@
+{
+  "id": 201,
+  "status": "active",
+  "isDeleted": false,
+  "comments": [
+    {
+      "id": 10,
+      "parentCommentId": 0,
+      "author": {
+        "id": "eeeeeeee-0000-4000-8000-000000000005",
+        "displayName": "Auto Reviewer",
+        "uniqueName": "auto@contoso.example",
+        "url": ""
+      },
+      "content": "Consider adding a fixture for the 429 case too.",
+      "publishedDate": "2024-01-17T08:00:00Z",
+      "isDeleted": false
+    }
+  ],
+  "threadContext": {
+    "filePath": "/src/forge/azure/backend.rs",
+    "rightFileStart": { "line": 20, "offset": 1 },
+    "rightFileEnd": { "line": 20, "offset": 1 }
+  }
+}

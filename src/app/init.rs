@@ -754,15 +754,18 @@ impl App {
         repo_url_override: Option<ForgeRepository>,
         commit_selection: CommitSelectionStart,
     ) -> Result<Self> {
+        use crate::forge::azure::parse_pull_request_target_azure_devops;
         use crate::forge::github::gh::parse_pull_request_target;
         use crate::forge::gitlab::glab::parse_pull_request_target_gitlab;
         use crate::forge::pr_open::open_pull_request;
         use crate::forge::traits::ForgeKind;
 
         // Try GitHub-style target first (numeric, GitHub URL, owner/repo#N).
-        // If it embeds a GitLab URL, the GitLab parser picks it up.
+        // If it embeds a GitLab or Azure DevOps URL, that provider's own
+        // parser picks it up instead.
         let parsed = parse_pull_request_target(target)
-            .or_else(|_| parse_pull_request_target_gitlab(target))?;
+            .or_else(|_| parse_pull_request_target_gitlab(target))
+            .or_else(|_| parse_pull_request_target_azure_devops(target))?;
 
         // Resolution order when the target lacks an explicit repo
         // (`tuicr pr 125`):

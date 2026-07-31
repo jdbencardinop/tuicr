@@ -5,6 +5,7 @@
 //! instead of shelling out to forge-specific tools directly.
 #![allow(dead_code)]
 
+pub mod azure;
 pub mod canonical;
 pub mod capabilities;
 pub mod context;
@@ -24,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use git2::Repository;
 
+use crate::forge::azure::parse_azure_remote_url;
 use crate::forge::giteafj::parse_gitea_forgejo_remote_url;
 use crate::forge::github::gh::parse_github_remote_url;
 use crate::forge::gitlab::glab::parse_gitlab_remote_url;
@@ -56,15 +58,17 @@ fn remote_urls(repo_root: &Path) -> Vec<String> {
 /// Parse `url` as a forge remote repository.
 ///
 /// Tries GitLab first — its parser already filters to "gitlab" hosts, so
-/// trying it first won't claim GitHub Enterprise remotes — then Gitea/
-/// Forgejo (also host-filtered; see
+/// trying it first won't claim GitHub Enterprise remotes — then Azure
+/// DevOps (host-filtered; see `crate::forge::azure::is_azure_devops_host`),
+/// then Gitea/Forgejo (also host-filtered; see
 /// `crate::forge::giteafj::detect_self_hosted_kind`), then falls back to
 /// GitHub, which accepts any host (covers github.com and GHE hosts whose
-/// hostname does not literally contain "github"). The Gitea/Forgejo check
-/// must run before the GitHub catch-all or it would never get a chance to
-/// match anything.
+/// hostname does not literally contain "github"). Every host-filtered
+/// check must run before the GitHub catch-all or it would never get a
+/// chance to match anything.
 pub fn parse_any_remote_url(url: &str) -> Option<ForgeRepository> {
     parse_gitlab_remote_url(url)
+        .or_else(|| parse_azure_remote_url(url))
         .or_else(|| parse_gitea_forgejo_remote_url(url))
         .or_else(|| parse_github_remote_url(url))
 }

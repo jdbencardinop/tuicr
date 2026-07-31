@@ -1,0 +1,26 @@
+{
+  "value": [
+    {
+      "pullRequestId": 42,
+      "title": "Add offline Azure DevOps adapter",
+      "description": "Implements the Azure DevOps ForgeBackend against sanitized fixtures.",
+      "status": "active",
+      "isDraft": false,
+      "createdBy": {
+        "id": "aaaaaaaa-0000-4000-8000-000000000001",
+        "displayName": "Jane Reviewer",
+        "uniqueName": "jane@contoso.example",
+        "url": "https://vssps.dev.azure.com/contoso/_apis/Identities/aaaaaaaa-0000-4000-8000-000000000001"
+      },
+      "creationDate": "2024-01-15T09:30:00Z",
+      "sourceRefName": "refs/heads/feature/azure-adapter",
+      "targetRefName": "refs/heads/main",
+      "mergeStatus": "succeeded",
+      "lastMergeSourceCommit": { "commitId": "1111111111111111111111111111111111111a" },
+      "lastMergeTargetCommit": { "commitId": "2222222222222222222222222222222222222b" },
+      "reviewers": [],
+      "url": "https://dev.azure.com/contoso/widgets/_apis/git/repositories/bbbbbbbb-0000-4000-8000-000000000002/pullRequests/42"
+    }
+  ],
+  "count": 1
+}
