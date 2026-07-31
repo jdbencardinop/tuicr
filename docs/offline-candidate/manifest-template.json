@@ -106,6 +106,12 @@
       "severity": "low",
       "summary": ".github/workflows/ci.yml's `update-test` job performs a live end-to-end self-update test against real upstream agavra/tuicr GitHub releases. It was intentionally left unmodified (out of scope for this local packaging change per explicit instruction), but its results say nothing about this fork build: `tuicr update` is hard-disabled here, and --version's format differs from what that job's assertions expect.",
       "mitigation": "Informational only; do not treat that CI job as a signal for this fork."
+    },
+    {
+      "id": "linux-binary-secret-scan-hash-allowlisted-false-positive",
+      "severity": "low",
+      "summary": "The compiled Linux x86_64 tuicr binary contains one byte-sequence in its .rodata section matching the gitlab-pat secret-scan pattern (glpat-...). Deterministic/reproducible across independent rebuilds of the same commit/toolchain, but forensic analysis (low character diversity and entropy inconsistent with a real random token, natural-language-like surrounding bytes, absent from all searched dependency source/build outputs, does not reproduce in an isolated minimal build, absent from the macOS build) rules out a real credential. Root cause not definitively pinpointed to one exact source file.",
+      "mitigation": "Allowlisted by SHA-256 digest only (SECRET_SCAN_ALLOWLIST_SHA256 in scripts/package-offline-candidate.sh), never by plaintext or broad prefix/path suppression. See docs/offline-candidate/SECRET-SCAN.md for the full investigation."
     }
   ]
 }

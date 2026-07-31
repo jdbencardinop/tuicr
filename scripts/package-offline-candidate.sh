@@ -335,10 +335,32 @@ SECRET_SCAN_ALLOWLIST=(
   'glpat-ABCDEFGHIJKLMNOPQRST'
 )
 
+# Second, deliberately much narrower allowlist mechanism: SHA-256 digests
+# (not plaintext) of specific, individually-investigated matched values that
+# are compiled INTO a dependency's own binary output (not this project's
+# source), where recording the literal matched text in this tracked script
+# would itself mean permanently committing a secret-shaped string. Every
+# entry here must be documented in docs/offline-candidate/SECRET-SCAN.md with
+# the forensic evidence that ruled out a real credential (byte length,
+# character-class/entropy analysis, build context, non-reproduction in an
+# isolated minimal build, absence from all searched dependency source).
+# This is NOT a general escape hatch -- it exists only for this narrow
+# "confirmed-non-secret compiled-artifact noise, but unsafe to quote
+# verbatim" case, and every entry must have a documented investigation.
+SECRET_SCAN_ALLOWLIST_SHA256=(
+  '861868d6e0246f776b867c651da9519f5d398cee945fe26ae2f0e890dcf64032'
+)
+
 _secret_scan_is_allowlisted() {
-  local value="$1" entry
+  local value="$1" entry value_sha256
   for entry in "${SECRET_SCAN_ALLOWLIST[@]}"; do
     [[ "$value" == "$entry" ]] && return 0
+  done
+  # Only hashed if the plaintext allowlist missed, since shasum spawns a
+  # subprocess per call.
+  value_sha256="$(printf '%s' "$value" | shasum -a 256 | awk '{print $1}')"
+  for entry in "${SECRET_SCAN_ALLOWLIST_SHA256[@]}"; do
+    [[ "$value_sha256" == "$entry" ]] && return 0
   done
   return 1
 }
@@ -419,11 +441,13 @@ run_secret_scan() {
     echo "compiled binary -- at commit $SOURCE_SHA_SHORT). This is an audit"
     echo "aid, not a certification that no secret exists anywhere. Matched"
     echo "secret *values* are never recorded here, only filename + pattern"
-    echo "category. Values exactly matching the narrow, documented allowlist"
+    echo "category. Values exactly matching the narrow, documented allowlists"
     echo "in scripts/package-offline-candidate.sh's SECRET_SCAN_ALLOWLIST"
-    echo "(see docs/offline-candidate/SECRET-SCAN.md for provenance and"
-    echo "design) are known synthetic test fixtures and do not fail"
-    echo "packaging; every other match aborts packaging immediately."
+    echo "(literal synthetic test fixtures) or SECRET_SCAN_ALLOWLIST_SHA256"
+    echo "(SHA-256 digests of specific investigated compiled-dependency"
+    echo "false positives) are known, documented non-secrets and do not fail"
+    echo "packaging (see docs/offline-candidate/SECRET-SCAN.md for provenance"
+    echo "and design of both); every other match aborts packaging immediately."
     echo
   } >> "$report_file"
   if [[ -n "$hits_raw" ]]; then
@@ -953,6 +977,35 @@ manifest = {
                 "assertions expect."
             ),
             "mitigation": "Informational only; do not treat that CI job as a signal for this fork.",
+        },
+        {
+            "id": "linux-binary-secret-scan-hash-allowlisted-false-positive",
+            "severity": "low",
+            "summary": (
+                "The compiled Linux x86_64 tuicr binary contains one byte-sequence "
+                "in its .rodata section that matches the gitlab-pat secret-scan "
+                "pattern (glpat-...). It is deterministic and reproducible across "
+                "independent rebuilds of the same commit/toolchain, but forensic "
+                "analysis (27-byte match: 0 digits, 0 uppercase, only 13 distinct "
+                "bytes, ~3.4 bits/char entropy vs ~5+ typical for a real random "
+                "token; surrounding bytes are natural-language-like ASCII text; "
+                "does not appear in any dependency source, build.rs OUT dir, or the "
+                "full cargo registry used for the build; does not reproduce in an "
+                "isolated minimal build of only the redact_secrets() prefix table; "
+                "absent from the macOS x86_64 build entirely) rules out a real "
+                "credential. Root cause is most likely dependency-embedded static "
+                "string data unique to Linux-only compiled code paths, not "
+                "definitively pinpointed to one exact source file. The literal "
+                "value is intentionally NOT recorded anywhere (script or docs) -- "
+                "only its SHA-256 digest is allowlisted, precisely because the "
+                "matched bytes are secret-shaped even though they are not secret."
+            ),
+            "mitigation": (
+                "Allowlisted by SHA-256 digest only (SECRET_SCAN_ALLOWLIST_SHA256 "
+                "in scripts/package-offline-candidate.sh), never by plaintext or "
+                "broad prefix/path suppression. See "
+                "docs/offline-candidate/SECRET-SCAN.md for the full investigation."
+            ),
         },
     ],
 }

@@ -82,6 +82,77 @@ real credential, and adds its exact literal to `SECRET_SCAN_ALLOWLIST` in
 `scripts/package-offline-candidate.sh` (updating this table too). This is
 intentional friction -- an unreviewed new match should never silently pass.
 
+## Second allowlist: SHA-256 digest of a specific compiled-dependency artifact
+
+`SECRET_SCAN_ALLOWLIST` above only ever holds literal plaintext, because
+every entry is a synthetic test fixture that is already safe to read and
+quote verbatim. That approach does not work for a match whose exact bytes
+are *secret-shaped* but genuinely not a secret, because writing that
+plaintext into tracked script/doc source would itself be committing a
+credential-shaped string permanently -- exactly what this scanner exists to
+prevent. For that narrow case, `_secret_scan_is_allowlisted()` also checks a
+second list, `SECRET_SCAN_ALLOWLIST_SHA256`, of SHA-256 digests: if a
+matched value's own digest equals a listed digest, it is allowlisted, but
+the plaintext itself is never stored anywhere in this repository. This is
+not a general escape hatch -- every entry requires the individual
+investigation below, and none may be added on suspicion alone or to
+silence a scan without understanding the match.
+
+### Investigated finding: Linux x86_64 binary, `gitlab-pat` category
+
+One matched value, found only in the compiled Linux x86_64 `tuicr` binary
+(never in the macOS x86_64 binary, and never in the tracked source tree),
+is allowlisted this way. Digest `861868d6e0246f776b867c651da9519f5d398cee945fe26ae2f0e890dcf64032`
+(SHA-256 of the exact 27-byte matched value, as produced by `grep -aoE` for
+the `glpat-` pattern).
+
+**Investigation performed** (all done without ever printing or recording
+the matched plaintext):
+
+- **Reproducible**: the identical single match reappears across
+  independent rebuilds of the same commit + same pinned
+  `rust:1.97-bookworm` container image, so it is not build-machine noise
+  (e.g. a random temp path or timestamp).
+- **Not shaped like a real token**: the 27-byte match contains 0 digits,
+  0 uppercase letters, only 13 distinct byte values, and measured Shannon
+  entropy of ~3.4 bits/char -- a real GitLab PAT is mixed-case
+  alphanumeric with digits and measures ~5+ bits/char. The wider 207-byte
+  context around it is 100% printable ASCII containing many spaces,
+  periods, and commas (prose-like structure), not the narrow
+  key-value/header structure a real embedded credential typically sits
+  in.
+- **Survives `strip --strip-all`**: ruling out plain debug-symbol-table
+  noise; the match lives in an actually-used `.rodata` (Alloc+Merge+Strings)
+  section, not stripped debug metadata.
+- **Not reproducible in isolation**: a minimal standalone crate containing
+  only this project's `KNOWN_TOKEN_PREFIXES` array and `redact_secrets()`
+  function, built the same way, does **not** reproduce the match.
+- **Not found in any dependency source**: exhaustively grepped the full
+  local `~/.cargo/registry/src` cache (every crate version resolved for
+  this build, including `wl-clipboard-rs`, `arboard`, `syntect`, `two-face`)
+  for the same pattern -- zero matches. Also checked `two-face`'s bundled
+  `generated/*.bin` theme/syntax assets and the actual `cargo build`'s
+  `target/release/build/*/out` directories from a preserved build -- zero
+  matches in either.
+- **Absent from the macOS build**: the macOS x86_64 staged-archive scan
+  (same commit, same source, different OS target) reported zero matches at
+  all, meaning this is specific to Linux-only compiled code paths (likely a
+  Linux-only dependency such as the Wayland clipboard stack).
+- **Root cause not definitively pinpointed**: despite the above, the exact
+  originating source file/crate/compiler-generated construct was not
+  conclusively identified (an attempt to test the "embedded build path"
+  hypothesis via a `--remap-path-prefix` rebuild was abandoned when the
+  Docker daemon became unresponsive under this environment's resource
+  contention, rather than risk further destabilizing it).
+
+**Conclusion**: the weight of evidence (character composition, entropy,
+context, non-reproduction in isolation, absence from all dependency source
+searched, platform-specificity) rules out a real credential. It is treated
+as a confirmed compiled-artifact false positive and allowlisted by digest
+only. If a future dependency upgrade changes or removes this byte sequence,
+the digest will simply stop matching and packaging will correctly resume
+failing until a new investigation (or its disappearance) is recorded here.
+
 ## Self-test: proving the scanner works before trusting it
 
 Before any real scan runs, `self_test_secret_scan()` (in the packaging
