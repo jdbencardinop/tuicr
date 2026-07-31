@@ -19,51 +19,70 @@
 
 #![cfg(test)]
 
-use std::sync::{Mutex, OnceLock};
-
 use crate::error::TuicrError;
 use crate::forge::azure::backend::AzureDevOpsBackend;
 use crate::forge::azure::models::AdoThreadStatus;
-use crate::forge::azure::test_support::{MockResponse, start_mock_server};
+use crate::forge::azure::test_support::{MockResponse, env_mutation_lock, start_mock_server};
 use crate::forge::submit::SubmitEvent;
 use crate::forge::traits::{
-    CreateReviewRequest, ForgeBackend, ForgeRepository, PullRequestDetails, PullRequestListQuery,
-    PullRequestTarget,
+    CreateReviewRequest, ForgeBackend, ForgeFileLinesRequest, ForgeFileSide, ForgeRepository,
+    PullRequestDetails, PullRequestListQuery, PullRequestTarget,
 };
+use crate::model::diff_types::FileStatus;
 
 const PAT_ENV_VAR: &str = "AZURE_DEVOPS_EXT_PAT";
 const MOCK_PAT: &str = "s3cr3t-mock-pat-value";
 
-/// Serializes tests that set the process-wide `$AZURE_DEVOPS_EXT_PAT` env
-/// var, mirroring `crate::forge::giteafj::backend::tests::token_env_lock`.
-fn pat_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-/// Run `body` with `$AZURE_DEVOPS_EXT_PAT` set to [`MOCK_PAT`], restoring
-/// whatever value (or absence) was previously there afterward. Holds
-/// [`pat_env_lock`] for the whole call so concurrent test threads never
-/// race each other's temporary value — every test in this module needs
-/// this, since every one exercises the real `client_for`/`resolve_auth`
-/// path (unlike Gitea's mock tests, which mostly bypass token resolution
-/// by hand-building a client; this module intentionally always goes
-/// through the real path since Azure's auth wiring is part of what
-/// requirement 3/7 asks to be contract-tested).
+/// Run `body` with `$AZURE_DEVOPS_EXT_PAT` set to [`MOCK_PAT`] **and**
+/// `$PATH` cleared, restoring both afterward. Holds
+/// `test_support::env_mutation_lock()` for the whole call so concurrent
+/// test threads never race each other's temporary value — every test in
+/// this module needs this, since every one exercises the real
+/// `client_for`/`resolve_auth` path (unlike Gitea's mock tests, which
+/// mostly bypass token resolution by hand-building a client; this module
+/// intentionally always goes through the real path since Azure's auth
+/// wiring is part of what requirement 3/7 asks to be contract-tested).
+///
+/// This lock must be the same one `auth.rs`'s own tests use (not a
+/// module-local mutex): both modules mutate the same process-wide
+/// `$AZURE_DEVOPS_EXT_PAT`/`$PATH` env vars, and Rust's default parallel
+/// test harness runs `auth::tests` and this module's tests concurrently
+/// on separate threads sharing one process environment — two different
+/// mutexes would not serialize access to the same underlying state. This
+/// exact race was observed in practice: `auth::tests`'
+/// `should_ignore_blank_pat_env_var` (expecting a blank PAT) intermittently
+/// observed this module's [`MOCK_PAT`] value mid-check before this was
+/// unified onto one shared lock.
+///
+/// Clearing `$PATH` is load-bearing, not incidental: `resolve_auth` tries
+/// the `az` CLI's Entra token first (see `auth.rs`'s doc comment for the
+/// audit-mandated precedence), and at least one shared development host
+/// used for this ticket has real `az login` state. Without clearing
+/// `$PATH`, these "mock-only" contract tests would silently shell out to
+/// the real `az account get-access-token` command and mint a genuine
+/// bearer token — a live network call this offline-only task forbids.
 fn with_mock_pat<T>(body: impl FnOnce() -> T) -> T {
-    let _guard = pat_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let previous = std::env::var(PAT_ENV_VAR).ok();
-    // SAFETY: guarded by `pat_env_lock` above, so no other test thread
-    // observes a partial value while this one mutates the process-wide
-    // env var.
+    let _guard = env_mutation_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let previous_pat = std::env::var(PAT_ENV_VAR).ok();
+    let previous_path = std::env::var("PATH").ok();
+    // SAFETY: guarded by `env_mutation_lock` above, so no other test
+    // thread observes a partial value while this one mutates the
+    // process-wide env vars.
     unsafe {
         std::env::set_var(PAT_ENV_VAR, MOCK_PAT);
+        std::env::set_var("PATH", "");
     }
     let result = body();
     unsafe {
-        match previous {
+        match previous_pat {
             Some(v) => std::env::set_var(PAT_ENV_VAR, v),
             None => std::env::remove_var(PAT_ENV_VAR),
+        }
+        match previous_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
         }
     }
     result
@@ -375,6 +394,60 @@ fn should_map_request_changes_event_to_rejected_vote() {
     });
 }
 
+/// Covers audit requirement 7: thread creation must be independently
+/// callable, not exist only as an inline step of `create_review`'s
+/// bundled comment(s)-then-vote flow. This exercises `create_thread`
+/// directly — no vote, no `create_review` call at all — for both an
+/// anchored (inline file) and a general (whole-PR) thread.
+#[test]
+fn should_create_thread_as_a_standalone_operation_independent_of_create_review() {
+    with_mock_pat(|| {
+        let responses = [(
+            "POST /contoso/widgets/_apis/git/repositories/api/pullrequests/42/threads?api-version=7.1".to_string(),
+            MockResponse::json(200, include_str!("fixtures/thread_create_response.json")),
+        )]
+        .into_iter()
+        .collect();
+        let (base_url, requests) = start_mock_server(responses);
+        let backend = AzureDevOpsBackend::new(None);
+        let pr = sample_pr_details(repo_at(&base_url));
+
+        let thread_context = crate::forge::azure::models::AdoCommentThreadContext {
+            file_path: "/src/forge/azure/backend.rs".to_string(),
+            left_file_start: None,
+            left_file_end: None,
+            right_file_start: Some(crate::forge::azure::models::AdoCommentPosition {
+                line: 20,
+                offset: 5,
+            }),
+            right_file_end: Some(crate::forge::azure::models::AdoCommentPosition {
+                line: 22,
+                offset: 13,
+            }),
+        };
+
+        let thread_id = backend
+            .create_thread(
+                &pr,
+                "Consider adding a fixture for the 429 case too.",
+                Some(thread_context),
+            )
+            .expect("create_thread should succeed independently of create_review");
+        assert_eq!(thread_id, 201);
+
+        let captured = requests.lock().expect("lock captured requests");
+        assert_eq!(
+            captured.len(),
+            1,
+            "create_thread must issue exactly one POST — no vote, no bundled create_review call"
+        );
+        let post = &captured[0];
+        assert_eq!(post.method, "POST");
+        assert!(post.body.contains("Consider adding a fixture"));
+        assert!(post.body.contains("\"rightFileStart\""));
+    });
+}
+
 #[test]
 fn should_reply_to_thread_update_status_and_cast_vote() {
     with_mock_pat(|| {
@@ -480,6 +553,49 @@ fn should_surface_error_statuses_without_leaking_the_auth_header_or_retrying() {
 }
 
 #[test]
+fn should_surface_retry_after_and_rate_limit_headers_without_auto_retrying() {
+    // Per https://learn.microsoft.com/en-us/azure/devops/integrate/concepts/rate-limits?view=azure-devops
+    // ("Best practices"): honor `Retry-After` and monitor `X-RateLimit-*`
+    // headers on a throttled response. This proves the client surfaces
+    // both in the resulting error (for the caller/human to act on) while
+    // still making exactly one request — audit requirement 8 explicitly
+    // forbids any automatic retry without ID reconciliation.
+    with_mock_pat(|| {
+        let responses = [(
+            "GET /contoso/widgets/_apis/git/repositories/api/pullrequests/42?api-version=7.1"
+                .to_string(),
+            MockResponse::json(429, "{\"message\": \"TF400733: request blocked\"}")
+                .with_header("Retry-After", "30")
+                .with_header("X-RateLimit-Remaining", "0")
+                .with_header("X-RateLimit-Limit", "200"),
+        )]
+        .into_iter()
+        .collect();
+        let (base_url, requests) = start_mock_server(responses);
+        let backend = AzureDevOpsBackend::new(None);
+        let repository = repo_at(&base_url);
+        let target = PullRequestTarget::with_repository(repository, 42, "42");
+
+        let err = backend
+            .get_pull_request(target)
+            .expect_err("429 should surface as an error");
+        let message = format!("{err}");
+
+        assert!(message.contains("retry-after: 30s"), "message: {message}");
+        assert!(message.contains("rate-limit: 0/200"), "message: {message}");
+        assert!(
+            !message.contains(MOCK_PAT),
+            "error message must never leak the auth token: {message}"
+        );
+        assert_eq!(
+            requests.lock().expect("lock captured requests").len(),
+            1,
+            "a Retry-After header must not itself trigger an automatic retry"
+        );
+    });
+}
+
+#[test]
 fn should_return_thread_provider_mapping_for_durable_persistence() {
     with_mock_pat(|| {
         let responses = [(
@@ -494,12 +610,133 @@ fn should_return_thread_provider_mapping_for_durable_persistence() {
 
         let mapping = backend
             .thread_provider_mapping(&pr, 101)
-            .expect("thread_provider_mapping should succeed")
-            .expect("thread has a threadContext, so mapping should be Some");
+            .expect("thread_provider_mapping should succeed");
 
         assert_eq!(
             mapping["threadContext"]["filePath"],
             "/src/forge/azure/backend.rs"
         );
+        // Audit requirement 5: the durable mapping must preserve the full
+        // line **and** offset for the anchor range — not just the start
+        // line `list_review_threads`' `RemoteReviewThread.line` alone
+        // exposes. Per the official "Pull Request Threads - Create"
+        // sample (`fixtures/README.md`'s citation), `offset` is a
+        // meaningful column position within the line, independent of
+        // `line` itself, and start/end can span multiple lines.
+        assert_eq!(mapping["threadContext"]["rightFileStart"]["line"], 20);
+        assert_eq!(mapping["threadContext"]["rightFileStart"]["offset"], 5);
+        assert_eq!(mapping["threadContext"]["rightFileEnd"]["line"], 22);
+        assert_eq!(mapping["threadContext"]["rightFileEnd"]["offset"], 13);
+        // Audit requirement 6: the native `CommentThreadStatus` value must
+        // be preserved verbatim in the durable mapping, not just the
+        // anchor geometry — `list_review_threads`' `is_resolved` bool
+        // alone cannot round-trip Azure's 7-value status enum.
+        assert_eq!(mapping["status"], "active");
+    });
+}
+
+/// Covers audit requirement 5's "dual-side" half directly: Azure's
+/// `CommentThreadContext` schema (Microsoft Learn) defines
+/// `leftFileStart`/`leftFileEnd`/`rightFileStart`/`rightFileEnd` as four
+/// fully independent optional fields — nothing in the schema prevents
+/// both the left (base) and right (head) side being populated on the same
+/// thread at once (`SideSupport::simultaneous_both_sides()`/
+/// `RangeSupport::DualSideOffsets` in `crate::forge::capabilities`).
+/// `list_review_threads`' `RemoteReviewThread` (one shared `line`/`side`
+/// pair, per the shared `ForgeBackend` trait) necessarily picks a single
+/// side, but `thread_provider_mapping`'s durable mapping must not: this
+/// proves all four positions (and their `offset`s) survive verbatim.
+#[test]
+fn should_preserve_both_sides_when_a_thread_context_has_simultaneous_left_and_right_anchors() {
+    with_mock_pat(|| {
+        let responses = [(
+            "GET /contoso/widgets/_apis/git/repositories/api/pullrequests/42/threads/105?api-version=7.1".to_string(),
+            MockResponse::json(200, include_str!("fixtures/thread_dual_side_response.json")),
+        )]
+        .into_iter()
+        .collect();
+        let (base_url, _requests) = start_mock_server(responses);
+        let backend = AzureDevOpsBackend::new(None);
+        let pr = sample_pr_details(repo_at(&base_url));
+
+        let mapping = backend
+            .thread_provider_mapping(&pr, 105)
+            .expect("thread_provider_mapping should succeed");
+
+        let ctx = &mapping["threadContext"];
+        assert_eq!(ctx["leftFileStart"]["line"], 8);
+        assert_eq!(ctx["leftFileStart"]["offset"], 3);
+        assert_eq!(ctx["leftFileEnd"]["line"], 8);
+        assert_eq!(ctx["leftFileEnd"]["offset"], 20);
+        assert_eq!(ctx["rightFileStart"]["line"], 20);
+        assert_eq!(ctx["rightFileStart"]["offset"], 5);
+        assert_eq!(ctx["rightFileEnd"]["line"], 22);
+        assert_eq!(ctx["rightFileEnd"]["offset"], 13);
+        assert_eq!(mapping["pullRequestThreadContext"]["changeTrackingId"], 9);
+    });
+}
+
+/// Covers the audit's constraint #4 gap: `fetch_file_via_api` (backing
+/// `fetch_file_lines`/`file_line_count`'s no-local-checkout fallback) had
+/// no mock-contract coverage. Per official docs (Items - Get,
+/// <https://learn.microsoft.com/en-us/rest/api/azure/devops/git/items/get?view=azure-devops-rest-7.1>),
+/// without `$format=json` the endpoint returns the raw item content
+/// directly as the response body — `fixtures/item_content.txt` models
+/// that shape (a plain-text file body, not a JSON envelope), matching how
+/// `fetch_file_via_api` consumes `response.body` as-is.
+#[test]
+fn should_fetch_file_content_via_items_api_when_no_local_checkout() {
+    with_mock_pat(|| {
+        let request = |base_url: &str| ForgeFileLinesRequest {
+            repository: repo_at(base_url),
+            base_sha: "2222222222222222222222222222222222222b".to_string(),
+            head_sha: "1111111111111111111111111111111111111a".to_string(),
+            path: "src/lib.rs".into(),
+            status: FileStatus::Modified,
+            side: ForgeFileSide::Head,
+            start_line: 1,
+            end_line: 3,
+        };
+        let items_key = "GET /contoso/widgets/_apis/git/repositories/api/items?api-version=7.1&path=src/lib.rs&versionDescriptor.version=1111111111111111111111111111111111111a&versionDescriptor.versionType=commit&includeContent=true".to_string();
+
+        // Each call below hits the same Items-API endpoint once, so each
+        // gets its own single-response mock server (`start_mock_server`
+        // shuts down after serving exactly `responses.len()` requests).
+        {
+            let responses = [(
+                items_key.clone(),
+                MockResponse::json(200, include_str!("fixtures/item_content.txt")),
+            )]
+            .into_iter()
+            .collect();
+            let (base_url, requests) = start_mock_server(responses);
+            let backend = AzureDevOpsBackend::new(None);
+
+            let count = backend
+                .file_line_count(request(&base_url))
+                .expect("file_line_count should succeed via the Items API");
+            assert_eq!(count, 3);
+            assert_eq!(requests.lock().expect("lock captured requests").len(), 1);
+        }
+        {
+            let responses = [(
+                items_key,
+                MockResponse::json(200, include_str!("fixtures/item_content.txt")),
+            )]
+            .into_iter()
+            .collect();
+            let (base_url, requests) = start_mock_server(responses);
+            // No `.with_local_checkout(...)`: forces the Items-API
+            // fallback path this test targets, never a local
+            // `git show`/`git diff`.
+            let backend = AzureDevOpsBackend::new(None);
+
+            let lines = backend
+                .fetch_file_lines(request(&base_url))
+                .expect("fetch_file_lines should succeed via the Items API");
+            assert_eq!(lines.len(), 3);
+            assert_eq!(lines[0].content, "fn widget_total(count: u32) -> u32 {");
+            assert_eq!(requests.lock().expect("lock captured requests").len(), 1);
+        }
     });
 }

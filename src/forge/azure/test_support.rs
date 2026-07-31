@@ -26,7 +26,24 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Shared, crate-wide lock serializing every test (in this module's own
+/// tests, `auth.rs`'s tests, and `contract_tests.rs`) that mutates the
+/// process-wide `$AZURE_DEVOPS_EXT_PAT`/`$PATH` environment variables.
+///
+/// This must be the **one** lock every such test uses — a per-module lock
+/// is not sufficient, since Rust's default parallel test harness runs
+/// `auth::tests` and `contract_tests` concurrently on separate threads;
+/// two different mutexes do not serialize access to the same underlying
+/// process-wide env vars. A prior version of this code used separate
+/// per-module locks and was observed to flake under real concurrent
+/// execution (one test's blank-PAT case observed another test's mock PAT
+/// value mid-check).
+pub(crate) fn env_mutation_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// One canned response: status, headers, and body.
 #[derive(Clone)]

@@ -1,0 +1,3 @@
+fn widget_total(count: u32) -> u32 {
+    count * 2
+}

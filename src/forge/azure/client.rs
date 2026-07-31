@@ -36,15 +36,43 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// <https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-commits/get-pull-request-commits>.
 pub const CONTINUATION_TOKEN_HEADER: &str = "x-ms-continuationtoken";
 
+/// Standard rate-limit backoff header. Per
+/// <https://learn.microsoft.com/en-us/azure/devops/integrate/concepts/rate-limits?view=azure-devops>
+/// ("Best practices"): "Honor the Retry-After header: If you receive it in
+/// a response, wait the specified time before sending another request.".
+/// Azure DevOps documents this can accompany either a hard `429` block or
+/// (per the same page) a `200` soft-throttling delay — this client
+/// surfaces the value either way (see `read_response`) rather than only
+/// checking it on `429`, but never sleeps/retries on it automatically: per
+/// audit requirement 8 ("no automatic retry without ID reconciliation"),
+/// deciding whether/how long to wait is the caller's job, not this
+/// transport's.
+pub const RETRY_AFTER_HEADER: &str = "retry-after";
+
+/// Quota-visibility headers Azure DevOps documents as "if available" (same
+/// rate-limits page, "Best practices": "Monitor X-RateLimit headers ...
+/// track `X-RateLimit-Remaining` and `X-RateLimit-Limit`"). Diagnostic
+/// only — surfaced in error messages when present, never acted on
+/// automatically.
+pub const RATE_LIMIT_REMAINING_HEADER: &str = "x-ratelimit-remaining";
+pub const RATE_LIMIT_LIMIT_HEADER: &str = "x-ratelimit-limit";
+
 /// A raw HTTP response: status code, full body text, and the response
-/// headers a caller may need beyond the body (currently only the
-/// continuation-token header). Callers decide per-endpoint which statuses
-/// are success, typed-unsupported (404/405), or a hard failure.
+/// headers a caller may need beyond the body (continuation-token plus the
+/// rate-limit/backoff headers above). Callers decide per-endpoint which
+/// statuses are success, typed-unsupported (404/405), or a hard failure.
 #[derive(Debug, Clone)]
 pub struct AdoResponse {
     pub status: u16,
     pub body: String,
     pub continuation_token: Option<String>,
+    /// `Retry-After` header value, verbatim (Azure DevOps documents this
+    /// as a number of seconds, but this client does not parse/act on it —
+    /// only surfaces it for the caller/human to see; see
+    /// `RETRY_AFTER_HEADER`'s doc comment).
+    pub retry_after: Option<String>,
+    pub rate_limit_remaining: Option<String>,
+    pub rate_limit_limit: Option<String>,
 }
 
 impl AdoResponse {
@@ -113,11 +141,17 @@ impl AdoHttpClient {
         path: &str,
     ) -> Result<AdoResponse> {
         let status = response.status().as_u16();
-        let continuation_token = response
-            .headers()
-            .get(CONTINUATION_TOKEN_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.to_string());
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.to_string())
+        };
+        let continuation_token = header(CONTINUATION_TOKEN_HEADER);
+        let retry_after = header(RETRY_AFTER_HEADER);
+        let rate_limit_remaining = header(RATE_LIMIT_REMAINING_HEADER);
+        let rate_limit_limit = header(RATE_LIMIT_LIMIT_HEADER);
         let body = response.into_body().read_to_string().map_err(|err| {
             TuicrError::Forge(format!(
                 "failed to read response body from {}: {err}",
@@ -128,6 +162,9 @@ impl AdoHttpClient {
             status,
             body,
             continuation_token,
+            retry_after,
+            rate_limit_remaining,
+            rate_limit_limit,
         })
     }
 
@@ -193,15 +230,29 @@ impl AdoHttpClient {
 }
 
 /// Turn a non-2xx response into a `TuicrError::Forge`, including the
-/// endpoint path, status, and (truncated) response body for debugging.
+/// endpoint path, status, (truncated) response body, and — when present —
+/// the `Retry-After`/`X-RateLimit-*` headers Azure DevOps uses for
+/// throttling (see the header constants above). This function only
+/// *surfaces* those values in the error text for the caller/human to act
+/// on; per audit requirement 8 it never sleeps or retries automatically —
+/// callers are responsible for any backoff/reconciliation decision.
 /// Never includes the `Authorization` header value.
 pub fn require_success(response: &AdoResponse, path: &str) -> Result<()> {
     if response.is_success() {
         return Ok(());
     }
     let body_preview: String = response.body.chars().take(500).collect();
+    let mut suffix = String::new();
+    if let Some(retry_after) = &response.retry_after {
+        suffix.push_str(&format!(" (retry-after: {retry_after}s)"));
+    }
+    if response.rate_limit_remaining.is_some() || response.rate_limit_limit.is_some() {
+        let remaining = response.rate_limit_remaining.as_deref().unwrap_or("?");
+        let limit = response.rate_limit_limit.as_deref().unwrap_or("?");
+        suffix.push_str(&format!(" (rate-limit: {remaining}/{limit})"));
+    }
     Err(TuicrError::Forge(format!(
-        "{path} returned HTTP {}: {body_preview}",
+        "{path} returned HTTP {}{suffix}: {body_preview}",
         response.status
     )))
 }
@@ -216,6 +267,9 @@ mod tests {
             status: 201,
             body: String::new(),
             continuation_token: None,
+            retry_after: None,
+            rate_limit_remaining: None,
+            rate_limit_limit: None,
         };
         assert!(response.is_success());
     }
@@ -226,9 +280,29 @@ mod tests {
             status: 404,
             body: "not found".to_string(),
             continuation_token: None,
+            retry_after: None,
+            rate_limit_remaining: None,
+            rate_limit_limit: None,
         };
         assert!(!response.is_success());
         assert!(require_success(&response, "/some/path").is_err());
+    }
+
+    #[test]
+    fn should_surface_retry_after_and_rate_limit_headers_in_error_message_without_retrying() {
+        let response = AdoResponse {
+            status: 429,
+            body: "TF400733: The request has been blocked".to_string(),
+            continuation_token: None,
+            retry_after: Some("30".to_string()),
+            rate_limit_remaining: Some("0".to_string()),
+            rate_limit_limit: Some("200".to_string()),
+        };
+        let err = require_success(&response, "/some/path").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("retry-after: 30s"));
+        assert!(message.contains("rate-limit: 0/200"));
+        assert!(message.contains("429"));
     }
 
     #[test]

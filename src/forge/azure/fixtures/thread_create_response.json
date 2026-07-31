@@ -19,7 +19,7 @@
   ],
   "threadContext": {
     "filePath": "/src/forge/azure/backend.rs",
-    "rightFileStart": { "line": 20, "offset": 1 },
-    "rightFileEnd": { "line": 20, "offset": 1 }
+    "rightFileStart": { "line": 20, "offset": 5 },
+    "rightFileEnd": { "line": 22, "offset": 13 }
   }
 }

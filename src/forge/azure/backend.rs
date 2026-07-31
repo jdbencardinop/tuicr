@@ -363,6 +363,38 @@ impl AzureDevOpsBackend {
         Ok(all)
     }
 
+    /// `POST .../threads` — create a new comment thread, anchored
+    /// (`thread_context: Some(...)`, an inline file comment) or general
+    /// (`thread_context: None`, a whole-PR comment). This is the one
+    /// underlying operation both `create_review` (its bundled
+    /// comment(s)-then-vote submit flow) and the standalone, public
+    /// `create_thread` wrapper (see the second `impl AzureDevOpsBackend`
+    /// block below) call — per audit requirement 7 ("create thread,
+    /// reply, update thread status, set vote are separate operations"),
+    /// thread creation must be independently callable, not exist only as
+    /// an inline step of the bundled flow.
+    fn create_thread_via(
+        &self,
+        client: &AdoHttpClient,
+        repo: &ForgeRepository,
+        pr_number: u64,
+        body: &str,
+        thread_context: Option<crate::forge::azure::models::AdoCommentThreadContext>,
+    ) -> Result<AdoCommentThread> {
+        let path = with_api_version(
+            &format!("{}/pullrequests/{pr_number}/threads", Self::base_path(repo)),
+            &[],
+        );
+        let request = AdoCreateThreadRequest {
+            comments: vec![AdoCreateCommentRequest {
+                content: body.to_string(),
+            }],
+            thread_context,
+            status: None,
+        };
+        client.post_json(&path, &request)
+    }
+
     fn fetch_threads(
         &self,
         client: &AdoHttpClient,
@@ -596,6 +628,27 @@ impl ForgeBackend for AzureDevOpsBackend {
         Ok(content.lines().count() as u32)
     }
 
+    /// `RemoteReviewThread::is_resolved` is a shared-trait `bool` — every
+    /// `ForgeBackend` must produce one, so Azure's 7-value
+    /// `CommentThreadStatus` (`active`/`fixed`/`wontFix`/`closed`/
+    /// `byDesign`/`pending`/`unknown`) is necessarily collapsed here.
+    /// This mapping is deliberately conservative, not a silent
+    /// default-to-open/default-to-resolved guess:
+    /// - `fixed`, `closed`, `byDesign` → `true` (Azure's own
+    ///   [`CommentThreadStatus::is_resolved`](AdoThreadStatus::is_resolved)
+    ///   classification — genuinely resolved outcomes with different
+    ///   *reasons*, none of which Tuicr's bool distinguishes).
+    /// - `active`, `pending` → `false` (still open / provisionally
+    ///   unresolved pending further action — never guessed as resolved).
+    /// - `unknown` → `false` — an explicit choice, not a fallback bug: an
+    ///   unrecognized status is treated as still-needing-attention (the
+    ///   safer failure mode for a review tool is to *show* an ambiguous
+    ///   thread, never to silently hide it as resolved).
+    ///
+    /// None of this is silent data loss: the full native `status` string
+    /// (plus `threadContext`/`pullRequestThreadContext`) is preserved
+    /// verbatim and separately via [`Self::thread_provider_mapping`], for
+    /// any durable persistence that needs the un-collapsed value.
     fn list_review_threads(&self, pr: &PullRequestDetails) -> Result<Vec<RemoteReviewThread>> {
         let client = self.client_for(&pr.repository)?;
         let threads = self.fetch_threads(&client, &pr.repository, pr.number)?;
@@ -611,6 +664,26 @@ impl ForgeBackend for AzureDevOpsBackend {
                 let (path, line, side) = match &thread.thread_context {
                     Some(ctx) => {
                         let path = ctx.file_path.trim_start_matches('/').to_string();
+                        // `RemoteReviewThread` (shared across every
+                        // `ForgeBackend`) carries exactly one `line`/
+                        // `side` pair and no `offset`, but Azure's own
+                        // `threadContext` can independently populate
+                        // *both* `rightFileStart` and `leftFileStart` at
+                        // once (`SideSupport::simultaneous_both_sides()`/
+                        // `RangeSupport::DualSideOffsets` in
+                        // `crate::forge::capabilities::azure_devops`) —
+                        // each with its own `offset` and a possibly
+                        // different `*FileEnd` line. This is a real,
+                        // documented collapse, not a silent one: the
+                        // right (head) side wins when both are present
+                        // (matching the convention every other side/line
+                        // pair in this module already uses — see e.g.
+                        // `build_thread_context`), and `offset` is
+                        // dropped entirely here — but nothing is lost for
+                        // any caller that needs the full anchor: the raw
+                        // `threadContext` (both sides, both offsets, both
+                        // `*FileEnd` positions) is preserved verbatim,
+                        // separately, via `Self::thread_provider_mapping`.
                         if let Some(pos) = &ctx.right_file_start {
                             (path, Some(pos.line), RemoteCommentSide::Right)
                         } else if let Some(pos) = &ctx.left_file_start {
@@ -737,25 +810,23 @@ impl ForgeBackend for AzureDevOpsBackend {
         // the vote update when one was requested (its state is the review
         // outcome the user asked for), else the last comment thread
         // created (when only posting comments, with no vote).
+        //
+        // Every write below reuses `Self::create_thread_via`, the same
+        // standalone, independently-callable operation `create_thread`
+        // (its `pub` wrapper) exposes — per audit requirement 7 ("create
+        // thread, reply, update thread status, set vote are separate
+        // operations"), thread creation must not exist *only* as an
+        // inline step of this bundled comment+vote flow.
         let mut last_thread: Option<AdoCommentThread> = None;
         for comment in request.comments {
             let thread_context = Self::build_thread_context(comment);
-            let body = AdoCreateThreadRequest {
-                comments: vec![AdoCreateCommentRequest {
-                    content: comment.body.clone(),
-                }],
-                thread_context: Some(thread_context),
-                status: None,
-            };
-            let path = with_api_version(
-                &format!(
-                    "{}/pullrequests/{}/threads",
-                    Self::base_path(&pr.repository),
-                    pr.number
-                ),
-                &[],
-            );
-            let created: AdoCommentThread = client.post_json(&path, &body)?;
+            let created = self.create_thread_via(
+                &client,
+                &pr.repository,
+                pr.number,
+                &comment.body,
+                Some(thread_context),
+            )?;
             last_thread = Some(created);
         }
 
@@ -763,22 +834,8 @@ impl ForgeBackend for AzureDevOpsBackend {
         // no `threadContext`, matching how the Azure DevOps web UI posts
         // an overall PR comment.
         if !request.body.is_empty() {
-            let body = AdoCreateThreadRequest {
-                comments: vec![AdoCreateCommentRequest {
-                    content: request.body.to_string(),
-                }],
-                thread_context: None,
-                status: None,
-            };
-            let path = with_api_version(
-                &format!(
-                    "{}/pullrequests/{}/threads",
-                    Self::base_path(&pr.repository),
-                    pr.number
-                ),
-                &[],
-            );
-            let created: AdoCommentThread = client.post_json(&path, &body)?;
+            let created =
+                self.create_thread_via(&client, &pr.repository, pr.number, request.body, None)?;
             last_thread = Some(created);
         }
 
@@ -823,14 +880,34 @@ impl ForgeBackend for AzureDevOpsBackend {
     }
 }
 
-/// Cast/update the current viewer's reviewer vote directly, and update a
-/// thread's resolution status directly — both evidence-backed
-/// `ForgeBackend`-adjacent operations the generic trait has no dedicated
-/// slot for (the trait's `create_review` covers the common
-/// comment-then-vote submit flow; these are for the narrower reply/
-/// resolve-thread actions requirement 6 calls out separately: "Replies/
-/// status updates only where official API supports them").
+/// Create a new thread directly, cast/update the current viewer's
+/// reviewer vote directly, and update a thread's resolution status
+/// directly — all evidence-backed `ForgeBackend`-adjacent operations the
+/// generic trait has no dedicated slot for (the trait's `create_review`
+/// covers the common comment-then-vote submit flow; these are for the
+/// narrower create/reply/resolve-thread/vote actions requirement 6 (and
+/// the audit's requirement 7, "create thread, reply, update thread
+/// status, set vote are separate operations") calls out separately:
+/// "Replies/status updates only where official API supports them").
 impl AzureDevOpsBackend {
+    /// Create a new thread (`POST .../threads`), independently of
+    /// `create_review`'s bundled comment(s)-then-vote submit flow. Pass
+    /// `thread_context: Some(...)` for an inline file comment (anchored to
+    /// a `path`/`line`/`side`, mirroring `Self::build_thread_context`'s
+    /// shape) or `None` for a general, whole-PR comment. Returns the
+    /// created thread's ID.
+    pub fn create_thread(
+        &self,
+        pr: &PullRequestDetails,
+        body: &str,
+        thread_context: Option<crate::forge::azure::models::AdoCommentThreadContext>,
+    ) -> Result<u64> {
+        let client = self.client_for(&pr.repository)?;
+        let created =
+            self.create_thread_via(&client, &pr.repository, pr.number, body, thread_context)?;
+        Ok(created.id)
+    }
+
     /// Reply to an existing thread (`POST .../threads/{id}/comments`).
     /// Supported per `ReplySupport::Native` in
     /// `crate::forge::capabilities::azure_devops`.
@@ -907,11 +984,13 @@ impl AzureDevOpsBackend {
     }
 
     /// Fetch a single thread's provider-native `threadContext`/
-    /// `pullRequestThreadContext` payload as a durable, ready-to-persist
-    /// JSON value, for `crate::review_store::ReviewStore::
+    /// `pullRequestThreadContext`/`status` payload as a durable,
+    /// ready-to-persist JSON value, for `crate::review_store::ReviewStore::
     /// upsert_thread_provider_mapping`'s `mapping` parameter (requirement
     /// 5: "Preserve provider-native threadContext/tracking data in
-    /// durable mappings"). This adapter's `create_review`/`reply_to_thread`
+    /// durable mappings"; audit requirement 6: "Preserve native value
+    /// [of Azure's 7 thread statuses] ... make lossy/unknown mappings
+    /// explicit"). This adapter's `create_review`/`reply_to_thread`
     /// do not call that session-store API themselves (no other current
     /// `ForgeBackend` does either — it is app-level, session-scoped
     /// infrastructure; see `crate::model::thread_store::PersistedThread::
@@ -919,11 +998,20 @@ impl AzureDevOpsBackend {
     /// (future) provider adapter"), so this method exposes the exact
     /// value a caller needs, fully round-trippable, rather than silently
     /// dropping the data anywhere in this module.
+    ///
+    /// `status` is always included (Azure's `CommentThreadStatus` is never
+    /// itself optional — it defaults to `unknown`, not absent), even when
+    /// there is no `threadContext`/`pullRequestThreadContext` — a
+    /// general, unanchored PR-level thread still has a meaningful native
+    /// status (e.g. `closed`) that `list_review_threads`' `is_resolved`
+    /// bool alone cannot round-trip (see that method's own doc comment for
+    /// the full 7-status-to-bool mapping table this durable value exists
+    /// to make lossless).
     pub fn thread_provider_mapping(
         &self,
         pr: &PullRequestDetails,
         thread_id: u64,
-    ) -> Result<Option<serde_json::Value>> {
+    ) -> Result<serde_json::Value> {
         let client = self.client_for(&pr.repository)?;
         let path = with_api_version(
             &format!(
@@ -934,13 +1022,11 @@ impl AzureDevOpsBackend {
             &[],
         );
         let thread: AdoCommentThread = client.get_json(&path)?;
-        if thread.thread_context.is_none() && thread.pull_request_thread_context.is_none() {
-            return Ok(None);
-        }
-        Ok(Some(serde_json::json!({
+        Ok(serde_json::json!({
+            "status": thread.status,
             "threadContext": thread.thread_context,
             "pullRequestThreadContext": thread.pull_request_thread_context,
-        })))
+        }))
     }
 }
 

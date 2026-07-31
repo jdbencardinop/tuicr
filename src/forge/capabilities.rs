@@ -220,14 +220,45 @@ pub enum SuggestionSupport {
     ApplyableObject,
 }
 
-/// How list endpoints paginate.
+/// One list endpoint's pagination mechanism.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PaginationModel {
-    /// Page-number/limit based (GitHub REST, GitLab, Gitea, Forgejo).
+pub enum PaginationStyle {
+    /// Page-number/limit based (GitHub REST, GitLab, Gitea, Forgejo; also
+    /// Azure DevOps Services' PR list `$top`/`$skip` and iteration-change
+    /// list `$top`/`$skip`).
     PageNumber,
-    /// Continuation-token based (Azure DevOps).
+    /// Opaque continuation-token based (Azure DevOps' commit list
+    /// `x-ms-continuationtoken`).
     ContinuationToken,
+}
+
+/// How a provider's list endpoints paginate, broken down per resource
+/// rather than as one scalar. Pagination is not uniform within a single
+/// provider: Azure DevOps paginates PR lists and iteration/change lists
+/// with `$top`/`$skip` (see `src/forge/azure/backend.rs`'s
+/// `fetch_pull_requests`/`fetch_iterations`) but commit lists with an
+/// opaque `x-ms-continuationtoken` response header (`fetch_commits`).
+/// Modeling this as one global `PaginationModel` value would silently
+/// claim a uniform pagination contract the API does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaginationModel {
+    /// Pull-request list and iteration/change list pagination style.
+    pub pull_requests: PaginationStyle,
+    /// Commit list pagination style.
+    pub commits: PaginationStyle,
+}
+
+impl PaginationModel {
+    /// Every list endpoint for this provider uses the same style — the
+    /// common case for GitHub/GitLab/Gitea/Forgejo, none of which are
+    /// evidenced to mix pagination mechanisms within one provider.
+    pub const fn uniform(style: PaginationStyle) -> Self {
+        Self {
+            pull_requests: style,
+            commits: style,
+        }
+    }
 }
 
 /// A minimal, human-readable provider version marker (e.g. `"16.0.1"`,
@@ -304,7 +335,7 @@ pub fn github() -> ProviderCapabilities {
         stale_anchor: StaleAnchorSignal::OriginalPosition,
         suggestions: SuggestionSupport::Markdown,
         create_idempotency: false,
-        pagination: PaginationModel::PageNumber,
+        pagination: PaginationModel::uniform(PaginationStyle::PageNumber),
     }
 }
 
@@ -345,14 +376,16 @@ pub fn gitlab() -> ProviderCapabilities {
         stale_anchor: StaleAnchorSignal::VersionMismatch,
         suggestions: SuggestionSupport::ApplyableObject,
         create_idempotency: false,
-        pagination: PaginationModel::PageNumber,
+        pagination: PaginationModel::uniform(PaginationStyle::PageNumber),
     }
 }
 
 /// Azure DevOps: iteration-based diffs, simultaneous dual-side thread
 /// context, vote-based approve/request-changes, thread-level resolution,
 /// iteration/tracking-based staleness. No pending-review or suggestion
-/// object was verified.
+/// object was verified. Pagination is mixed, not uniform: PR list and
+/// iteration/change lists use `$top`/`$skip`, but commit lists use an
+/// opaque continuation token — see `PaginationModel`'s doc comment.
 pub fn azure_devops() -> ProviderCapabilities {
     ProviderCapabilities {
         kind: ForgeKind::AzureDevOps,
@@ -369,7 +402,10 @@ pub fn azure_devops() -> ProviderCapabilities {
         stale_anchor: StaleAnchorSignal::Tracking,
         suggestions: SuggestionSupport::None,
         create_idempotency: false,
-        pagination: PaginationModel::ContinuationToken,
+        pagination: PaginationModel {
+            pull_requests: PaginationStyle::PageNumber,
+            commits: PaginationStyle::ContinuationToken,
+        },
     }
 }
 
@@ -399,7 +435,7 @@ pub fn gitea_1_24() -> ProviderCapabilities {
         stale_anchor: StaleAnchorSignal::ExplicitReviewFlag,
         suggestions: SuggestionSupport::None,
         create_idempotency: false,
-        pagination: PaginationModel::PageNumber,
+        pagination: PaginationModel::uniform(PaginationStyle::PageNumber),
     }
 }
 

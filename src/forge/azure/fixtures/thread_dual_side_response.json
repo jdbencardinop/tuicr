@@ -1,0 +1,34 @@
+{
+  "id": 105,
+  "status": "active",
+  "isDeleted": false,
+  "comments": [
+    {
+      "id": 6,
+      "parentCommentId": 0,
+      "author": {
+        "id": "aaaaaaaa-0000-4000-8000-000000000001",
+        "displayName": "Jane Reviewer",
+        "uniqueName": "jane@contoso.example",
+        "url": ""
+      },
+      "content": "This rename touches both the old and new location.",
+      "publishedDate": "2024-01-18T09:00:00Z",
+      "isDeleted": false
+    }
+  ],
+  "threadContext": {
+    "filePath": "/src/forge/azure/renamed.rs",
+    "leftFileStart": { "line": 8, "offset": 3 },
+    "leftFileEnd": { "line": 8, "offset": 20 },
+    "rightFileStart": { "line": 20, "offset": 5 },
+    "rightFileEnd": { "line": 22, "offset": 13 }
+  },
+  "pullRequestThreadContext": {
+    "changeTrackingId": 9,
+    "iterationContext": {
+      "firstComparingIteration": 1,
+      "secondComparingIteration": 2
+    }
+  }
+}
