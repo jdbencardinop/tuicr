@@ -52,7 +52,9 @@ use crate::forge::azure::models::{
     AdoListResponse, AdoPullRequest, AdoThreadStatus, AdoUpdateThreadStatusRequest,
     AdoUpdateVoteRequest, AdoVote,
 };
-use crate::forge::giteafj::url_encode::{encode_path_segment, encode_path_segments};
+use crate::forge::giteafj::url_encode::{
+    encode_path_segment, encode_path_segments, encode_query_value,
+};
 use crate::forge::remote_comments::{RemoteCommentSide, RemoteReviewComment, RemoteReviewThread};
 use crate::forge::submit::SubmitEvent;
 use crate::forge::traits::ForgeRepository;
@@ -452,13 +454,26 @@ impl AzureDevOpsBackend {
     fn fetch_file_via_api(&self, request: &ForgeFileLinesRequest) -> Result<String> {
         let client = self.client_for(&request.repository)?;
         let path_str = request.path.to_string_lossy().replace('\\', "/");
+        // `path` and `versionDescriptor.version` are QUERY-string values
+        // here (the third argument to `with_api_version`, hand-assembled
+        // with `format!` — see that function's doc comment), not URL PATH
+        // segments, so they must go through `encode_query_value`, not
+        // `encode_path_segments`/`encode_path_segment`. The path-segment
+        // encoder's escape set omits `&`/`=`/`+` (they have no special
+        // meaning within one path segment) — but left unescaped in a
+        // query value, an `&` or `=` inside a file path would inject a
+        // bogus extra query parameter or truncate `path` at the first
+        // occurrence, corrupting every query parameter after it. See
+        // `contract_tests.rs`'s
+        // `should_percent_encode_special_characters_in_items_api_query_values`
+        // for the wire-level regression coverage.
         let endpoint = with_api_version(
             &format!("{}/items", Self::base_path(&request.repository)),
             &[
-                ("path", encode_path_segments(&path_str)),
+                ("path", encode_query_value(&path_str)),
                 (
                     "versionDescriptor.version",
-                    encode_path_segment(request.sha()),
+                    encode_query_value(request.sha()),
                 ),
                 ("versionDescriptor.versionType", "commit".to_string()),
                 ("includeContent", "true".to_string()),

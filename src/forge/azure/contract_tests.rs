@@ -740,3 +740,134 @@ fn should_fetch_file_content_via_items_api_when_no_local_checkout() {
         }
     });
 }
+
+/// Regression coverage for a real encoder-mismatch bug found in
+/// acceptance review: `fetch_file_via_api`'s `path` (and
+/// `versionDescriptor.version`) are QUERY-string *values* — the third
+/// argument to `with_api_version`, which hand-assembles
+/// `key=value&key=value...` with `format!` (see that function's doc
+/// comment in `backend.rs`) — not URL PATH segments. The fix now runs
+/// them through `encode_query_value` instead of
+/// `encode_path_segments`/`encode_path_segment`.
+///
+/// The path-segment encoder's escape set has no reason to escape
+/// `&`/`=`/`+` (they are ordinary characters within one path segment),
+/// so a file path containing any of them would previously have been
+/// spliced into the query string unescaped — corrupting the request:
+/// - an unescaped `&` starts a bogus new query parameter and truncates
+///   `path` at that point (query-parameter injection/truncation);
+/// - an unescaped `=` inside the value confuses `key=value` parsing.
+///
+/// Every case below drives the real `fetch_file_via_api` code path
+/// (via the public `file_line_count`/`fetch_file_lines` trait methods,
+/// exactly as `should_fetch_file_content_via_items_api_when_no_local_checkout`
+/// above does) against a mock server keyed on the **exact** expected
+/// wire-level request target — `test_support`'s mock server matches
+/// `"{METHOD} {target}"` verbatim, so a wrong encoding sends the request
+/// to a target the mock never registered and the call fails with a 404
+/// ("no mock response registered"), not a false-positive pass. Each case
+/// additionally splits the captured target's query string on `&` and
+/// asserts exactly 5 parameters survive with their expected keys, so a
+/// regression that reintroduces an unescaped `&`/`=` in `path` is caught
+/// even if the full-string assertion below it were ever loosened.
+#[test]
+fn should_percent_encode_special_characters_in_items_api_query_values() {
+    with_mock_pat(|| {
+        // (test label, raw file path, expected percent-encoded query value)
+        let cases: &[(&str, &str, &str)] = &[
+            ("ampersand", "src/A&B.rs", "src/A%26B.rs"),
+            ("equals", "src/eq=uals.rs", "src/eq%3Duals.rs"),
+            ("plus", "src/plus+file.rs", "src/plus%2Bfile.rs"),
+            ("hash", "src/hash#file.rs", "src/hash%23file.rs"),
+            // `?` has no special meaning once already inside the query
+            // component (RFC 3986/WHATWG URL), so it is legitimately
+            // left unescaped by `encode_query_value` — asserted here so
+            // any future over-escaping regression is caught too.
+            ("question", "src/question?mark.rs", "src/question?mark.rs"),
+            ("percent", "src/percent%file.rs", "src/percent%25file.rs"),
+            ("space", "src/space file.rs", "src/space%20file.rs"),
+            (
+                "slash_nested",
+                "src/nested/dir/file.rs",
+                "src/nested/dir/file.rs",
+            ),
+            (
+                "unicode",
+                "src/ünïcödé/文件.rs",
+                "src/%C3%BCn%C3%AFc%C3%B6d%C3%A9/%E6%96%87%E4%BB%B6.rs",
+            ),
+        ];
+
+        for (label, raw_path, expected_encoded_path) in cases {
+            let expected_target = format!(
+                "/contoso/widgets/_apis/git/repositories/api/items?api-version=7.1&path={expected_encoded_path}&versionDescriptor.version=1111111111111111111111111111111111111a&versionDescriptor.versionType=commit&includeContent=true"
+            );
+            let key = format!("GET {expected_target}");
+            let responses = [(
+                key,
+                MockResponse::json(200, include_str!("fixtures/item_content.txt")),
+            )]
+            .into_iter()
+            .collect();
+            let (base_url, requests) = start_mock_server(responses);
+            let request = ForgeFileLinesRequest {
+                repository: repo_at(&base_url),
+                base_sha: "2222222222222222222222222222222222222b".to_string(),
+                head_sha: "1111111111111111111111111111111111111a".to_string(),
+                path: (*raw_path).into(),
+                status: FileStatus::Modified,
+                side: ForgeFileSide::Head,
+                start_line: 1,
+                end_line: 3,
+            };
+            let backend = AzureDevOpsBackend::new(None);
+
+            let count = backend.file_line_count(request).unwrap_or_else(|err| {
+                panic!(
+                    "case {label:?} (path {raw_path:?}) should reach the exact expected \
+                     mock-registered target without query injection/truncation: {err}"
+                )
+            });
+            assert_eq!(count, 3, "case {label:?} unexpected line count");
+
+            let captured = requests.lock().expect("lock captured requests");
+            assert_eq!(
+                captured.len(),
+                1,
+                "case {label:?} should make exactly one request"
+            );
+            let target = &captured[0].target;
+            assert_eq!(
+                *target, expected_target,
+                "case {label:?} produced an unexpected wire-level request target"
+            );
+
+            // Defense-in-depth: an unescaped `&`/`=` inside `path` would
+            // either inflate this count (query injection) or shift which
+            // segment holds which key (truncation) — assert the query
+            // string still splits into exactly the 5 parameters this
+            // endpoint sends, each under its expected key.
+            let query = target.split_once('?').map(|(_, q)| q).unwrap_or_default();
+            let params: Vec<&str> = query.split('&').collect();
+            assert_eq!(
+                params.len(),
+                5,
+                "case {label:?} query string had an unexpected parameter count: {query}"
+            );
+            let expected_keys = [
+                "api-version",
+                "path",
+                "versionDescriptor.version",
+                "versionDescriptor.versionType",
+                "includeContent",
+            ];
+            for (param, expected_key) in params.iter().zip(expected_keys) {
+                let actual_key = param.split_once('=').map(|(k, _)| k).unwrap_or(param);
+                assert_eq!(
+                    actual_key, expected_key,
+                    "case {label:?} query parameter order/keys shifted: {query}"
+                );
+            }
+        }
+    });
+}
