@@ -288,6 +288,154 @@ fn should_paginate_commits_via_continuation_token_with_no_duplicate_requests() {
     });
 }
 
+/// Regression coverage for a real encoder-mismatch bug found in final
+/// review: `fetch_commits` spliced the raw `x-ms-continuationtoken`
+/// response header straight into the next page's query string
+/// (`extra.push(("continuationToken", token.clone()))`) with no
+/// percent-encoding at all — the same class of bug already fixed for
+/// `fetch_file_via_api`'s `path`/`versionDescriptor.version` (see that
+/// commit), just with a response-derived cursor instead of a
+/// caller-supplied file path. Azure DevOps documents this token as
+/// "opaque", but opaque does not mean known-safe: it is still spliced
+/// into a hand-assembled query string (`with_api_version`), so an
+/// unescaped `&`/`=` inside it would inject a bogus extra query
+/// parameter or truncate `continuationToken` at the first occurrence —
+/// exactly the same query-parameter injection/truncation failure mode.
+///
+/// Drives three pages through the real `fetch_commits` code path (via
+/// the public `list_pull_request_commits` trait method) against a mock
+/// server keyed on the exact expected wire-level request target for
+/// each page:
+/// - page 1 has no `continuationToken` query param and returns a
+///   continuation token (`TOKEN_1`) containing `&`, `=`, `+`, `#`, `%`,
+///   and a space (kept within visible-ASCII: an HTTP header *value* —
+///   which is exactly what this token arrives as, verbatim, over the
+///   wire — cannot legally carry raw non-ASCII bytes; `ureq`'s
+///   `HeaderValue::to_str()` rejects them outright, so a token
+///   containing literal accented characters could never actually arrive
+///   this way in practice, and using one here would test an unreachable
+///   state instead of the real bug. Unicode-value encoding is already
+///   covered, for a caller-supplied value that never round-trips through
+///   a response header, by
+///   `should_percent_encode_special_characters_in_items_api_query_values`);
+/// - page 2's request target must carry `TOKEN_1`'s single, correctly
+///   percent-encoded form (asserted verbatim) — a wrong/missing encoder
+///   would either send a target the mock never registered (surfacing as
+///   a 404) or, worse, silently truncate/inject query parameters. Page 2
+///   then returns a **second, distinct** continuation token (`TOKEN_2`)
+///   that itself contains a literal `%20` substring (as opposed to an
+///   actual space) plus its own `&`/`=`/`+`/`#` characters;
+/// - page 3's request target must carry `TOKEN_2`'s own single,
+///   correctly percent-encoded form — computed completely
+///   independently of `TOKEN_1`/page 2's request. This is what proves
+///   there is no double-encoding *or* state carried across loop
+///   iterations: `fetch_commits` always re-derives `continuation` from
+///   that response's own fresh, raw `x-ms-continuationtoken` header
+///   (never from the query string it just sent), so `TOKEN_2`'s literal
+///   `%20` must come out as `%2520` (the `%` itself escaped, followed by
+///   literal `20`) — if the implementation instead reused/mutated the
+///   previously-*sent* (already-escaped) string, or double-encoded
+///   `TOKEN_2`, the resulting target would not match this exact
+///   expectation and the request would 404 against the mock. Page 3
+///   returns no further continuation token, so the loop stops there
+///   (exactly 3 requests total, no duplicate retries).
+#[test]
+fn should_percent_encode_continuation_token_across_paginated_commit_pages() {
+    with_mock_pat(|| {
+        // Raw (undecoded) tokens, each carrying its own combination of
+        // `&`/`=`/`+`/`#`/`%`/space — the reserved characters that must
+        // be percent-encoded before ending up in a hand-assembled query
+        // string. Kept within visible-ASCII (see the doc comment above
+        // for why: this is a response *header* value, which cannot
+        // legally carry raw non-ASCII bytes over the wire). Deliberately
+        // different per page so page 2's and page 3's request targets
+        // can never accidentally collide (the mock server matches by
+        // exact `"{METHOD} {target}"` key, so two distinct requests must
+        // resolve to two distinct keys). `TOKEN_2` additionally embeds a
+        // literal `%20` substring to prove the encoder does not treat
+        // already-percent-looking input as pre-encoded (it must still
+        // escape the `%` itself, producing `%2520`, not pass `%20`
+        // through untouched).
+        let token_1 = "tok a&b=c+d#e%z";
+        let encoded_token_1 = "tok%20a%26b%3Dc%2Bd%23e%25z";
+        let token_2 = "next+tok=1&2#three%20four";
+        let encoded_token_2 = "next%2Btok%3D1%262%23three%2520four";
+
+        let page1_target =
+            "/contoso/widgets/_apis/git/repositories/api/pullrequests/42/commits?api-version=7.1";
+        let page2_target = format!(
+            "/contoso/widgets/_apis/git/repositories/api/pullrequests/42/commits?api-version=7.1&continuationToken={encoded_token_1}"
+        );
+        let page3_target = format!(
+            "/contoso/widgets/_apis/git/repositories/api/pullrequests/42/commits?api-version=7.1&continuationToken={encoded_token_2}"
+        );
+
+        let responses = [
+            (
+                format!("GET {page1_target}"),
+                MockResponse::json(200, include_str!("fixtures/commits_page1.json"))
+                    .with_header("x-ms-continuationtoken", token_1),
+            ),
+            (
+                format!("GET {page2_target}"),
+                MockResponse::json(200, include_str!("fixtures/commits_page2.json"))
+                    .with_header("x-ms-continuationtoken", token_2),
+            ),
+            (
+                format!("GET {page3_target}"),
+                MockResponse::json(200, include_str!("fixtures/commits_page3.json")),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let (base_url, requests) = start_mock_server(responses);
+        let backend = AzureDevOpsBackend::new(None);
+        let pr = sample_pr_details(repo_at(&base_url));
+
+        let commits = backend
+            .list_pull_request_commits(&pr)
+            .expect("list_pull_request_commits should succeed across all three pages");
+
+        assert_eq!(commits.len(), 3, "should have fetched all three pages");
+
+        let captured = requests.lock().expect("lock captured requests");
+        assert_eq!(
+            captured.len(),
+            3,
+            "should make exactly three requests — no duplicate retries"
+        );
+        assert_eq!(captured[0].target, page1_target, "page 1 request target");
+        assert_eq!(
+            captured[1].target, page2_target,
+            "page 2 request target should carry TOKEN_1's single, correctly percent-encoded form"
+        );
+        assert_eq!(
+            captured[2].target, page3_target,
+            "page 3 request target should carry TOKEN_2's own single, correctly \
+             percent-encoded form — independent of TOKEN_1/page 2 (no double-encoding or \
+             carried-over encoding state across the loop)"
+        );
+
+        // Defense-in-depth: an unescaped `&`/`=` in either token would
+        // either inflate the query-parameter count (injection) or shift
+        // which segment holds which key (truncation) — assert both
+        // continuation-page query strings still split into exactly the
+        // 2 parameters this endpoint sends on a continuation request,
+        // each under its expected key.
+        for target in [&page2_target, &page3_target] {
+            let query = target.split_once('?').map(|(_, q)| q).unwrap_or_default();
+            let params: Vec<&str> = query.split('&').collect();
+            assert_eq!(
+                params.len(),
+                2,
+                "continuation-page query string had an unexpected parameter count: {query}"
+            );
+            assert!(params[0].starts_with("api-version="));
+            assert!(params[1].starts_with("continuationToken="));
+        }
+    });
+}
+
 #[test]
 fn should_create_review_with_comment_thread_and_approve_vote() {
     with_mock_pat(|| {

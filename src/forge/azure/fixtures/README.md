@@ -91,7 +91,7 @@ used only for nested shapes Learn's rendered property tables truncate)
 | `pull_request_list.json` | `GET .../pullrequests` | `list_pull_requests` |
 | `iterations_list.json` | `GET .../iterations` | `list_review_threads` (staleness) |
 | `threads_list.json` | `GET .../threads` | `list_review_threads` |
-| `commits_page1.json` / `commits_page2.json` | `GET .../commits` | `list_pull_request_commits` (continuation-token pagination) |
+| `commits_page1.json` / `commits_page2.json` / `commits_page3.json` | `GET .../commits` | `list_pull_request_commits` (continuation-token pagination; `commits_page3.json` backs the wire-level percent-encoding regression test for `x-ms-continuationtoken` values containing reserved query characters) |
 | `connection_data.json` | `GET _apis/connectionData` | `create_review`/`cast_vote` (viewer identity) |
 | `thread_create_response.json` | `POST .../threads` | `create_review` (comment path) |
 | `vote_update_response.json` | `PUT .../reviewers/{id}` | `create_review`/`cast_vote` (vote path) |

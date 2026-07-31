@@ -432,7 +432,22 @@ impl AzureDevOpsBackend {
         for _ in 0..MAX_PAGES {
             let mut extra = Vec::new();
             if let Some(token) = &continuation {
-                extra.push(("continuationToken", token.clone()));
+                // `token` is stored raw/undecoded (verbatim from the
+                // `x-ms-continuationtoken` response header — see below);
+                // it must be percent-encoded as a query VALUE here, at
+                // the point of use, not before storing it. Azure DevOps
+                // documents this token as an opaque server-generated
+                // cursor, but "opaque" does not mean "known-safe" — it is
+                // still spliced into a hand-assembled query string (see
+                // `with_api_version`'s doc comment), so any `&`/`=`/`+`
+                // etc. it happens to contain must not be left unescaped
+                // (same class of bug as the `path`/`versionDescriptor.
+                // version` fix in the Items-API call — see that commit).
+                // Encoding at use-time (rather than when `continuation`
+                // is first set from the header) also guarantees no
+                // double-encoding across pages: each page's raw token is
+                // encoded exactly once, right before being sent.
+                extra.push(("continuationToken", encode_query_value(token)));
             }
             let path = with_api_version(
                 &format!("{}/pullrequests/{pr_number}/commits", Self::base_path(repo)),
