@@ -72,7 +72,8 @@ pub(crate) fn annotation_row_height(app: &App, idx: usize) -> usize {
         // Pre-wrapped by comment_panel::wrap_segments to inner width - 1.
         AnnotatedLine::ReviewComment { .. }
         | AnnotatedLine::FileComment { .. }
-        | AnnotatedLine::LineComment { .. } => 1,
+        | AnnotatedLine::LineComment { .. }
+        | AnnotatedLine::ThreadNativeReply { .. } => 1,
 
         AnnotatedLine::SideBySideLine {
             file_idx,
@@ -326,7 +327,8 @@ fn full_row_text(app: &App, annotation: &AnnotatedLine) -> String {
         | AnnotatedLine::RemoteReviewSummaryLine { .. }
         | AnnotatedLine::FileComment { .. }
         | AnnotatedLine::LineComment { .. }
-        | AnnotatedLine::RemoteThreadLine { .. } => indicator.to_string(),
+        | AnnotatedLine::RemoteThreadLine { .. }
+        | AnnotatedLine::ThreadNativeReply { .. } => indicator.to_string(),
     }
 }
 

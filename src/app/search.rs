@@ -283,6 +283,22 @@ impl App {
                 bodies.insert(0, format!("github {}", thread.path));
                 Some(bodies.join(" "))
             }
+            AnnotatedLine::ThreadNativeReply { thread_id } => {
+                let persisted = self.session.find_thread(thread_id)?;
+                // Native-only replies are the ones actually rendered by
+                // this annotation, so restrict the search text to those
+                // (legacy-mirrored comments are already searchable via
+                // their own `ReviewComment`/`FileComment`/`LineComment`
+                // annotation entry).
+                let bodies: Vec<String> = persisted
+                    .thread
+                    .comments()
+                    .iter()
+                    .filter(|c| !self.session.is_legacy_comment_id(c.id().as_str()))
+                    .map(|c| c.body.clone())
+                    .collect();
+                Some(bodies.join(" "))
+            }
             AnnotatedLine::Spacing => None,
         }
     }

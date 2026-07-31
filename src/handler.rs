@@ -854,10 +854,10 @@ fn dispatch_command(app: &mut App, kind: CommandKind) -> CommandAfterDispatch {
 }
 
 fn reload_review(app: &mut App) {
-    let comment_reload = app.reload_persisted_session_if_changed(true);
+    let session_reload = app.reload_persisted_session_if_changed(true);
     if matches!(app.diff_source, app::DiffSource::PullRequest(_)) {
-        if let Err(e) = comment_reload {
-            app.set_warning(format!("Comment reload failed: {e}"));
+        if let Err(e) = session_reload {
+            app.set_warning(format!("Session reload failed: {e}"));
         }
         // Async: shows a spinner in the status bar; result is applied in
         // `poll_pr_reload_events` and the cursor is restored to the captured
@@ -868,19 +868,25 @@ fn reload_review(app: &mut App) {
     } else {
         match app.reload_diff_files() {
             Ok((count, invalidated)) => {
-                let comment_suffix = match comment_reload {
+                // `session_reload`'s count covers reviewed marks, legacy
+                // comments, *and* durable threads (see
+                // `merge_external_session_changes`) merged in from an
+                // external writer, so this message stays accurate even
+                // when only thread activity (a reply/resolve/import)
+                // changed, not just legacy comments.
+                let session_suffix = match session_reload {
                     Ok(added) if added > 0 => {
-                        format!(", loaded {added} external comments")
+                        format!(", merged {added} external session change(s)")
                     }
                     Ok(_) => String::new(),
-                    Err(e) => format!(", comment reload failed: {e}"),
+                    Err(e) => format!(", session reload failed: {e}"),
                 };
                 if invalidated > 0 {
                     app.set_message(format!(
-                        "Reloaded {count} files, {invalidated} changed since last review{comment_suffix}"
+                        "Reloaded {count} files, {invalidated} changed since last review{session_suffix}"
                     ));
                 } else {
-                    app.set_message(format!("Reloaded {count} files{comment_suffix}"));
+                    app.set_message(format!("Reloaded {count} files{session_suffix}"));
                 }
             }
             Err(e) => app.set_error(format!("Reload failed: {e}")),

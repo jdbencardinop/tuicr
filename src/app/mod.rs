@@ -15,7 +15,7 @@ use crate::forge::traits::{ForgeBackend, ForgeRepository};
 use crate::model::review::FileReview;
 use crate::model::{
     ClearScope, Comment, CommentType, DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin,
-    LineRange, LineSide, ReviewSession, SessionDiffSource,
+    LineRange, LineSide, PersistedThread, ReviewSession, SessionDiffSource,
 };
 use crate::persistence::load_latest_session_for_context;
 use crate::review_store::{AddCommentRequest, CommentTarget, add_comment_to_session};
@@ -315,6 +315,16 @@ pub enum AnnotatedLine {
     /// edit or reply to these in v1; the annotation is informational so
     /// hit-testing and scroll math stay correct.
     RemoteThreadLine { thread_idx: usize },
+    /// A native-only durable thread reply row: a `ThreadComment` on a
+    /// `PersistedThread` that has no legacy `Comment` mirror of its own
+    /// (e.g. a TUI-authored reply, or a reply pulled in via remote
+    /// import). Gives thread-native content a real semantic identity in
+    /// the annotation stream so the navigator and cursor-based
+    /// reply/resolve/dismiss keybindings can reach it directly by
+    /// `ThreadId`, instead of only via a legacy comment's position.
+    ThreadNativeReply {
+        thread_id: crate::model::thread::ThreadId,
+    },
     /// Binary or empty file indicator
     BinaryOrEmpty { file_idx: usize },
     /// Spacing between files
@@ -456,6 +466,7 @@ pub fn annotation_file_idx(annotation: &AnnotatedLine) -> Option<usize> {
         | AnnotatedLine::HiddenLines { .. }
         | AnnotatedLine::ExpandedContext { .. }
         | AnnotatedLine::RemoteThreadLine { .. }
+        | AnnotatedLine::ThreadNativeReply { .. }
         | AnnotatedLine::Spacing => None,
     }
 }
@@ -1380,12 +1391,25 @@ pub enum CommentNavigatorKey {
     RemoteReview {
         summary_idx: usize,
     },
+    /// A thread-native reply row with no legacy `Comment` counterpart —
+    /// see [`crate::app::AnnotatedLine::ThreadNativeReply`].
+    ThreadNative {
+        thread_id: crate::model::thread::ThreadId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommentNavigatorKind {
     Local(CommentType),
-    Remote { muted: bool },
+    Remote {
+        muted: bool,
+    },
+    /// A thread-native reply row — status is shown so stale/ambiguous/
+    /// resolved/dismissed threads are distinguishable from an open one at
+    /// a glance in the navigator.
+    Thread {
+        status: crate::model::thread::ThreadStatus,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

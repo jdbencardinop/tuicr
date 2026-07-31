@@ -342,12 +342,17 @@ impl ReviewSession {
     /// derived solely from `(provider, remote.id)`
     /// ([`thread_store::remote_thread_id_for`]), so re-importing the exact
     /// same remote threads (e.g. re-fetching twice, or a session
-    /// reload) *replaces* the existing entry in place rather than
-    /// appending a duplicate. Threads with no comments are skipped (a
-    /// thread always needs a root). Returns the number of *newly* created
-    /// threads (replacements of an already-imported thread are not
-    /// counted, mirroring [`Self::migrate_legacy_comments_to_threads`]'s
-    /// convention).
+    /// reload) **merges into** the existing entry in place
+    /// ([`thread_store::merge_remote_thread_into_existing`]) rather than
+    /// appending a duplicate *or* naively overwriting it wholesale: a
+    /// locally-added reply, a local resolve/dismiss, and a locally
+    /// computed Stale/Ambiguous anchor relocation all survive a re-fetch
+    /// untouched, while the provider's own root/reply edits and
+    /// resolved/outdated flags still land from the fresh fetch. Threads
+    /// with no comments are skipped (a thread always needs a root).
+    /// Returns the number of *newly* created threads (merges into an
+    /// already-imported thread are not counted, mirroring
+    /// [`Self::migrate_legacy_comments_to_threads`]'s convention).
     pub fn import_remote_review_threads(
         &mut self,
         provider: &str,
@@ -364,7 +369,13 @@ impl ReviewSession {
                 .iter()
                 .position(|existing| existing.id() == persisted.id())
             {
-                Some(index) => self.threads[index] = persisted,
+                Some(index) => {
+                    thread_store::merge_remote_thread_into_existing(
+                        &mut self.threads[index],
+                        persisted,
+                        provider,
+                    );
+                }
                 None => {
                     self.threads.push(persisted);
                     created += 1;
@@ -1821,7 +1832,13 @@ mod tests {
                         id: format!("{id}-{author}"),
                         author: Some(author.to_string()),
                         body: body.to_string(),
-                        created_at: None,
+                        // Fixed rather than `None` so re-importing the same
+                        // logical remote payload twice in a test is
+                        // deterministic: `None` falls back to `Utc::now()`
+                        // in `thread_store::remote_thread_comment`, which
+                        // would make every reimport mint a fresh timestamp
+                        // even when nothing else in the payload changed.
+                        created_at: Some(chrono::DateTime::UNIX_EPOCH),
                         in_reply_to: None,
                         url: format!("https://example.invalid/{id}"),
                     })
@@ -1940,6 +1957,290 @@ mod tests {
                 session.threads().len(),
                 2,
                 "the same remote id under different providers must not collapse into one thread"
+            );
+        }
+
+        // Audit findings 5/8: re-importing an already-imported remote thread
+        // must *merge* into the existing entry, not silently overwrite it —
+        // preserving local-only replies, never regressing a local
+        // resolve/dismiss/stale/ambiguous state, and never clobbering a
+        // locally-relocated anchor.
+
+        #[test]
+        fn should_preserve_a_locally_added_reply_when_remote_thread_is_reimported() {
+            let mut session = test_session();
+            let remote = remote_thread("R_6", "a.rs", Some(5), false, false, &[("alice", "note")]);
+            session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+
+            let thread_id = session.threads()[0].id().clone();
+            session
+                .find_thread_mut(&thread_id)
+                .unwrap()
+                .thread
+                .reply(ThreadComment::new(
+                    ThreadAuthor::human("carol"),
+                    "local reply",
+                ));
+
+            // Re-fetch the exact same remote state (no provider-side change).
+            let created =
+                session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+
+            assert_eq!(created, 0);
+            assert_eq!(session.threads().len(), 1);
+            let thread = &session.threads()[0].thread;
+            assert_eq!(
+                thread.comments().len(),
+                2,
+                "the locally-added reply must survive the re-import"
+            );
+            let local_reply = thread.replies().next().unwrap();
+            assert_eq!(local_reply.body, "local reply");
+            assert_eq!(local_reply.author.name, "carol");
+            assert_eq!(local_reply.author.kind, AuthorKind::Human);
+        }
+
+        #[test]
+        fn should_pick_up_a_new_remote_reply_alongside_a_preserved_local_reply_on_reimport() {
+            let mut session = test_session();
+            let remote = remote_thread("R_7", "a.rs", Some(5), false, false, &[("alice", "note")]);
+            session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+
+            let thread_id = session.threads()[0].id().clone();
+            session
+                .find_thread_mut(&thread_id)
+                .unwrap()
+                .thread
+                .reply(ThreadComment::new(
+                    ThreadAuthor::human("carol"),
+                    "local reply",
+                ));
+
+            // The provider now shows a second remote reply that wasn't there
+            // on first fetch.
+            let updated_remote = remote_thread(
+                "R_7",
+                "a.rs",
+                Some(5),
+                false,
+                false,
+                &[("alice", "note"), ("bob", "remote follow-up")],
+            );
+            session.import_remote_review_threads("github", std::slice::from_ref(&updated_remote));
+
+            let thread = &session.threads()[0].thread;
+            assert_eq!(
+                thread.comments().len(),
+                3,
+                "root + remote reply + local reply"
+            );
+            let bodies: Vec<&str> = thread
+                .replies()
+                .map(|comment| comment.body.as_str())
+                .collect();
+            assert_eq!(
+                bodies,
+                vec!["remote follow-up", "local reply"],
+                "new remote reply must land before the preserved local reply"
+            );
+        }
+
+        #[test]
+        fn should_not_regress_a_local_resolve_when_remote_reimport_still_reports_open() {
+            let mut session = test_session();
+            let remote = remote_thread("R_8", "a.rs", Some(5), false, false, &[("alice", "note")]);
+            session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+
+            let thread_id = session.threads()[0].id().clone();
+            session
+                .find_thread_mut(&thread_id)
+                .unwrap()
+                .thread
+                .resolve();
+
+            // A stale/lagging re-fetch still reports the thread as open.
+            let created =
+                session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+
+            assert_eq!(created, 0);
+            assert_eq!(
+                session.threads()[0].thread.status(),
+                ThreadStatus::Resolved,
+                "a local resolve must survive a stale remote re-fetch reporting still-open"
+            );
+        }
+
+        #[test]
+        fn should_not_regress_a_local_dismiss_when_remote_reimport_reports_resolved() {
+            let mut session = test_session();
+            let remote = remote_thread("R_9", "a.rs", Some(5), false, false, &[("alice", "note")]);
+            session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+
+            let thread_id = session.threads()[0].id().clone();
+            session
+                .find_thread_mut(&thread_id)
+                .unwrap()
+                .thread
+                .dismiss();
+
+            let resolved_remote =
+                remote_thread("R_9", "a.rs", Some(5), true, false, &[("alice", "note")]);
+            session.import_remote_review_threads("github", std::slice::from_ref(&resolved_remote));
+
+            assert_eq!(
+                session.threads()[0].thread.status(),
+                ThreadStatus::Dismissed,
+                "a local dismiss is terminal and must never be overwritten by a remote resolve"
+            );
+        }
+
+        #[test]
+        fn should_not_clobber_a_locally_relocated_stale_anchor_on_remote_reimport() {
+            // `thread_from_remote` builds a context-less anchor
+            // (`Anchor::line`), so `refresh_anchor` is currently always a
+            // no-op for it (anchors with no captured context are left
+            // untouched — see `Anchor::relocate_with_remap`'s doc comment).
+            // Simulate a thread that *did* go Stale (e.g. via a future
+            // context-capturing enhancement, or any other path that ends up
+            // sharing this thread's deterministic remote-derived ID) by
+            // constructing it directly with a context-bearing anchor, the
+            // same way `dryrun.rs`'s own Stale-anchor tests do. This still
+            // exercises exactly the real merge contract under test: once a
+            // thread with this ID is Stale, reimporting the same remote
+            // thread must never clobber that anchor/status.
+            let mut session = test_session();
+            let thread_id = crate::model::thread_store::remote_thread_id_for("github", "R_10");
+            let anchor = Anchor::line_with_context(
+                "a.rs",
+                crate::model::thread::AnchorSide::New,
+                5,
+                crate::model::AnchorContext {
+                    before: vec![],
+                    selected: vec!["original content".to_string()],
+                    after: vec![],
+                },
+            )
+            .unwrap();
+            let root = ThreadComment::new(ThreadAuthor::remote("alice", "alice"), "note");
+            let mut thread: crate::model::thread::Thread =
+                serde_json::from_value(serde_json::json!({
+                    "id": thread_id,
+                    "status": "open",
+                    "anchor": anchor,
+                    "comments": [root],
+                }))
+                .unwrap();
+            thread.refresh_anchor(&["completely", "different", "file", "contents"]);
+            assert_eq!(
+                thread.status(),
+                ThreadStatus::Stale,
+                "setup: the anchor refresh above must have produced a Stale thread"
+            );
+            let mut persisted = PersistedThread::new(thread);
+            persisted.upsert_provider_mapping(
+                "github",
+                serde_json::json!({"id": "R_10", "path": "a.rs", "line": 5, "is_outdated": false}),
+            );
+            session.threads.push(persisted);
+
+            // The provider now reports a different line for the same thread
+            // (e.g. its own line-tracking caught up) — this must not reset
+            // our locally-computed Stale anchor/status back to "current".
+            let moved_remote =
+                remote_thread("R_10", "a.rs", Some(9), false, false, &[("alice", "note")]);
+            session.import_remote_review_threads("github", std::slice::from_ref(&moved_remote));
+
+            let thread = &session.threads()[0].thread;
+            assert_eq!(
+                thread.status(),
+                ThreadStatus::Stale,
+                "local Stale status must survive a remote reimport"
+            );
+            match thread.anchor().target() {
+                AnchorTarget::Line { line, .. } => assert_eq!(
+                    *line, 5,
+                    "local anchor line must not be silently overwritten by the remote's line"
+                ),
+                other => panic!("expected a line anchor, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn should_still_capture_native_resolved_flag_in_provider_mapping_even_when_status_is_preserved()
+         {
+            // Finding 8: reconcile provider resolved/outdated with local
+            // stale/ambiguous *without* lossy overwrite — the provider's own
+            // flag must still be recorded even though `status` itself isn't
+            // force-transitioned. Uses the same directly-constructed Stale
+            // thread technique as the test above (see its comment for why).
+            let mut session = test_session();
+            let thread_id = crate::model::thread_store::remote_thread_id_for("github", "R_11");
+            let anchor = Anchor::line_with_context(
+                "a.rs",
+                crate::model::thread::AnchorSide::New,
+                5,
+                crate::model::AnchorContext {
+                    before: vec![],
+                    selected: vec!["original content".to_string()],
+                    after: vec![],
+                },
+            )
+            .unwrap();
+            let root = ThreadComment::new(ThreadAuthor::remote("alice", "alice"), "note");
+            let mut thread: crate::model::thread::Thread =
+                serde_json::from_value(serde_json::json!({
+                    "id": thread_id,
+                    "status": "open",
+                    "anchor": anchor,
+                    "comments": [root],
+                }))
+                .unwrap();
+            thread.refresh_anchor(&["completely", "different", "file", "contents"]);
+            let mut persisted = PersistedThread::new(thread);
+            persisted.upsert_provider_mapping(
+                "github",
+                serde_json::json!({"id": "R_11", "path": "a.rs", "line": 5, "is_outdated": false}),
+            );
+            session.threads.push(persisted);
+
+            let resolved_remote =
+                remote_thread("R_11", "a.rs", Some(5), true, true, &[("alice", "note")]);
+            session.import_remote_review_threads("github", std::slice::from_ref(&resolved_remote));
+
+            assert_eq!(session.threads()[0].thread.status(), ThreadStatus::Stale);
+            let mapping = session.threads()[0].provider_mapping("github").unwrap();
+            assert_eq!(mapping["is_resolved"], serde_json::json!(true));
+            assert_eq!(mapping["is_outdated"], serde_json::json!(true));
+        }
+
+        #[test]
+        fn should_be_idempotent_when_reimporting_an_unchanged_remote_thread_after_local_reply() {
+            // Direct finding-5 regression: reimporting the *exact same*
+            // remote payload a second time (no provider-side change) is a
+            // strict no-op even when a local reply was added in between.
+            let mut session = test_session();
+            let remote = remote_thread("R_12", "a.rs", Some(5), false, false, &[("alice", "note")]);
+            session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+
+            let thread_id = session.threads()[0].id().clone();
+            session
+                .find_thread_mut(&thread_id)
+                .unwrap()
+                .thread
+                .reply(ThreadComment::new(
+                    ThreadAuthor::human("carol"),
+                    "local reply",
+                ));
+
+            let before = session.threads()[0].clone();
+            session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+            session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+            let after = session.threads()[0].clone();
+
+            assert_eq!(session.threads().len(), 1);
+            assert_eq!(
+                before, after,
+                "re-importing an unchanged remote thread twice must be a byte-identical no-op"
             );
         }
     }

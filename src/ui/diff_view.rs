@@ -254,6 +254,13 @@ pub(super) fn cursor_indicator_spaced(line_idx: usize, current_line_idx: usize) 
 /// No-op (nothing pushed) when the legacy comment has no thread, or its
 /// thread's native replies were already rendered by an earlier call in this
 /// pass, or it simply has none.
+///
+/// `App::splice_native_thread_replies` (`src/app/annotations.rs`) mirrors
+/// this exact line-count/dedup logic to emit a matching
+/// `AnnotatedLine::ThreadNativeReply` entry per row pushed here — keeping
+/// `line_annotations.len()` in lockstep with the `Vec<Line>` this function
+/// actually renders. If either side's line-count math changes, the other
+/// must change with it or cursor hit-testing desyncs past this point.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_native_thread_replies<'a>(
     app: &App,

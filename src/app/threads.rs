@@ -122,9 +122,37 @@ impl App {
         Some(lines.into_iter().map(|line| line.content).collect())
     }
 
-    /// Resolve the durable thread mirroring the legacy comment currently
-    /// under the cursor, if any.
+    /// Resolve the durable thread under the cursor. Tries, in order:
+    /// 1. A thread-native annotation row
+    ///    ([`crate::app::AnnotatedLine::ThreadNativeReply`]) that carries
+    ///    its `ThreadId` directly.
+    /// 2. A rendered remote-thread row
+    ///    ([`crate::app::AnnotatedLine::RemoteThreadLine`]) — resolved via
+    ///    the imported durable thread's provider mapping, so replying to
+    ///    or resolving/dismissing a remote-imported thread works even
+    ///    though it has no legacy `Comment` mirror at all (see
+    ///    [`Self::thread_id_for_remote_thread`]).
+    /// 3. The legacy-mirrored comment/root row under the cursor, via the
+    ///    legacy comment it mirrors.
+    ///
+    /// Checking the thread-native paths first means a cursor resting on
+    /// content with no legacy `Comment` counterpart (a TUI-authored
+    /// reply, or a remote-imported thread/reply) still resolves
+    /// correctly, instead of only ever falling through
+    /// `find_comment_at_cursor`'s positional `CommentLocation` lookup.
     pub(in crate::app) fn thread_id_at_cursor(&self) -> Option<ThreadId> {
+        if let Some(AnnotatedLine::ThreadNativeReply { thread_id }) =
+            self.line_annotations.get(self.diff_state.cursor_line)
+        {
+            return Some(thread_id.clone());
+        }
+
+        if let Some(AnnotatedLine::RemoteThreadLine { thread_idx }) =
+            self.line_annotations.get(self.diff_state.cursor_line)
+        {
+            return self.thread_id_for_remote_thread(*thread_idx);
+        }
+
         let location = self.find_comment_at_cursor()?;
         let comment_id = match location {
             CommentLocation::Review { index } => {
@@ -152,6 +180,25 @@ impl App {
         };
         self.session
             .find_thread_by_legacy_comment_id(&comment_id)
+            .map(|persisted| persisted.id().clone())
+    }
+
+    /// Resolve the durable [`ThreadId`] that
+    /// `import_remote_review_threads_from_current_pr` imported
+    /// `self.forge_review_threads[thread_idx]` into, by matching on the
+    /// same `(provider, provider_id)` pair `import_remote_review_threads`
+    /// stamps into `provider_mappings`. `None` outside PR mode (there is
+    /// no provider to key the lookup on) or if the remote thread hasn't
+    /// been imported yet (e.g. import failed/hasn't run since the last
+    /// fetch).
+    fn thread_id_for_remote_thread(&self, thread_idx: usize) -> Option<ThreadId> {
+        let DiffSource::PullRequest(pr) = &self.diff_source else {
+            return None;
+        };
+        let provider = pr.key.repository.kind.provider_key();
+        let remote_thread = self.forge_review_threads.get(thread_idx)?;
+        self.session
+            .find_thread_by_provider(provider, &remote_thread.id)
             .map(|persisted| persisted.id().clone())
     }
 

@@ -132,9 +132,9 @@ impl App {
         }
     }
 
-    /// Returns `true` if visible state changed (external comments merged or a
-    /// warning was raised) so the main loop can schedule a redraw without an
-    /// input event.
+    /// Returns `true` if visible state changed (external comments or threads
+    /// merged in, or a warning was raised) so the main loop can schedule a
+    /// redraw without an input event.
     pub fn poll_persisted_session_changes(&mut self) -> bool {
         let Some(interval) = self.review_watch_interval else {
             return false;
@@ -196,7 +196,6 @@ impl App {
         }
 
         let latest = crate::persistence::storage::load_session(&path)?;
-        let before_count = Self::comment_count(&self.session);
         let changed = Self::merge_external_session_changes(
             &mut self.session,
             &self.persisted_session_snapshot,
@@ -207,8 +206,7 @@ impl App {
         if changed > 0 {
             self.rebuild_annotations();
         }
-        let after_count = Self::comment_count(&self.session);
-        Ok(after_count.saturating_sub(before_count))
+        Ok(changed)
     }
 
     pub(in crate::app) fn merge_external_session_changes(
@@ -276,16 +274,84 @@ impl App {
             }
         }
 
+        // Three-way merge `threads` using the same base/current/latest
+        // object-equality rule as comments above: a thread this TUI session
+        // never locally touched (current == base) always accepts the
+        // external version verbatim, so an external reply/resolve/dismiss
+        // or a background remote-import refresh survives this save/poll
+        // instead of being clobbered by the stale in-memory `current`
+        // thread. A thread this session *did* locally mutate keeps its
+        // local version (matching the existing local-wins-over-concurrent-
+        // external-edit comment rule), and a thread locally deleted stays
+        // deleted rather than being resurrected by a stale external copy.
+        let base_threads = Self::threads_by_id(base);
+        let current_threads = Self::threads_by_id(current);
+        let latest_threads = Self::threads_by_id(latest);
+
+        for (id, latest_thread) in &latest_threads {
+            match base_threads.get(id) {
+                None => {
+                    if !current_threads.contains_key(id) {
+                        Self::upsert_thread(current, latest_thread.clone());
+                        changed += 1;
+                    }
+                }
+                Some(base_thread) if latest_thread != base_thread => {
+                    match current_threads.get(id) {
+                        Some(current_thread) if current_thread == base_thread => {
+                            Self::upsert_thread(current, latest_thread.clone());
+                            changed += 1;
+                        }
+                        None => {
+                            // Local deletion wins over an external edit.
+                        }
+                        Some(_) => {
+                            // Local edit wins over an external edit of the same thread.
+                        }
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+
+        for (id, base_thread) in &base_threads {
+            if !latest_threads.contains_key(id)
+                && current_threads
+                    .get(id)
+                    .is_some_and(|current_thread| current_thread == base_thread)
+                && Self::remove_thread(current, id)
+            {
+                changed += 1;
+            }
+        }
+
         changed
     }
 
-    fn comment_count(session: &ReviewSession) -> usize {
-        session.review_comments.len()
-            + session
-                .files
-                .values()
-                .map(|review| review.comment_count())
-                .sum::<usize>()
+    fn threads_by_id(session: &ReviewSession) -> HashMap<String, PersistedThread> {
+        session
+            .threads
+            .iter()
+            .map(|thread| (thread.id().as_str().to_string(), thread.clone()))
+            .collect()
+    }
+
+    fn upsert_thread(session: &mut ReviewSession, thread: PersistedThread) {
+        if let Some(existing) = session
+            .threads
+            .iter_mut()
+            .find(|existing| existing.id() == thread.id())
+        {
+            *existing = thread;
+        } else {
+            session.threads.push(thread);
+        }
+    }
+
+    fn remove_thread(session: &mut ReviewSession, id: &str) -> bool {
+        let before = session.threads.len();
+        session.threads.retain(|thread| thread.id().as_str() != id);
+        before != session.threads.len()
     }
 
     fn collect_stored_comments(session: &ReviewSession) -> HashMap<String, StoredComment> {

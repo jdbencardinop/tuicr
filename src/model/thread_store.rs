@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use super::comment::{Comment, DEFAULT_AUTHOR, LineSide};
 use super::thread::{
-    Anchor, AnchorSide, CommentId, ProviderRemap, Thread, ThreadAnchorRefresh, ThreadAuthor,
-    ThreadComment, ThreadId,
+    Anchor, AnchorSide, AuthorKind, CommentId, ProviderRemap, Thread, ThreadAnchorRefresh,
+    ThreadAuthor, ThreadComment, ThreadId, ThreadStatus,
 };
 use crate::error::Result;
 use crate::forge::remote_comments::{RemoteCommentSide, RemoteReviewThread};
@@ -369,9 +369,95 @@ pub fn thread_from_remote(provider: &str, remote: &RemoteReviewThread) -> Persis
             "path": remote.path,
             "line": remote.line,
             "is_outdated": remote.is_outdated,
+            "is_resolved": remote.is_resolved,
         }),
     );
     persisted
+}
+
+/// Merge a freshly re-converted [`thread_from_remote`] result (`fresh`)
+/// into `existing`'s already-imported copy of the same remote thread
+/// (matched by `existing.id() == fresh.id()`), used by
+/// [`super::review::ReviewSession::import_remote_review_threads`] instead
+/// of a naive full overwrite on re-import.
+///
+/// Re-fetching an unchanged remote thread twice (the finding-5 idempotency
+/// requirement) is a strict subset of this: `fresh` then carries the exact
+/// same remote-authored comments/resolved-flag `existing` already holds,
+/// so the merge is a no-op and produces a byte-identical thread.
+///
+/// What changes on a genuine re-fetch is merged as follows:
+/// - **Anchor**: left completely untouched. This function's caller is not
+///   the anchor's owner — [`Thread::refresh_anchor`]/
+///   [`Thread::refresh_anchor_with_remap`] (driven by the PR-head-advance
+///   path) is — so a background remote re-fetch never silently resets a
+///   locally computed Stale/Ambiguous relocation state back to a naive
+///   "current" anchor built fresh from the remote payload's raw path/line.
+/// - **Comments**: the root and every *remote-authored* reply are taken
+///   from `fresh` (the provider's current truth for its own content,
+///   including any edit, or a reply added/removed directly on the
+///   provider since the last fetch); any *locally*-authored (`Human`/
+///   `Agent`) reply already on `existing` (added via a TUI thread-reply
+///   action after the thread was first imported) is preserved, appended
+///   after the remote-authored ones so remote root/reply order stays
+///   intact and local additions are never lost.
+/// - **Status**: never regresses. Once `existing` is anything other than
+///   `Open` (locally `Resolved`/`Dismissed`, or anchor-driven `Stale`/
+///   `Ambiguous`), a stale or not-yet-caught-up remote fetch never
+///   silently reopens or overwrites it — only a forward transition (still
+///   locally `Open`, remote now reports resolved) is ever applied. This
+///   means a local Stale/Ambiguous thread whose remote counterpart is
+///   independently resolved on the provider does *not* flip to
+///   `Resolved` in `status`; the provider's resolved/outdated flags are
+///   still captured verbatim in `provider_mappings` below either way, so
+///   that information is never lost, just not allowed to overwrite the
+///   local anchor-relocation signal.
+/// - **`provider_mappings`**: merged, not replaced wholesale — `fresh`'s
+///   single provider entry is upserted (so its `is_resolved`/`is_outdated`
+///   native flags always reflect the latest fetch), while any other
+///   provider's mapping already on `existing` (e.g. the same thread also
+///   published/imported on a different provider) is preserved.
+pub(super) fn merge_remote_thread_into_existing(
+    existing: &mut PersistedThread,
+    fresh: PersistedThread,
+    provider: &str,
+) {
+    let local_only_replies: Vec<ThreadComment> = existing
+        .thread
+        .replies()
+        .filter(|reply| reply.author.kind != AuthorKind::Remote)
+        .cloned()
+        .collect();
+
+    let mut comments: Vec<ThreadComment> = Vec::new();
+    comments.push(
+        fresh
+            .thread
+            .root()
+            .cloned()
+            .expect("thread_from_remote always produces a thread with a root comment"),
+    );
+    comments.extend(fresh.thread.replies().cloned());
+    comments.extend(local_only_replies);
+
+    let status = if existing.thread.status() == ThreadStatus::Open {
+        fresh.thread.status()
+    } else {
+        existing.thread.status()
+    };
+
+    let merged_thread_value = serde_json::json!({
+        "id": existing.id(),
+        "status": status,
+        "anchor": existing.thread.anchor(),
+        "comments": comments,
+    });
+    existing.thread = serde_json::from_value(merged_thread_value)
+        .expect("Thread fields always round-trip through JSON");
+
+    if let Some(mapping) = fresh.provider_mapping(provider) {
+        existing.upsert_provider_mapping(provider, mapping.clone());
+    }
 }
 
 /// Build a [`ThreadComment`] from a fetched [`RemoteReviewComment`],

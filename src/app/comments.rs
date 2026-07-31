@@ -43,6 +43,11 @@ impl App {
                     summary_idx: *summary_idx,
                 })
             }
+            AnnotatedLine::ThreadNativeReply { thread_id } => {
+                Some(CommentNavigatorKey::ThreadNative {
+                    thread_id: thread_id.clone(),
+                })
+            }
             _ => None,
         }
     }
@@ -141,6 +146,49 @@ impl App {
                     line: None,
                     side: None,
                     author: summary.author.clone(),
+                })
+            }
+            CommentNavigatorKey::ThreadNative { ref thread_id } => {
+                let persisted = self.session.find_thread(thread_id)?;
+                let native_reply = persisted
+                    .thread
+                    .comments()
+                    .iter()
+                    .rfind(|c| !self.session.is_legacy_comment_id(c.id().as_str()))?;
+                let target = persisted.thread.anchor().target();
+                let (path, line, side) = match target {
+                    crate::model::thread::AnchorTarget::Review => (None, None, None),
+                    crate::model::thread::AnchorTarget::File { path } => {
+                        (Some(path.clone()), None, None)
+                    }
+                    crate::model::thread::AnchorTarget::Line { path, side, line }
+                    | crate::model::thread::AnchorTarget::Range {
+                        path,
+                        side,
+                        start: line,
+                        ..
+                    } => (
+                        Some(path.clone()),
+                        Some(*line),
+                        match side {
+                            crate::model::thread::AnchorSide::Old => Some(LineSide::Old),
+                            crate::model::thread::AnchorSide::New => Some(LineSide::New),
+                            crate::model::thread::AnchorSide::Both => None,
+                        },
+                    ),
+                };
+                Some(CommentNavigatorItem {
+                    key: CommentNavigatorKey::ThreadNative {
+                        thread_id: thread_id.clone(),
+                    },
+                    kind: CommentNavigatorKind::Thread {
+                        status: persisted.thread.status(),
+                    },
+                    target_annotation,
+                    path,
+                    line,
+                    side,
+                    author: Some(native_reply.author.name.clone()),
                 })
             }
         }

@@ -18,12 +18,28 @@
 //! reported as `unsupported`/`emulated`/`stale`/`conflict`/`invalid`, never
 //! omitted from `operations`.
 //!
-//! Publication idempotency/dedup (e.g. not re-creating an already-published
-//! thread) is the eventual `review sync`/`review publish` command's
-//! responsibility, not this planner's: every thread and comment in the
-//! session is always represented by an operation here, regardless of any
-//! existing `provider_mappings` entry, so nothing is ever silently dropped
-//! from the plan.
+//! Publication idempotency/dedup is this planner's responsibility, not a
+//! deferred one: a thread already carrying a `provider_mappings` entry for
+//! `capabilities.kind` (i.e. already published or imported from that
+//! provider) never gets a `CreateThread` operation planned again, and any
+//! comment whose author is [`AuthorKind::Remote`] (it was fetched *from*
+//! the provider, e.g. via
+//! [`crate::model::review::ReviewSession::import_remote_review_threads`])
+//! never gets a `Reply` operation planned, since posting either would
+//! create a duplicate on the provider. Only genuinely new, not-yet-published
+//! content — a brand-new thread with no provider mapping, or a
+//! locally-authored (`Human`/`Agent`) reply added after import — is ever
+//! planned as `CreateThread`/`Reply`. `Resolve` is similarly skipped once
+//! the thread's own `provider_mappings` snapshot already reports
+//! `is_resolved: true` for this provider, so re-running the planner after a
+//! successful resolve does not replan it. Nothing already-published is
+//! ever silently *represented* as still-pending, and nothing new is ever
+//! silently dropped: outside these known-already-done cases, an operation
+//! this planner cannot execute natively is always reported as
+//! `unsupported`/`emulated`/`stale`/`conflict`/`invalid` instead of an
+//! entry it merely omits from `operations`, per
+//! `docs/decisions/review-artifact-contract.md`'s "Operations return one
+//! of..." section.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +49,7 @@ use crate::forge::capabilities::{
 use crate::forge::submit::SubmitEvent;
 use crate::forge::traits::ForgeKind;
 use crate::model::review::ReviewSession;
+use crate::model::thread::AuthorKind;
 use crate::model::thread::{AnchorSide, AnchorState, AnchorTarget};
 use crate::model::thread_store::PersistedThread;
 
@@ -214,6 +231,14 @@ fn plan_thread(
 ) {
     let thread_id = persisted.id().as_str().to_string();
     let thread = &persisted.thread;
+    let provider_mapping = persisted.provider_mapping(capabilities.kind.provider_key());
+    // A thread already carries this provider's mapping once it has been
+    // published *or* imported from it (see `thread_from_remote` /
+    // `import_remote_review_threads`, which always calls
+    // `upsert_provider_mapping` on the provider it imported from) — either
+    // way, its root comment already exists there, so planning another
+    // `CreateThread` would post a duplicate.
+    let already_published = provider_mapping.is_some();
 
     let anchor_outcome = anchor_outcome(
         thread.anchor().target(),
@@ -221,13 +246,23 @@ fn plan_thread(
         capabilities,
     );
 
-    operations.push(PlannedOperation {
-        thread_id: Some(thread_id.clone()),
-        op: OperationKind::CreateThread,
-        outcome: anchor_outcome.clone(),
-    });
+    if !already_published {
+        operations.push(PlannedOperation {
+            thread_id: Some(thread_id.clone()),
+            op: OperationKind::CreateThread,
+            outcome: anchor_outcome.clone(),
+        });
+    }
 
     for reply in thread.replies() {
+        // A reply fetched *from* the provider (`AuthorKind::Remote`, see
+        // `thread_from_remote`) already exists there verbatim — planning it
+        // again would post the same content a second time. Only replies
+        // authored locally (`Human`/`Agent`) after that fetch are new,
+        // not-yet-published content.
+        if reply.author.kind == AuthorKind::Remote {
+            continue;
+        }
         let outcome = if !matches!(anchor_outcome, OperationOutcome::Planned) {
             // A reply to a comment that can't itself be placed inherits the
             // same placement problem — never silently claim a reply would
@@ -275,12 +310,27 @@ fn plan_thread(
         }
     };
 
+    // The imported/published snapshot's own `is_resolved` flag (stored by
+    // `thread_from_remote` at import time) tells us whether the provider
+    // already reflects this thread's current `Resolved` status — if so,
+    // re-running the planner (e.g. after a successful sync) must not
+    // replan the same `Resolve` call. Dismiss has no equivalent
+    // provider-native flag captured on import, so it is always planned
+    // while the thread is `Dismissed` (repeating a resolve/close call is
+    // the provider's own idempotency concern, not a duplicate-content risk
+    // like `CreateThread`/`Reply`).
+    let already_resolved_upstream = provider_mapping
+        .and_then(|mapping| mapping.get("is_resolved"))
+        .and_then(|value| value.as_bool())
+        == Some(true);
+
     match thread.status() {
-        crate::model::thread::ThreadStatus::Resolved => operations.push(PlannedOperation {
-            thread_id: Some(thread_id.clone()),
-            op: OperationKind::Resolve,
-            outcome: resolution_outcome(),
-        }),
+        crate::model::thread::ThreadStatus::Resolved if !already_resolved_upstream => operations
+            .push(PlannedOperation {
+                thread_id: Some(thread_id.clone()),
+                op: OperationKind::Resolve,
+                outcome: resolution_outcome(),
+            }),
         crate::model::thread::ThreadStatus::Dismissed => operations.push(PlannedOperation {
             thread_id: Some(thread_id),
             op: OperationKind::Dismiss,
@@ -956,5 +1006,165 @@ mod tests {
         let json = serde_json::to_string_pretty(&plan).unwrap();
         let restored: DryRunPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(plan, restored);
+    }
+
+    #[test]
+    fn should_not_plan_create_thread_for_thread_already_mapped_to_this_provider() {
+        // A thread carrying a `provider_mappings` entry for github (e.g.
+        // from a prior successful publish, or from
+        // `import_remote_review_threads`) already exists there — planning
+        // `CreateThread` again would post a duplicate root comment.
+        let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
+        let mut thread = open_thread(anchor);
+        thread.upsert_provider_mapping("github", serde_json::json!({"id": "PRRT_1"}));
+        let thread_id = thread.id().as_str().to_string();
+        let session = session_with_threads(vec![thread]);
+
+        let plan = plan_publication(&session, &github(), None);
+        assert!(
+            !plan.operations.iter().any(|op| {
+                op.thread_id.as_deref() == Some(thread_id.as_str())
+                    && matches!(op.op, OperationKind::CreateThread)
+            }),
+            "must not replan CreateThread for an already-mapped thread"
+        );
+    }
+
+    #[test]
+    fn should_plan_create_thread_for_a_brand_new_unmapped_thread() {
+        // Sanity check for the negative test above: a thread with no
+        // provider mapping at all is genuinely new content and must still
+        // be planned normally.
+        let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
+        let thread = open_thread(anchor);
+        let thread_id = thread.id().as_str().to_string();
+        let session = session_with_threads(vec![thread]);
+
+        let plan = plan_publication(&session, &github(), None);
+        let create_op = find_op(&plan, &thread_id);
+        assert!(matches!(create_op.op, OperationKind::CreateThread));
+        assert_eq!(create_op.outcome, OperationOutcome::Planned);
+    }
+
+    #[test]
+    fn should_not_plan_reply_for_a_remote_authored_reply_but_should_for_a_local_one() {
+        // A reply fetched from the provider (`AuthorKind::Remote`) already
+        // exists there; a reply added locally afterwards is genuinely new
+        // and must still be planned.
+        let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
+        let mut thread = open_thread(anchor);
+        thread.upsert_provider_mapping("github", serde_json::json!({"id": "PRRT_1"}));
+        thread.thread.reply(ThreadComment::new(
+            ThreadAuthor::remote("bob", "IC_remote_1"),
+            "already on github",
+        ));
+        thread.thread.reply(ThreadComment::new(
+            ThreadAuthor::human("alice"),
+            "new local reply",
+        ));
+        let thread_id = thread.id().as_str().to_string();
+        let session = session_with_threads(vec![thread]);
+
+        let plan = plan_publication(&session, &github(), None);
+        let reply_ops: Vec<_> = plan
+            .operations
+            .iter()
+            .filter(|op| {
+                op.thread_id.as_deref() == Some(thread_id.as_str())
+                    && matches!(op.op, OperationKind::Reply { .. })
+            })
+            .collect();
+        assert_eq!(
+            reply_ops.len(),
+            1,
+            "only the locally-authored reply should be planned, got {reply_ops:?}"
+        );
+        assert_eq!(reply_ops[0].outcome, OperationOutcome::Planned);
+    }
+
+    #[test]
+    fn should_not_plan_resolve_when_provider_mapping_already_reports_resolved() {
+        // Re-running the planner after a successful resolve/sync (or after
+        // importing an already-resolved remote thread) must not replan the
+        // same `Resolve` call.
+        let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
+        let mut thread = open_thread(anchor);
+        thread.thread.resolve();
+        thread.upsert_provider_mapping(
+            "github",
+            serde_json::json!({"id": "PRRT_1", "is_resolved": true}),
+        );
+        let thread_id = thread.id().as_str().to_string();
+        let session = session_with_threads(vec![thread]);
+
+        let plan = plan_publication(&session, &github(), None);
+        assert!(
+            !plan.operations.iter().any(|op| {
+                op.thread_id.as_deref() == Some(thread_id.as_str())
+                    && matches!(op.op, OperationKind::Resolve)
+            }),
+            "must not replan Resolve once provider mapping already reports is_resolved"
+        );
+    }
+
+    #[test]
+    fn should_plan_resolve_when_provider_mapping_reports_not_yet_resolved() {
+        // Sanity check for the negative test above: a mapped-but-not-yet-
+        // resolved-upstream thread must still get a Resolve planned.
+        let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
+        let mut thread = open_thread(anchor);
+        thread.thread.resolve();
+        thread.upsert_provider_mapping(
+            "github",
+            serde_json::json!({"id": "PRRT_1", "is_resolved": false}),
+        );
+        let thread_id = thread.id().as_str().to_string();
+        let session = session_with_threads(vec![thread]);
+
+        let plan = plan_publication(&session, &github(), None);
+        let resolve_op = plan
+            .operations
+            .iter()
+            .find(|op| {
+                op.thread_id.as_deref() == Some(thread_id.as_str())
+                    && matches!(op.op, OperationKind::Resolve)
+            })
+            .expect("resolve op present");
+        assert_eq!(resolve_op.outcome, OperationOutcome::Planned);
+    }
+
+    #[test]
+    fn should_produce_a_no_op_plan_for_a_fully_imported_unchanged_thread() {
+        // The end-to-end double-publication scenario: a thread imported
+        // wholesale from a remote provider (root + reply both
+        // `AuthorKind::Remote`, mapping present, already resolved upstream)
+        // must produce zero operations for that thread when re-planned,
+        // proving re-running `review publish --dry-run` after an import
+        // does not attempt to recreate any of its already-published
+        // content.
+        let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
+        let root = ThreadComment::new(ThreadAuthor::remote("alice", "IC_root"), "root");
+        let mut thread = PersistedThread::new(Thread::open(anchor, root));
+        thread.thread.reply(ThreadComment::new(
+            ThreadAuthor::remote("bob", "IC_reply"),
+            "reply",
+        ));
+        thread.thread.resolve();
+        thread.upsert_provider_mapping(
+            "github",
+            serde_json::json!({"id": "PRRT_1", "is_resolved": true}),
+        );
+        let thread_id = thread.id().as_str().to_string();
+        let session = session_with_threads(vec![thread]);
+
+        let plan = plan_publication(&session, &github(), None);
+        assert!(
+            !plan
+                .operations
+                .iter()
+                .any(|op| op.thread_id.as_deref() == Some(thread_id.as_str())),
+            "a fully-imported, unchanged thread must plan zero operations, got {:?}",
+            plan.operations
+        );
     }
 }

@@ -78,6 +78,22 @@ fn render_comment_row(app: &App, item: &CommentNavigatorItem) -> Line<'static> {
             };
             ("R".to_string(), style)
         }
+        CommentNavigatorKind::Thread { status } => {
+            use crate::model::thread::ThreadStatus;
+            let (marker, style) = match status {
+                ThreadStatus::Open => (
+                    "T",
+                    Style::default()
+                        .fg(app.theme.diff_hunk_header)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                ThreadStatus::Resolved => ("✓", styles::dim_style(&app.theme)),
+                ThreadStatus::Dismissed => ("✗", styles::dim_style(&app.theme)),
+                ThreadStatus::Stale => ("!", Style::default().fg(app.theme.diff_hunk_header)),
+                ThreadStatus::Ambiguous => ("?", Style::default().fg(app.theme.diff_hunk_header)),
+            };
+            (marker.to_string(), style)
+        }
     };
 
     let dim_style = styles::dim_style(&app.theme);

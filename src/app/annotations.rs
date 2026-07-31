@@ -345,6 +345,153 @@ impl App {
             // Spacing line
             self.line_annotations.push(AnnotatedLine::Spacing);
         }
+
+        self.splice_native_thread_replies();
+    }
+
+    /// Second pass over the just-built `self.line_annotations`: inserts
+    /// [`AnnotatedLine::ThreadNativeReply`] entries immediately after each
+    /// legacy comment's own annotation block, for every durable `Thread`
+    /// that mirrors that comment (via
+    /// [`crate::model::review::ReviewSession::find_thread_by_legacy_comment_id`])
+    /// and carries reply content with **no** legacy `Comment` counterpart
+    /// of its own — a TUI-authored reply appended via `Thread::reply`, or
+    /// (once import populates them) a remote-imported reply.
+    ///
+    /// Kept as a dedicated post-pass over the already-built annotation
+    /// list (rather than threading two more parameters through every
+    /// per-diff-line builder above) so this stays a single,
+    /// easily-auditable choke point that mirrors exactly the same
+    /// line-count math the renderer uses
+    /// (`comment_panel::format_thread_native_reply_lines`), keeping
+    /// `line_annotations.len()` in lockstep with the rendered `Vec<Line>`
+    /// (previously these native-only reply rows were rendered with *no*
+    /// matching annotation at all, silently desyncing cursor hit-testing
+    /// for every line after the first thread with a native-only reply).
+    ///
+    /// A thread's native replies are spliced in exactly once, tracked via
+    /// `rendered`, even though `migrate_legacy_comments_to_threads` may
+    /// have grouped several legacy comments (root + replies) into the
+    /// same thread — so more than one legacy id in the annotation stream
+    /// can resolve to the same `ThreadId`.
+    fn splice_native_thread_replies(&mut self) {
+        if self.session.threads.is_empty() {
+            return;
+        }
+
+        // legacy comment id -> thread id, and thread id -> how many
+        // native-only reply lines it needs (0 => thread has no
+        // native-only content, so nothing to splice for it).
+        let mut thread_for_legacy_id: HashMap<String, crate::model::thread::ThreadId> =
+            HashMap::new();
+        let mut reply_count_for_thread: HashMap<crate::model::thread::ThreadId, usize> =
+            HashMap::new();
+        for persisted in &self.session.threads {
+            let mut has_legacy_comment = false;
+            for comment in persisted.thread.comments() {
+                let id = comment.id().as_str();
+                if self.session.is_legacy_comment_id(id) {
+                    thread_for_legacy_id.insert(id.to_string(), persisted.id().clone());
+                    has_legacy_comment = true;
+                }
+            }
+            // No legacy comment maps to this thread at all: it can't be
+            // spliced in relative to a legacy comment's block. (Making a
+            // legacy-shadowless thread visible on its own is a separate,
+            // documented follow-up — see the module-level thread docs.)
+            if !has_legacy_comment {
+                continue;
+            }
+            let n = crate::ui::comment_panel::format_thread_native_reply_lines(
+                &self.theme,
+                &persisted.thread,
+                |id| self.session.is_legacy_comment_id(id),
+                self.diff_state.viewport_width,
+            )
+            .len();
+            if n > 0 {
+                reply_count_for_thread.insert(persisted.id().clone(), n);
+            }
+        }
+
+        if reply_count_for_thread.is_empty() {
+            return;
+        }
+
+        let source = std::mem::take(&mut self.line_annotations);
+        let ids: Vec<Option<String>> = source
+            .iter()
+            .map(|a| self.comment_id_for_annotation(a))
+            .collect();
+
+        let mut spliced: Vec<AnnotatedLine> = Vec::with_capacity(source.len());
+        let mut rendered: HashSet<crate::model::thread::ThreadId> = HashSet::new();
+        for (i, annotation) in source.into_iter().enumerate() {
+            let is_block_end = match ids.get(i + 1) {
+                Some(next_id) => *next_id != ids[i],
+                None => true,
+            };
+            spliced.push(annotation);
+            if is_block_end
+                && let Some(comment_id) = &ids[i]
+                && let Some(thread_id) = thread_for_legacy_id.get(comment_id)
+                && rendered.insert(thread_id.clone())
+                && let Some(&n) = reply_count_for_thread.get(thread_id)
+            {
+                for _ in 0..n {
+                    spliced.push(AnnotatedLine::ThreadNativeReply {
+                        thread_id: thread_id.clone(),
+                    });
+                }
+            }
+        }
+
+        self.line_annotations = spliced;
+    }
+
+    /// Resolves the legacy `Comment.id` a given annotation entry
+    /// represents, for the three legacy comment-box variants
+    /// (`ReviewComment`/`FileComment`/`LineComment`). Returns `None` for
+    /// every other annotation kind, including `ThreadNativeReply` itself
+    /// (so a second `splice_native_thread_replies` pass, if ever run
+    /// again on already-spliced output, can't match on its own inserted
+    /// rows).
+    fn comment_id_for_annotation(&self, annotation: &AnnotatedLine) -> Option<String> {
+        match annotation {
+            AnnotatedLine::ReviewComment { comment_idx } => self
+                .session
+                .review_comments
+                .get(*comment_idx)
+                .map(|c| c.id.clone()),
+            AnnotatedLine::FileComment {
+                file_idx,
+                comment_idx,
+            } => {
+                let path = self.diff_files.get(*file_idx)?.display_path();
+                self.session
+                    .files
+                    .get(path)?
+                    .file_comments
+                    .get(*comment_idx)
+                    .map(|c| c.id.clone())
+            }
+            AnnotatedLine::LineComment {
+                file_idx,
+                line,
+                comment_idx,
+                ..
+            } => {
+                let path = self.diff_files.get(*file_idx)?.display_path();
+                self.session
+                    .files
+                    .get(path)?
+                    .line_comments
+                    .get(line)?
+                    .get(*comment_idx)
+                    .map(|c| c.id.clone())
+            }
+            _ => None,
+        }
     }
 
     fn push_comments(
