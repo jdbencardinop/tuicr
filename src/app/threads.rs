@@ -192,14 +192,59 @@ impl App {
     /// been imported yet (e.g. import failed/hasn't run since the last
     /// fetch).
     fn thread_id_for_remote_thread(&self, thread_idx: usize) -> Option<ThreadId> {
+        let remote_thread = self.forge_review_threads.get(thread_idx)?;
+        self.persisted_thread_for_remote(remote_thread)
+            .map(|persisted| persisted.id().clone())
+    }
+
+    /// The forge provider key for the current PR session, if any — the
+    /// same key `import_remote_review_threads`/`thread_from_remote` stamp
+    /// into `provider_mappings`. `None` outside PR mode.
+    fn remote_provider_key(&self) -> Option<&'static str> {
         let DiffSource::PullRequest(pr) = &self.diff_source else {
             return None;
         };
-        let provider = pr.key.repository.kind.provider_key();
-        let remote_thread = self.forge_review_threads.get(thread_idx)?;
-        self.session
-            .find_thread_by_provider(provider, &remote_thread.id)
-            .map(|persisted| persisted.id().clone())
+        Some(pr.key.repository.kind.provider_key())
+    }
+
+    /// The durable [`crate::model::thread_store::PersistedThread`] that
+    /// `remote` was imported into (matched on `(provider, remote.id)`, the
+    /// same pair `import_remote_review_threads`/`thread_from_remote` stamp
+    /// into `provider_mappings`). `None` outside PR mode, or if the remote
+    /// thread hasn't been imported yet (e.g. mid-fetch before
+    /// `import_remote_review_threads_from_current_pr` has run, or in tests
+    /// that populate `forge_review_threads` directly without importing) —
+    /// callers fall back to the raw remote DTO unchanged in that case.
+    pub fn persisted_thread_for_remote(
+        &self,
+        remote: &crate::forge::remote_comments::RemoteReviewThread,
+    ) -> Option<&crate::model::thread_store::PersistedThread> {
+        let provider = self.remote_provider_key()?;
+        self.session.find_thread_by_provider(provider, &remote.id)
+    }
+
+    /// The [`crate::forge::remote_comments::RemoteThreadOverlay`] for
+    /// `remote` — local-only replies plus the durable thread's own status —
+    /// so render/annotation/export call sites can show a local reply/
+    /// resolve/dismiss/reopen made against the thread that mirrors this
+    /// remote DTO (see this struct's doc comment for why the DTO itself is
+    /// never mutated). `None` when [`Self::persisted_thread_for_remote`]
+    /// finds no durable thread; callers must treat that identically to "no
+    /// local activity" and render the remote DTO unchanged.
+    ///
+    /// Delegates to [`crate::forge::remote_comments::remote_thread_overlay_for_session`]
+    /// so the TUI render path and the non-`App` export/markdown path
+    /// (`generate_markdown`) can never diverge on what counts as a "local
+    /// overlay" for the same `(session, remote)` pair.
+    pub fn remote_thread_overlay(
+        &self,
+        remote: &crate::forge::remote_comments::RemoteReviewThread,
+    ) -> Option<crate::forge::remote_comments::RemoteThreadOverlay> {
+        crate::forge::remote_comments::remote_thread_overlay_for_session(
+            &self.session,
+            self.remote_provider_key(),
+            remote,
+        )
     }
 
     /// Enter comment-input mode composing a reply to the thread at cursor

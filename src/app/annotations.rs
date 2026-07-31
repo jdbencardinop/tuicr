@@ -68,6 +68,17 @@ impl App {
         // suppressed don't appear in this map at all, so no annotations
         // are emitted for them.
         let remote_index = self.build_remote_thread_index();
+        // Durable-local overlay for each `forge_review_threads` entry (see
+        // `RemoteThreadOverlay`), indexed in parallel to
+        // `self.forge_review_threads` — precomputed once so the row-count
+        // math below (and in `push_remote_threads`) reflects any local
+        // reply/resolve/dismiss made against the remote-imported thread,
+        // not just its raw fetched DTO.
+        let remote_overlays: Vec<Option<crate::forge::remote_comments::RemoteThreadOverlay>> = self
+            .forge_review_threads
+            .iter()
+            .map(|thread| self.remote_thread_overlay(thread))
+            .collect();
         // Commit-selection filter: comments scoped to a commit outside the
         // current inline selection are hidden. `None` => no selector, show all.
         let commit_set = self.selected_commit_set();
@@ -97,7 +108,9 @@ impl App {
 
         // Emit annotation entries for remote review-level threads (line: None).
         {
-            use crate::forge::remote_comments::{PrCommentsVisibility, thread_display_lines};
+            use crate::forge::remote_comments::{
+                PrCommentsVisibility, effective_thread_display_lines,
+            };
             let visibility = self.session.remote_comments_visibility;
             if !matches!(visibility, PrCommentsVisibility::Hide) {
                 for (thread_idx, thread) in self.forge_review_threads.iter().enumerate() {
@@ -107,7 +120,10 @@ impl App {
                     let Some(_muted) = visibility.render_decision(thread) else {
                         continue;
                     };
-                    let n = thread_display_lines(thread);
+                    let n = effective_thread_display_lines(
+                        thread,
+                        remote_overlays[thread_idx].as_ref(),
+                    );
                     for _ in 0..n {
                         self.line_annotations
                             .push(AnnotatedLine::RemoteThreadLine { thread_idx });
@@ -265,6 +281,7 @@ impl App {
                                 &line_comments,
                                 path,
                                 &self.forge_review_threads,
+                                &remote_overlays,
                                 &remote_index,
                                 self.diff_state.viewport_width,
                                 commit_set.as_ref(),
@@ -279,6 +296,7 @@ impl App {
                                 &line_comments,
                                 path,
                                 &self.forge_review_threads,
+                                &remote_overlays,
                                 &remote_index,
                                 self.diff_state.viewport_width,
                                 commit_set.as_ref(),
@@ -423,19 +441,47 @@ impl App {
             .iter()
             .map(|a| self.comment_id_for_annotation(a))
             .collect();
-
-        let mut spliced: Vec<AnnotatedLine> = Vec::with_capacity(source.len());
-        let mut rendered: HashSet<crate::model::thread::ThreadId> = HashSet::new();
-        for (i, annotation) in source.into_iter().enumerate() {
-            let is_block_end = match ids.get(i + 1) {
+        let is_block_end: Vec<bool> = (0..source.len())
+            .map(|i| match ids.get(i + 1) {
                 Some(next_id) => *next_id != ids[i],
                 None => true,
+            })
+            .collect();
+
+        // A thread can be grouped from several legacy comment ids (root +
+        // replies all migrated into one `Thread` — see
+        // `migrate_legacy_comments_to_threads`), so more than one
+        // block-end in the annotation stream can resolve to the same
+        // `ThreadId`. Splicing at the *first* such block-end (as opposed
+        // to the last) would insert native-only replies between two
+        // legacy comment boxes belonging to the same thread instead of
+        // after all of them, breaking the required root -> legacy replies
+        // -> native replies order. Find the last (highest-index)
+        // block-end per thread up front so the splice pass below only
+        // ever fires once, at the correct position.
+        let mut last_block_end_for_thread: HashMap<crate::model::thread::ThreadId, usize> =
+            HashMap::new();
+        for (i, comment_id) in ids.iter().enumerate() {
+            if !is_block_end[i] {
+                continue;
+            }
+            let Some(comment_id) = comment_id else {
+                continue;
             };
+            let Some(thread_id) = thread_for_legacy_id.get(comment_id) else {
+                continue;
+            };
+            if reply_count_for_thread.contains_key(thread_id) {
+                last_block_end_for_thread.insert(thread_id.clone(), i);
+            }
+        }
+
+        let mut spliced: Vec<AnnotatedLine> = Vec::with_capacity(source.len());
+        for (i, annotation) in source.into_iter().enumerate() {
             spliced.push(annotation);
-            if is_block_end
-                && let Some(comment_id) = &ids[i]
+            if let Some(comment_id) = &ids[i]
                 && let Some(thread_id) = thread_for_legacy_id.get(comment_id)
-                && rendered.insert(thread_id.clone())
+                && last_block_end_for_thread.get(thread_id) == Some(&i)
                 && let Some(&n) = reply_count_for_thread.get(thread_id)
             {
                 for _ in 0..n {
@@ -571,6 +617,7 @@ impl App {
     fn push_remote_threads(
         annotations: &mut Vec<AnnotatedLine>,
         threads: &[crate::forge::remote_comments::RemoteReviewThread],
+        remote_overlays: &[Option<crate::forge::remote_comments::RemoteThreadOverlay>],
         index: &RemoteThreadIndex,
         path: &std::path::Path,
         line: u32,
@@ -584,7 +631,9 @@ impl App {
         };
         for thread_idx in thread_indices {
             if let Some(thread) = threads.get(*thread_idx) {
-                let n = crate::forge::remote_comments::thread_display_lines(thread);
+                let overlay = remote_overlays.get(*thread_idx).and_then(|o| o.as_ref());
+                let n =
+                    crate::forge::remote_comments::effective_thread_display_lines(thread, overlay);
                 for _ in 0..n {
                     annotations.push(AnnotatedLine::RemoteThreadLine {
                         thread_idx: *thread_idx,
@@ -604,6 +653,7 @@ impl App {
         line_comments: &std::collections::HashMap<u32, Vec<crate::model::Comment>>,
         path: &std::path::Path,
         remote_threads: &[crate::forge::remote_comments::RemoteReviewThread],
+        remote_overlays: &[Option<crate::forge::remote_comments::RemoteThreadOverlay>],
         remote_index: &RemoteThreadIndex,
         viewport_width: usize,
         commit_set: Option<&std::collections::HashSet<String>>,
@@ -631,6 +681,7 @@ impl App {
                 Self::push_remote_threads(
                     annotations,
                     remote_threads,
+                    remote_overlays,
                     remote_index,
                     path,
                     old_ln,
@@ -652,6 +703,7 @@ impl App {
                 Self::push_remote_threads(
                     annotations,
                     remote_threads,
+                    remote_overlays,
                     remote_index,
                     path,
                     new_ln,
@@ -671,6 +723,7 @@ impl App {
         line_comments: &std::collections::HashMap<u32, Vec<crate::model::Comment>>,
         path: &std::path::Path,
         remote_threads: &[crate::forge::remote_comments::RemoteReviewThread],
+        remote_overlays: &[Option<crate::forge::remote_comments::RemoteThreadOverlay>],
         remote_index: &RemoteThreadIndex,
         viewport_width: usize,
         commit_set: Option<&std::collections::HashSet<String>>,
@@ -703,6 +756,7 @@ impl App {
                         Self::push_remote_threads(
                             annotations,
                             remote_threads,
+                            remote_overlays,
                             remote_index,
                             path,
                             new_ln,
@@ -769,6 +823,7 @@ impl App {
                             Self::push_remote_threads(
                                 annotations,
                                 remote_threads,
+                                remote_overlays,
                                 remote_index,
                                 path,
                                 old_ln,
@@ -788,6 +843,7 @@ impl App {
                             Self::push_remote_threads(
                                 annotations,
                                 remote_threads,
+                                remote_overlays,
                                 remote_index,
                                 path,
                                 new_ln,
@@ -821,6 +877,7 @@ impl App {
                         Self::push_remote_threads(
                             annotations,
                             remote_threads,
+                            remote_overlays,
                             remote_index,
                             path,
                             new_ln,

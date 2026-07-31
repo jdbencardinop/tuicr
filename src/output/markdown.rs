@@ -10,6 +10,7 @@ use crate::config::ExportConfig;
 use crate::error::{Result, TuicrError};
 use crate::forge::remote_comments::{
     PrCommentsVisibility, RemoteReviewThread, filter_threads, group_threads_by_path,
+    remote_thread_overlay_for_session,
 };
 use crate::model::comment::DEFAULT_AUTHOR;
 use crate::model::thread::ThreadStatus;
@@ -534,6 +535,11 @@ fn generate_markdown(
                 let _ = writeln!(md);
             }
 
+            let provider = match diff_source {
+                DiffSource::PullRequest(pr) => Some(pr.key.repository.kind.provider_key()),
+                _ => None,
+            };
+
             // Group threads by file to make the export easy to scan.
             let owned_unresolved: Vec<RemoteReviewThread> =
                 unresolved.iter().map(|t| (*t).clone()).collect();
@@ -544,11 +550,32 @@ fn generate_markdown(
                 let _ = writeln!(md);
                 for thread in threads {
                     if let Some(root) = thread.root() {
+                        // Durable-local overlay: a reply/resolve/dismiss made
+                        // in the TUI against the thread this remote DTO was
+                        // imported into (see `remote_thread_overlay_for_session`
+                        // doc comment) — the DTO itself is never mutated, so
+                        // without this the export would silently drop any
+                        // local activity on a remote-imported thread.
+                        let overlay = remote_thread_overlay_for_session(session, provider, thread);
                         let author = root.author.as_deref().unwrap_or("unknown");
                         let line_marker = thread.line.map(|l| format!(":{l}")).unwrap_or_default();
+                        // Local status only adds a suffix when it carries
+                        // information the remote `is_resolved` flag doesn't
+                        // already convey (mirrors
+                        // `ui::comment_panel::local_status_badge_suffix`).
+                        let local_status_suffix = overlay
+                            .as_ref()
+                            .map(|o| o.local_status)
+                            .filter(|status| {
+                                !matches!(status, ThreadStatus::Open)
+                                    && !(matches!(status, ThreadStatus::Resolved)
+                                        && thread.is_resolved)
+                            })
+                            .map(|status| format!(" (locally {})", thread_status_label(status)))
+                            .unwrap_or_default();
                         let _ = writeln!(
                             md,
-                            "{thread_n}. `{path}{line_marker}` @{author} - {body}",
+                            "{thread_n}. `{path}{line_marker}` @{author}{local_status_suffix} - {body}",
                             body = root.body
                         );
                         if !root.url.is_empty() {
@@ -558,6 +585,21 @@ fn generate_markdown(
                             let reply_author = reply.author.as_deref().unwrap_or("unknown");
                             let _ =
                                 writeln!(md, "   - @{reply_author} - {body}", body = reply.body);
+                        }
+                        // Local-only replies (not already represented by a
+                        // provider/comment ID on the remote DTO) — appended
+                        // strictly after the remote-authored replies,
+                        // preserving order, same convention as
+                        // `merge_remote_thread_into_existing`.
+                        if let Some(overlay) = &overlay {
+                            for reply in &overlay.local_only_replies {
+                                let _ = writeln!(
+                                    md,
+                                    "   - @{} (local) - {body}",
+                                    reply.author.name,
+                                    body = reply.body
+                                );
+                            }
                         }
                         thread_n += 1;
                     }
@@ -2066,6 +2108,129 @@ mod tests {
         let content = result.unwrap();
         assert!(content.contains("## Existing GitHub Comments"));
         assert!(content.contains("@alice - important"));
+    }
+
+    /// Blocker 1 regression: a reply/resolve/dismiss made in the TUI
+    /// against a durable thread that mirrors a remote-imported
+    /// `RemoteReviewThread` must survive into the markdown/agent export —
+    /// previously this section only ever read the raw `remote_threads`
+    /// DTOs, so any local activity on an already-imported thread was
+    /// silently missing from the export entirely.
+    #[test]
+    fn should_include_a_local_reply_and_status_once_for_a_remote_imported_thread() {
+        // given a PR session where the remote thread has already been
+        // imported into a durable thread, and a local-only reply plus a
+        // local dismiss have been recorded against it (no legacy Comment
+        // involved at all — mirrors reply/resolve/dismiss_thread_at_cursor
+        // acting on a thread reached only via `RemoteThreadLine`).
+        let mut session = ReviewSession::new(
+            PathBuf::from("forge:github.com/agavra/tuicr"),
+            "abc1234deadbeef".to_string(),
+            Some("reviews".to_string()),
+            SessionDiffSource::PullRequest,
+        );
+        let threads = vec![sample_remote_thread(
+            "a",
+            "alice",
+            "Can this be simpler?",
+            42,
+            false,
+        )];
+        session.import_remote_review_threads("github", &threads);
+        let thread_id = session
+            .find_thread_by_provider("github", "a")
+            .expect("thread should have been imported")
+            .id()
+            .clone();
+        session.find_thread_mut(&thread_id).unwrap().thread.reply(
+            crate::model::thread::ThreadComment::new(
+                crate::model::thread::ThreadAuthor::human("bob"),
+                "I'll simplify this".to_string(),
+            ),
+        );
+        session
+            .find_thread_mut(&thread_id)
+            .unwrap()
+            .thread
+            .dismiss();
+
+        // when
+        let markdown = generate_markdown(
+            &session,
+            &sample_pr_diff_source(),
+            &comment_types(),
+            &ExportConfig::default(),
+            &threads,
+            None,
+        );
+
+        // then the remote-authored root still renders from the DTO...
+        assert!(markdown.contains("Can this be simpler?"));
+        assert!(markdown.contains("@alice"));
+        // ...the local-only reply appears exactly once...
+        let reply_occurrences = markdown.matches("I'll simplify this").count();
+        assert_eq!(
+            reply_occurrences, 1,
+            "local reply must appear exactly once:\n{markdown}"
+        );
+        // ...and a local-status marker is visible, distinct from the
+        // remote's own (still-`false`) `is_resolved` flag.
+        assert!(
+            markdown.to_lowercase().contains("locally dismissed"),
+            "expected a local dismiss marker:\n{markdown}"
+        );
+    }
+
+    /// Blocker 1 regression companion: re-fetching/re-importing the same
+    /// remote thread must not duplicate a local-only reply in the export
+    /// either (mirrors the idempotent-import contract already enforced
+    /// for `session.threads` itself).
+    #[test]
+    fn should_not_duplicate_a_local_reply_in_export_after_reimporting_twice() {
+        let mut session = ReviewSession::new(
+            PathBuf::from("forge:github.com/agavra/tuicr"),
+            "abc1234deadbeef".to_string(),
+            Some("reviews".to_string()),
+            SessionDiffSource::PullRequest,
+        );
+        let threads = vec![sample_remote_thread(
+            "a",
+            "alice",
+            "please review",
+            42,
+            false,
+        )];
+        session.import_remote_review_threads("github", &threads);
+        let thread_id = session
+            .find_thread_by_provider("github", "a")
+            .unwrap()
+            .id()
+            .clone();
+        session.find_thread_mut(&thread_id).unwrap().thread.reply(
+            crate::model::thread::ThreadComment::new(
+                crate::model::thread::ThreadAuthor::human("bob"),
+                "keep me exactly once".to_string(),
+            ),
+        );
+
+        // when re-imported twice (two poll cycles against an unchanged thread)
+        session.import_remote_review_threads("github", &threads);
+        session.import_remote_review_threads("github", &threads);
+
+        let markdown = generate_markdown(
+            &session,
+            &sample_pr_diff_source(),
+            &comment_types(),
+            &ExportConfig::default(),
+            &threads,
+            None,
+        );
+
+        assert_eq!(
+            markdown.matches("keep me exactly once").count(),
+            1,
+            "reimporting twice must not duplicate the local reply:\n{markdown}"
+        );
     }
 
     #[test]

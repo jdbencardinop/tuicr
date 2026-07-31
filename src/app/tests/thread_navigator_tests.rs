@@ -388,6 +388,155 @@ fn should_not_splice_when_every_thread_comment_is_legacy_mirrored() {
     assert!(thread_native_reply_positions(&app).is_empty());
 }
 
+/// Blocker 2 regression: `migrate_legacy_comments_to_threads` groups two+
+/// same-anchor legacy line comments into ONE thread (root + a legacy-
+/// mirrored reply — see `sync_comment_group_thread`). A native-only reply
+/// added on top of that thread must be spliced in *after the last* of the
+/// grouped legacy comment blocks, not after the first — otherwise it lands
+/// between the two legacy replies, breaking the root -> legacy replies ->
+/// native replies order and desyncing row counts/hit-testing for
+/// everything spliced after it.
+#[test]
+fn should_splice_native_reply_after_the_last_of_two_grouped_legacy_replies() {
+    // given two legacy line comments at the exact same anchor (line 10,
+    // New side) — these migrate into a single thread: root + 1 legacy
+    // reply.
+    let hunk = make_hunk(10, 3);
+    let file = make_file("src/lib.rs", vec![hunk]);
+    let mut app = build_app(vec![file]);
+    let comment_type = app.default_comment_type();
+
+    let root_comment = add_comment_to_session(
+        &mut app.session,
+        AddCommentRequest {
+            target: CommentTarget::Line {
+                path: PathBuf::from("src/lib.rs"),
+                line: 10,
+                side: LineSide::New,
+            },
+            content: "root legacy comment".to_string(),
+            comment_type: comment_type.clone(),
+            author: "reviewer".to_string(),
+            commit_id: None,
+        },
+    )
+    .unwrap();
+    let legacy_reply = add_comment_to_session(
+        &mut app.session,
+        AddCommentRequest {
+            target: CommentTarget::Line {
+                path: PathBuf::from("src/lib.rs"),
+                line: 10,
+                side: LineSide::New,
+            },
+            content: "legacy-mirrored reply".to_string(),
+            comment_type: comment_type.clone(),
+            author: "reviewer".to_string(),
+            commit_id: None,
+        },
+    )
+    .unwrap();
+    app.session.migrate_legacy_comments_to_threads();
+
+    let thread_id = app
+        .session
+        .find_thread_by_legacy_comment_id(&root_comment.id)
+        .unwrap()
+        .id()
+        .clone();
+    assert_eq!(
+        app.session
+            .find_thread_by_legacy_comment_id(&legacy_reply.id)
+            .unwrap()
+            .id(),
+        &thread_id,
+        "both legacy comments must have migrated into the same thread"
+    );
+    // Sanity: the thread really does have two legacy-mirrored comments
+    // (root + reply), not just one.
+    assert_eq!(
+        app.session
+            .find_thread(&thread_id)
+            .unwrap()
+            .thread
+            .comments()
+            .len(),
+        2
+    );
+
+    // and a native-only reply with no legacy `Comment` counterpart at all
+    app.session
+        .find_thread_mut(&thread_id)
+        .unwrap()
+        .thread
+        .reply(crate::model::thread::ThreadComment::new(
+            crate::model::thread::ThreadAuthor::human("alice"),
+            "native-only reply".to_string(),
+        ));
+
+    // when annotations are rebuilt
+    app.rebuild_annotations();
+
+    // then both legacy `LineComment` blocks (comment_idx 0 and 1) render
+    // in full, back-to-back, and the spliced `ThreadNativeReply` row(s)
+    // come strictly after *both* of them — not sandwiched in between.
+    let last_root_row = app
+        .line_annotations
+        .iter()
+        .rposition(|a| matches!(a, AnnotatedLine::LineComment { comment_idx: 0, .. }))
+        .expect("expected root legacy comment row");
+    let last_legacy_reply_row = app
+        .line_annotations
+        .iter()
+        .rposition(|a| matches!(a, AnnotatedLine::LineComment { comment_idx: 1, .. }))
+        .expect("expected legacy-mirrored reply row");
+    assert!(
+        last_legacy_reply_row > last_root_row,
+        "legacy reply block should render after the root block"
+    );
+
+    let native_reply_rows: Vec<usize> = app
+        .line_annotations
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| matches!(a, AnnotatedLine::ThreadNativeReply { thread_id: id } if *id == thread_id))
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !native_reply_rows.is_empty(),
+        "expected at least one spliced ThreadNativeReply row"
+    );
+    assert!(
+        native_reply_rows
+            .iter()
+            .all(|&row| row > last_legacy_reply_row),
+        "native-only reply must be spliced after BOTH grouped legacy blocks, \
+         not between them (native rows: {native_reply_rows:?}, last legacy \
+         reply row: {last_legacy_reply_row})"
+    );
+    // Exactly one splice pass: no ThreadNativeReply rows appear before
+    // the legacy blocks or interleaved between them.
+    assert_eq!(
+        native_reply_rows.len(),
+        crate::ui::comment_panel::format_thread_native_reply_lines(
+            &app.theme,
+            &app.session.find_thread(&thread_id).unwrap().thread,
+            |id| app.session.is_legacy_comment_id(id),
+            app.diff_state.viewport_width,
+        )
+        .len(),
+        "native reply row count must match the renderer's own line count"
+    );
+
+    // Hit-testing: cursor on the second (last) legacy block still
+    // resolves the shared thread id, and cursor on the spliced native
+    // row does too.
+    app.diff_state.cursor_line = last_legacy_reply_row;
+    assert_eq!(app.thread_id_at_cursor(), Some(thread_id.clone()));
+    app.diff_state.cursor_line = native_reply_rows[0];
+    assert_eq!(app.thread_id_at_cursor(), Some(thread_id));
+}
+
 /// Finding 3 regression: a remote-imported thread has no legacy `Comment`
 /// mirror at all, but its content *is* already rendered via the existing
 /// `AnnotatedLine::RemoteThreadLine` path (see `push_remote_threads`).
@@ -402,7 +551,7 @@ mod remote_thread_cursor_resolution {
     };
     use crate::forge::traits::{ForgeRepository, PrSessionKey};
 
-    fn build_pr_app(threads: Vec<RemoteReviewThread>) -> App {
+    pub(super) fn build_pr_app(threads: Vec<RemoteReviewThread>) -> App {
         let vcs_info = VcsInfo {
             root_path: PathBuf::from("/tmp/repo"),
             head_commit: "abcdef0123".to_string(),
@@ -456,7 +605,7 @@ mod remote_thread_cursor_resolution {
         app
     }
 
-    fn remote_thread(id: &str, line: u32) -> RemoteReviewThread {
+    pub(super) fn remote_thread(id: &str, line: u32) -> RemoteReviewThread {
         RemoteReviewThread {
             id: id.to_string(),
             path: "src/lib.rs".to_string(),
@@ -533,5 +682,281 @@ mod remote_thread_cursor_resolution {
         // to resolve against, so this must stay a safe `None`, not panic.
         let app = build_app(Vec::new());
         assert_eq!(app.thread_id_at_cursor(), None);
+    }
+}
+
+/// Blocker 1 regression: remote-imported durable thread mutations
+/// (reply/resolve/dismiss) update `session.threads`, but until
+/// `RemoteThreadOverlay`/`effective_thread_display_lines` existed,
+/// render/annotations/export only ever read the raw fetched
+/// `forge_review_threads` DTOs — so a local reply/resolve/dismiss made
+/// against a remote-imported thread was completely invisible. These
+/// tests assert the overlay actually reaches annotation row counts,
+/// hit-testing, and the rendered lines themselves, without duplicating
+/// remote-authored content or dropping the remote `is_outdated`/native
+/// flags.
+mod remote_thread_overlay_rendering {
+    use super::remote_thread_cursor_resolution::{build_pr_app, remote_thread};
+    use super::*;
+    use crate::forge::remote_comments::{effective_thread_display_lines, thread_display_lines};
+
+    fn remote_thread_outdated(
+        id: &str,
+        line: u32,
+    ) -> crate::forge::remote_comments::RemoteReviewThread {
+        let mut thread = remote_thread(id, line);
+        thread.is_outdated = true;
+        thread
+    }
+
+    #[test]
+    fn should_reflect_a_local_reply_to_a_remote_imported_thread_in_annotation_row_count_exactly_once()
+     {
+        // given a remote-imported thread rendered via `RemoteThreadLine`,
+        // no local activity yet
+        let mut app = build_pr_app(vec![remote_thread("gh-thread-overlay-1", 10)]);
+        let thread_id = app
+            .session
+            .find_thread_by_provider("github", "gh-thread-overlay-1")
+            .expect("thread should have been imported")
+            .id()
+            .clone();
+        let rows_before = app
+            .line_annotations
+            .iter()
+            .filter(|a| matches!(a, AnnotatedLine::RemoteThreadLine { .. }))
+            .count();
+        let base_lines = thread_display_lines(&app.forge_review_threads[0]);
+        assert_eq!(rows_before, base_lines, "no overlay yet: raw DTO row count");
+
+        // when a local-only reply is added directly to the durable thread
+        // (mirrors what `reply_to_thread_at_cursor` does)
+        app.session
+            .find_thread_mut(&thread_id)
+            .unwrap()
+            .thread
+            .reply(crate::model::thread::ThreadComment::new(
+                crate::model::thread::ThreadAuthor::human("alice"),
+                "local-only follow-up".to_string(),
+            ));
+        app.rebuild_annotations();
+
+        // then the row count grows by exactly the overlay's contribution
+        // — not zero (invisible) and not duplicated.
+        let overlay = app.remote_thread_overlay(&app.forge_review_threads[0]);
+        assert_eq!(
+            overlay
+                .as_ref()
+                .map(|o| o.local_only_replies.len())
+                .unwrap_or(0),
+            1,
+            "expected exactly one local-only reply in the overlay"
+        );
+        let rows_after = app
+            .line_annotations
+            .iter()
+            .filter(|a| matches!(a, AnnotatedLine::RemoteThreadLine { .. }))
+            .count();
+        let expected_after =
+            effective_thread_display_lines(&app.forge_review_threads[0], overlay.as_ref());
+        assert_eq!(rows_after, expected_after);
+        assert!(
+            rows_after > rows_before,
+            "local reply must be visible in the annotation row count, not silently dropped"
+        );
+
+        // and the rendered lines themselves contain the local reply body
+        // exactly once (no duplicate emission from a mirrored legacy
+        // comment — there is none here).
+        let rendered = crate::ui::comment_panel::format_remote_thread_lines(
+            &app.theme,
+            &app.forge_review_threads[0],
+            false,
+            overlay.as_ref(),
+        );
+        let occurrences = rendered
+            .iter()
+            .filter(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("local-only follow-up"))
+            })
+            .count();
+        assert_eq!(
+            occurrences, 1,
+            "local reply should render exactly once:\n{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn should_reflect_a_local_reply_to_a_remote_imported_thread_in_side_by_side_annotation_row_count()
+     {
+        // Same scenario as the unified-mode test above, but exercising
+        // `build_side_by_side_annotations`'s own `push_remote_threads`
+        // call site — the two annotation builders each thread the
+        // `remote_overlays` slice through independently, so both must
+        // stay in lockstep with the renderer.
+        let mut app = build_pr_app(vec![remote_thread("gh-thread-overlay-1b", 10)]);
+        app.diff_view_mode = DiffViewMode::SideBySide;
+        app.rebuild_annotations();
+        let thread_id = app
+            .session
+            .find_thread_by_provider("github", "gh-thread-overlay-1b")
+            .expect("thread should have been imported")
+            .id()
+            .clone();
+        let rows_before = app
+            .line_annotations
+            .iter()
+            .filter(|a| matches!(a, AnnotatedLine::RemoteThreadLine { .. }))
+            .count();
+
+        app.session
+            .find_thread_mut(&thread_id)
+            .unwrap()
+            .thread
+            .reply(crate::model::thread::ThreadComment::new(
+                crate::model::thread::ThreadAuthor::human("alice"),
+                "side-by-side local follow-up".to_string(),
+            ));
+        app.rebuild_annotations();
+
+        let overlay = app.remote_thread_overlay(&app.forge_review_threads[0]);
+        assert_eq!(
+            overlay
+                .as_ref()
+                .map(|o| o.local_only_replies.len())
+                .unwrap_or(0),
+            1
+        );
+        let rows_after = app
+            .line_annotations
+            .iter()
+            .filter(|a| matches!(a, AnnotatedLine::RemoteThreadLine { .. }))
+            .count();
+        let expected_after =
+            effective_thread_display_lines(&app.forge_review_threads[0], overlay.as_ref());
+        assert_eq!(rows_after, expected_after);
+        assert!(
+            rows_after > rows_before,
+            "local reply must be visible in side-by-side annotation row count too"
+        );
+    }
+
+    #[test]
+    fn should_show_local_dismiss_badge_while_preserving_remote_outdated_flag() {
+        // given a remote thread already flagged `is_outdated` by the
+        // provider (native remote concept, no local equivalent)
+        let mut app = build_pr_app(vec![remote_thread_outdated("gh-thread-overlay-2", 10)]);
+        // Outdated threads are hidden under the default `Unresolved`
+        // visibility filter — switch to `All` so this test can exercise
+        // the badge/flag interaction on a rendered row.
+        app.session.remote_comments_visibility =
+            crate::forge::remote_comments::PrCommentsVisibility::All;
+        app.rebuild_annotations();
+        let cursor_row = app
+            .line_annotations
+            .iter()
+            .position(|a| matches!(a, AnnotatedLine::RemoteThreadLine { .. }))
+            .expect("expected a RemoteThreadLine annotation");
+        app.diff_state.cursor_line = cursor_row;
+
+        // when dismissed locally via the same keybinding used for legacy
+        // threads
+        assert!(app.dismiss_thread_at_cursor());
+        app.rebuild_annotations();
+
+        // then the overlay carries the local `Dismissed` status...
+        let overlay = app
+            .remote_thread_overlay(&app.forge_review_threads[0])
+            .expect("expected an overlay for the dismissed thread");
+        assert_eq!(
+            overlay.local_status,
+            crate::model::thread::ThreadStatus::Dismissed
+        );
+        // ...the remote DTO's own `is_outdated` flag is untouched (the
+        // overlay never mutates the DTO)...
+        assert!(
+            app.forge_review_threads[0].is_outdated,
+            "remote outdated flag must survive a local dismiss"
+        );
+        // ...and the rendered lines show both: a local-status badge and
+        // the native outdated marker.
+        let rendered = crate::ui::comment_panel::format_remote_thread_lines(
+            &app.theme,
+            &app.forge_review_threads[0],
+            false,
+            Some(&overlay),
+        );
+        let header = rendered
+            .first()
+            .expect("expected a header line")
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect::<String>();
+        assert!(
+            header.to_lowercase().contains("outdated"),
+            "expected native outdated marker preserved in header:\n{header}"
+        );
+        assert!(
+            header.to_lowercase().contains("dismiss"),
+            "expected a local-dismiss badge in header:\n{header}"
+        );
+    }
+
+    #[test]
+    fn should_not_duplicate_a_local_reply_after_reimporting_the_same_remote_thread_twice() {
+        // given a remote-imported thread with a local-only reply already
+        // attached
+        let mut app = build_pr_app(vec![remote_thread("gh-thread-overlay-3", 10)]);
+        let thread_id = app
+            .session
+            .find_thread_by_provider("github", "gh-thread-overlay-3")
+            .unwrap()
+            .id()
+            .clone();
+        app.session
+            .find_thread_mut(&thread_id)
+            .unwrap()
+            .thread
+            .reply(crate::model::thread::ThreadComment::new(
+                crate::model::thread::ThreadAuthor::human("alice"),
+                "keep me exactly once".to_string(),
+            ));
+
+        // when the same remote thread is re-fetched/re-imported twice
+        // (simulating two poll cycles against an unchanged remote thread)
+        app.session
+            .import_remote_review_threads("github", &app.forge_review_threads);
+        app.session
+            .import_remote_review_threads("github", &app.forge_review_threads);
+        app.rebuild_annotations();
+
+        // then the local-only reply is still present exactly once, not
+        // duplicated by either reimport pass.
+        let persisted = app
+            .session
+            .find_thread_by_provider("github", "gh-thread-overlay-3")
+            .unwrap();
+        let local_replies: Vec<_> = persisted
+            .thread
+            .replies()
+            .filter(|r| r.author.kind != crate::model::thread::AuthorKind::Remote)
+            .collect();
+        assert_eq!(
+            local_replies.len(),
+            1,
+            "expected exactly one local-only reply after two reimports, got {local_replies:?}"
+        );
+
+        let overlay = app.remote_thread_overlay(&app.forge_review_threads[0]);
+        assert_eq!(
+            overlay
+                .as_ref()
+                .map(|o| o.local_only_replies.len())
+                .unwrap_or(0),
+            1
+        );
     }
 }

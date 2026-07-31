@@ -217,6 +217,87 @@ pub fn thread_display_lines(thread: &RemoteReviewThread) -> usize {
     total
 }
 
+/// The durable-local-state overlay for a `RemoteReviewThread`, computed by
+/// [`crate::app::App::remote_thread_overlay`] against the corresponding
+/// [`crate::model::thread_store::PersistedThread`] (matched by provider +
+/// remote thread ID). `RemoteReviewThread` itself is deliberately a
+/// read-only, source-of-truth-on-remote DTO (see this module's top-level
+/// doc comment) — this overlay is how a reply/resolve/dismiss made
+/// *locally* against the durable thread that mirrors it (see
+/// `App::reply_to_thread_at_cursor` / `toggle_thread_resolved_at_cursor` /
+/// `dismiss_thread_at_cursor`, reached via `thread_id_for_remote_thread`)
+/// becomes visible again in render/annotations/export without mutating or
+/// re-fetching the remote DTO itself.
+#[derive(Debug, Clone)]
+pub struct RemoteThreadOverlay {
+    /// Replies present on the durable thread that are *not* already
+    /// represented by a provider/comment ID on the remote DTO — i.e.
+    /// `ThreadComment`s whose `author.kind != AuthorKind::Remote`, added
+    /// locally via the TUI after the thread was imported. Always appended
+    /// strictly after the remote-authored root/replies, preserving their
+    /// original order (mirrors `merge_remote_thread_into_existing`'s own
+    /// local-only-replies-appended-last invariant).
+    pub local_only_replies: Vec<crate::model::thread::ThreadComment>,
+    /// The durable thread's own [`crate::model::thread::ThreadStatus`] —
+    /// may diverge from `RemoteReviewThread::is_resolved`/`is_outdated`
+    /// when a local reply/resolve/dismiss/reopen has not yet been
+    /// reflected by a subsequent remote re-fetch, or when the status was
+    /// driven purely locally (anchor Stale/Ambiguous, or a `Dismissed`
+    /// state the remote provider has no equivalent concept for).
+    pub local_status: crate::model::thread::ThreadStatus,
+}
+
+/// `thread_display_lines(thread)` plus one header/separator line and one
+/// body-line-count per `\n`-split line for each of `overlay`'s
+/// `local_only_replies` — i.e. the exact number of extra rows
+/// `ui::comment_panel::format_remote_thread_lines` appends for the overlay
+/// when passed the same `overlay`. `overlay: None` (no durable thread
+/// found — e.g. before the initial import ran) is identical to
+/// `thread_display_lines(thread)`.
+pub fn effective_thread_display_lines(
+    thread: &RemoteReviewThread,
+    overlay: Option<&RemoteThreadOverlay>,
+) -> usize {
+    let mut total = thread_display_lines(thread);
+    if let Some(overlay) = overlay {
+        for reply in &overlay.local_only_replies {
+            total += 1 + reply.body.split('\n').count();
+        }
+    }
+    total
+}
+
+/// Provider/session-only variant of
+/// [`crate::app::App::remote_thread_overlay`] — looks up the durable
+/// [`crate::model::thread_store::PersistedThread`] that `remote` was
+/// imported into (matched on `(provider, remote.id)`, same pair
+/// `import_remote_review_threads`/`thread_from_remote` stamp into
+/// `provider_mappings`) directly against a `ReviewSession`, without needing
+/// an `App`/`DiffSource`. Exists so non-TUI render paths (export/markdown)
+/// that only have `(session, provider)` in scope — not a full `App` — can
+/// build the same overlay `App::remote_thread_overlay` would, keeping
+/// render and export in lockstep. `None` when there is no provider (not PR
+/// mode) or the remote thread hasn't been imported yet; callers must treat
+/// that identically to "no local activity" and render the remote DTO
+/// unchanged.
+pub fn remote_thread_overlay_for_session(
+    session: &crate::model::ReviewSession,
+    provider: Option<&str>,
+    remote: &RemoteReviewThread,
+) -> Option<RemoteThreadOverlay> {
+    let provider = provider?;
+    let persisted = session.find_thread_by_provider(provider, &remote.id)?;
+    Some(RemoteThreadOverlay {
+        local_only_replies: persisted
+            .thread
+            .replies()
+            .filter(|reply| reply.author.kind != crate::model::thread::AuthorKind::Remote)
+            .cloned()
+            .collect(),
+        local_status: persisted.thread.status(),
+    })
+}
+
 /// Count the number of rendered lines a review summary occupies in the
 /// diff view's review-scope area. Layout must match
 /// `ui::comment_panel::format_remote_review_summary_lines`:

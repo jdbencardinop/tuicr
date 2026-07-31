@@ -953,7 +953,9 @@ impl App {
         // Review-level remote threads (line: None) — must mirror the filter
         // in `rebuild_annotations` or scroll offsets fall out of sync.
         {
-            use crate::forge::remote_comments::{PrCommentsVisibility, thread_display_lines};
+            use crate::forge::remote_comments::{
+                PrCommentsVisibility, effective_thread_display_lines,
+            };
             let visibility = self.session.remote_comments_visibility;
             if !matches!(visibility, PrCommentsVisibility::Hide) {
                 for thread in &self.forge_review_threads {
@@ -963,7 +965,8 @@ impl App {
                     if visibility.render_decision(thread).is_none() {
                         continue;
                     }
-                    height += thread_display_lines(thread);
+                    let overlay = self.remote_thread_overlay(thread);
+                    height += effective_thread_display_lines(thread, overlay.as_ref());
                 }
             }
         }
@@ -1001,7 +1004,9 @@ impl App {
         // rebuild_annotations renderer uses the same filter, and the two must
         // emit identical row counts or scroll math goes out of sync.
         let remote_thread_rows: HashMap<(u32, LineSide), usize> = {
-            use crate::forge::remote_comments::{RemoteCommentSide, thread_display_lines};
+            use crate::forge::remote_comments::{
+                RemoteCommentSide, effective_thread_display_lines,
+            };
             let mut map: HashMap<(u32, LineSide), usize> = HashMap::new();
             let path_str = path.to_string_lossy();
             let visibility = self.session.remote_comments_visibility;
@@ -1017,7 +1022,9 @@ impl App {
                     RemoteCommentSide::Right => LineSide::New,
                     RemoteCommentSide::Left => LineSide::Old,
                 };
-                *map.entry((line, side)).or_default() += thread_display_lines(thread);
+                let overlay = self.remote_thread_overlay(thread);
+                *map.entry((line, side)).or_default() +=
+                    effective_thread_display_lines(thread, overlay.as_ref());
             }
             map
         };

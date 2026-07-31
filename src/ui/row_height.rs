@@ -62,10 +62,16 @@ pub(crate) fn annotation_row_height(app: &App, idx: usize) -> usize {
                     .remote_comments_visibility
                     .render_decision(thread)
                     .unwrap_or(false);
+                let overlay = app.remote_thread_overlay(thread);
                 let row = repeated_annotation_row(app, idx, annotation);
-                comment_panel::format_remote_thread_lines(&app.theme, thread, muted)
-                    .into_iter()
-                    .nth(row)
+                comment_panel::format_remote_thread_lines(
+                    &app.theme,
+                    thread,
+                    muted,
+                    overlay.as_ref(),
+                )
+                .into_iter()
+                .nth(row)
             })
             .map_or(1, |line| formatted_line_height(line, viewport_width)),
 

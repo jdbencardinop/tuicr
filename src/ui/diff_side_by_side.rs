@@ -359,8 +359,13 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
                 let Some(muted) = visibility.render_decision(thread) else {
                     continue;
                 };
-                let thread_lines =
-                    comment_panel::format_remote_thread_lines(&app.theme, thread, muted);
+                let overlay = app.remote_thread_overlay(thread);
+                let thread_lines = comment_panel::format_remote_thread_lines(
+                    &app.theme,
+                    thread,
+                    muted,
+                    overlay.as_ref(),
+                );
                 for mut comment_line in thread_lines {
                     let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
                     comment_line.spans.insert(
@@ -1748,7 +1753,9 @@ fn add_remote_threads_to_line(
         if !matches_side {
             continue;
         }
-        let thread_lines = comment_panel::format_remote_thread_lines(ctx.theme, thread, muted);
+        let overlay = ctx.app.remote_thread_overlay(thread);
+        let thread_lines =
+            comment_panel::format_remote_thread_lines(ctx.theme, thread, muted, overlay.as_ref());
         let box_top_row = line_idx;
         for mut comment_line in thread_lines {
             let indicator = cursor_indicator(line_idx, ctx.current_line_idx);

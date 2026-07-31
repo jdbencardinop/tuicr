@@ -298,10 +298,23 @@ pub fn format_comment_input_lines(
 /// Visually distinct from local drafts: the `[github @author]` badge on
 /// the root header, and a muted palette throughout for resolved/outdated
 /// threads.
+///
+/// `overlay` is this thread's [`RemoteThreadOverlay`](crate::forge::remote_comments::RemoteThreadOverlay)
+/// (see that type's doc comment), when the remote DTO has been imported
+/// into a durable local thread: any `local_only_replies` render appended
+/// after the remote-authored root/replies (same box, same reply-badge
+/// convention, tagged `(local)`), and a local status divergence (a local
+/// reply/resolve/dismiss/reopen not yet reflected by the provider's own
+/// `is_resolved`/`is_outdated` flags) renders as a `· locally <status>`
+/// callout on the header badge, without ever removing or overwriting the
+/// `resolved`/`outdated` badge text driven by the remote DTO's own flags.
+/// `overlay: None` renders exactly as before this overlay was added — the
+/// unmodified remote DTO, verbatim.
 pub fn format_remote_thread_lines(
     theme: &Theme,
     thread: &crate::forge::remote_comments::RemoteReviewThread,
     muted: bool,
+    overlay: Option<&crate::forge::remote_comments::RemoteThreadOverlay>,
 ) -> Vec<Line<'static>> {
     let (badge_fg, border_fg, body_fg) = if muted {
         (theme.fg_dim, theme.fg_dim, theme.fg_dim)
@@ -315,6 +328,7 @@ pub fn format_remote_thread_lines(
 
     let badge_style = Style::default().fg(badge_fg).add_modifier(Modifier::BOLD);
     let reply_badge_style = Style::default().fg(badge_fg);
+    let local_reply_badge_style = Style::default().fg(theme.fg_dim);
     let border_style = Style::default().fg(border_fg);
     let body_style = Style::default().fg(body_fg);
 
@@ -337,6 +351,12 @@ pub fn format_remote_thread_lines(
                 badge_text.push_str(" resolved");
             } else if thread.is_outdated {
                 badge_text.push_str(" outdated");
+            }
+            if let Some(suffix) =
+                overlay.and_then(|o| local_status_badge_suffix(thread, o.local_status))
+            {
+                badge_text.push_str(" · ");
+                badge_text.push_str(suffix);
             }
             badge_text.push_str("] ");
             result.push(Line::from(vec![
@@ -362,6 +382,30 @@ pub fn format_remote_thread_lines(
 
         is_first = false;
         let _ = iter.peek();
+    }
+
+    // Durable local-only replies (see `RemoteThreadOverlay`): appended
+    // after every remote-authored root/reply, inside the same fused box,
+    // so a locally-added reply on a remote-imported thread is visible
+    // without waiting for a re-fetch to see it echoed back from the
+    // provider.
+    if let Some(overlay) = overlay {
+        for reply in &overlay.local_only_replies {
+            result.push(Line::from(vec![
+                Span::styled("    ├── ".to_string(), border_style),
+                Span::styled(
+                    format!("↳ @{} (local) ", reply.author.name),
+                    local_reply_badge_style,
+                ),
+                Span::styled("─".repeat(20), border_style),
+            ]));
+            for line in reply.body.split('\n') {
+                result.push(Line::from(vec![
+                    Span::styled("    │  ".to_string(), border_style),
+                    Span::styled(line.to_string(), body_style),
+                ]));
+            }
+        }
     }
 
     result.push(Line::from(vec![Span::styled(
@@ -467,6 +511,31 @@ fn thread_status_suffix(status: crate::model::thread::ThreadStatus) -> Option<&'
         ThreadStatus::Ambiguous => Some("ambiguous"),
         ThreadStatus::Resolved => Some("resolved"),
         ThreadStatus::Dismissed => Some("dismissed"),
+    }
+}
+
+/// Callout text for a durable local thread status that adds information
+/// beyond what a remote thread's own `is_resolved`/`is_outdated` flags
+/// already communicate on its badge — e.g. a local resolve the provider
+/// hasn't been re-fetched to confirm yet, or a `Dismissed`/`Stale`/
+/// `Ambiguous` status the remote provider has no equivalent concept for
+/// (dismiss is TUI-only; stale/ambiguous are our own anchor-relocation
+/// outcomes). Returns `None` when `local_status` is `Open` (nothing to
+/// add) or `Resolved` while the remote DTO already shows `is_resolved`
+/// (the existing " resolved" badge already says this — no reason to
+/// repeat it).
+fn local_status_badge_suffix(
+    remote: &crate::forge::remote_comments::RemoteReviewThread,
+    local_status: crate::model::thread::ThreadStatus,
+) -> Option<&'static str> {
+    use crate::model::thread::ThreadStatus;
+    match local_status {
+        ThreadStatus::Open => None,
+        ThreadStatus::Resolved if remote.is_resolved => None,
+        ThreadStatus::Resolved => Some("locally resolved"),
+        ThreadStatus::Dismissed => Some("locally dismissed"),
+        ThreadStatus::Stale => Some("locally stale"),
+        ThreadStatus::Ambiguous => Some("locally ambiguous"),
     }
 }
 
