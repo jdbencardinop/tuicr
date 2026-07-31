@@ -11,9 +11,11 @@ use crate::error::{Result, TuicrError};
 use crate::forge::remote_comments::{
     PrCommentsVisibility, RemoteReviewThread, filter_threads, group_threads_by_path,
 };
+use crate::model::comment::DEFAULT_AUTHOR;
+use crate::model::thread::ThreadStatus;
 use crate::model::{CommentType, LineRange, LineSide, ReviewSession};
 use crate::slug::short_sha;
-/// (file_path, line_range, side, comment_type, content, commit_id)
+/// (file_path, line_range, side, comment_type, content, commit_id, comment_id, author)
 type CommentEntry<'a> = (
     String,
     Option<LineRange>,
@@ -21,6 +23,8 @@ type CommentEntry<'a> = (
     String,
     &'a str,
     Option<&'a str>,
+    &'a str,
+    &'a str,
 );
 
 /// Generate markdown content from the review session.
@@ -360,6 +364,8 @@ fn generate_markdown(
             export_comment_type_label(&comment.comment_type, comment_types),
             &comment.content,
             None,
+            comment.id.as_str(),
+            comment.author.as_str(),
         ));
     }
 
@@ -379,6 +385,8 @@ fn generate_markdown(
                 export_comment_type_label(&comment.comment_type, comment_types),
                 &comment.content,
                 comment.commit_id.as_deref(),
+                comment.id.as_str(),
+                comment.author.as_str(),
             ));
         }
 
@@ -399,6 +407,8 @@ fn generate_markdown(
                     export_comment_type_label(&comment.comment_type, comment_types),
                     &comment.content,
                     comment.commit_id.as_deref(),
+                    comment.id.as_str(),
+                    comment.author.as_str(),
                 ));
             }
         }
@@ -415,7 +425,14 @@ fn generate_markdown(
         }
         local_section_written = true;
     }
-    for (i, (file, line_range, side, comment_type, content, commit_id)) in
+    // Dedup guard: a durable Thread can mirror several legacy comments
+    // grouped at one anchor (see
+    // `ReviewSession::migrate_legacy_comments_to_threads`), so this stops a
+    // thread's native-only replies (no legacy `Comment` counterpart — see
+    // `App::reply_to_thread_at_cursor`) from being printed once per legacy
+    // comment in the group instead of once total.
+    let mut rendered_native_reply_threads: HashSet<crate::model::thread::ThreadId> = HashSet::new();
+    for (i, (file, line_range, side, comment_type, content, commit_id, comment_id, author)) in
         all_comments.iter().enumerate()
     {
         let number = i + 1;
@@ -443,6 +460,23 @@ fn generate_markdown(
             Some(sha) => format!(" (commit {})", short_sha(sha)),
             None => String::new(),
         };
+        // Thread canonical state: surface authorship (mirroring the TUI's
+        // `format_comment_lines`, which only calls out an author that isn't
+        // the acting user) and any non-`Open` thread status (stale /
+        // ambiguous / resolved / dismissed) so an agent reading the export
+        // knows a comment's discussion has moved on without needing the
+        // separate `tuicr review thread` JSON API.
+        let thread = session.find_thread_by_legacy_comment_id(comment_id);
+        let author_suffix = if *author == DEFAULT_AUTHOR {
+            String::new()
+        } else {
+            format!(" @{author}")
+        };
+        let status_suffix = thread
+            .map(|persisted| persisted.thread.status())
+            .filter(|status| !matches!(status, ThreadStatus::Open))
+            .map(|status| format!(" ({})", thread_status_label(status)))
+            .unwrap_or_default();
         let marker = format!("{number}.");
         let continuation_indent = " ".repeat(marker.len() + 1);
         let mut content_lines = content.split('\n').map(|line| line.trim_end_matches('\r'));
@@ -455,10 +489,34 @@ fn generate_markdown(
         };
         let _ = writeln!(
             md,
-            "{marker} {type_marker}{location}{commit_suffix} - {first_line}"
+            "{marker} {type_marker}{location}{commit_suffix}{author_suffix}{status_suffix} - {first_line}"
         );
         for line in content_lines {
             let _ = writeln!(md, "{continuation_indent}{line}");
+        }
+
+        // Thread-native replies with no legacy `Comment` counterpart (added
+        // via the TUI's thread-reply keybinding) have no other export
+        // representation at all, so surface them indented under the root
+        // comment they belong to, once per thread.
+        if let Some(persisted) = thread
+            && rendered_native_reply_threads.insert(persisted.id().clone())
+        {
+            for reply in persisted.thread.comments() {
+                if session.is_legacy_comment_id(reply.id().as_str()) {
+                    continue;
+                }
+                let mut reply_lines = reply.body.split('\n');
+                let reply_first = reply_lines.next().unwrap_or_default();
+                let _ = writeln!(
+                    md,
+                    "{continuation_indent}\u{21b3} @{} - {reply_first}",
+                    reply.author.name
+                );
+                for line in reply_lines {
+                    let _ = writeln!(md, "{continuation_indent}  {line}");
+                }
+            }
         }
     }
 
@@ -510,6 +568,19 @@ fn generate_markdown(
     }
 
     md
+}
+
+/// Lowercase, human-readable label for a non-`Open` [`ThreadStatus`], mirroring
+/// the suffix convention already used by `ui::comment_panel::thread_status_suffix`
+/// for TUI rendering. Callers only invoke this after filtering out `Open`.
+fn thread_status_label(status: ThreadStatus) -> &'static str {
+    match status {
+        ThreadStatus::Open => "open",
+        ThreadStatus::Stale => "stale",
+        ThreadStatus::Ambiguous => "ambiguous",
+        ThreadStatus::Resolved => "resolved",
+        ThreadStatus::Dismissed => "dismissed",
+    }
 }
 
 fn collect_used_comment_type_ids(session: &ReviewSession) -> HashSet<String> {
@@ -1030,6 +1101,174 @@ mod tests {
         // Should have 2 numbered comments
         assert!(markdown.contains("1. **[SUGGESTION]**"));
         assert!(markdown.contains("2. **[ISSUE]**"));
+    }
+
+    #[test]
+    fn should_show_author_suffix_when_comment_author_is_not_default() {
+        // given a comment authored by someone other than the sentinel
+        // default (`Comment::DEFAULT_AUTHOR` = "user")
+        let mut session = create_test_session();
+        if let Some(review) = session.get_file_mut(&PathBuf::from("src/main.rs")) {
+            review.file_comments[0].author = "alice".to_string();
+        }
+
+        // when
+        let markdown = generate_markdown(
+            &session,
+            &DiffSource::WorkingTree,
+            &comment_types(),
+            &ExportConfig::default(),
+            &[],
+            None,
+        );
+
+        // then the non-default author is called out
+        assert!(
+            markdown.contains("@alice - Consider adding documentation"),
+            "expected author callout in:\n{markdown}"
+        );
+        // and a default-author ("user") comment stays exactly as before
+        // (no `@user` noise for the common single-reviewer case)
+        assert!(
+            markdown.contains("`src/main.rs:42` - Magic number should be a constant"),
+            "expected no author suffix for default-author comment in:\n{markdown}"
+        );
+    }
+
+    #[test]
+    fn should_show_thread_status_suffix_for_migrated_non_open_thread() {
+        // given a session whose file comment has been migrated to a durable
+        // Thread (see `ReviewSession::migrate_legacy_comments_to_threads`)
+        // and then resolved
+        let mut session = create_test_session();
+        session.migrate_legacy_comments_to_threads();
+        let comment_id = session.files[&PathBuf::from("src/main.rs")].file_comments[0]
+            .id
+            .clone();
+        let thread_id = session
+            .find_thread_by_legacy_comment_id(&comment_id)
+            .unwrap()
+            .id()
+            .clone();
+        session
+            .find_thread_mut(&thread_id)
+            .unwrap()
+            .thread
+            .resolve();
+
+        // when
+        let markdown = generate_markdown(
+            &session,
+            &DiffSource::WorkingTree,
+            &comment_types(),
+            &ExportConfig::default(),
+            &[],
+            None,
+        );
+
+        // then the resolved status is surfaced on the legacy comment's
+        // export line, so an agent knows the discussion has moved on
+        // without needing the separate `tuicr review thread` JSON API.
+        assert!(
+            markdown.contains("(resolved) - Consider adding documentation"),
+            "expected resolved-status suffix in:\n{markdown}"
+        );
+    }
+
+    #[test]
+    fn should_render_native_thread_reply_with_no_legacy_comment_counterpart() {
+        // given a migrated thread with a reply added directly (the same
+        // mechanism `App::reply_to_thread_at_cursor` uses), which has no
+        // legacy `Comment` counterpart at all
+        let mut session = create_test_session();
+        session.migrate_legacy_comments_to_threads();
+        let comment_id = session.files[&PathBuf::from("src/main.rs")].file_comments[0]
+            .id
+            .clone();
+        let thread_id = session
+            .find_thread_by_legacy_comment_id(&comment_id)
+            .unwrap()
+            .id()
+            .clone();
+        session.find_thread_mut(&thread_id).unwrap().thread.reply(
+            crate::model::thread::ThreadComment::new(
+                crate::model::thread::ThreadAuthor::human("bob"),
+                "Sounds good, thanks",
+            ),
+        );
+
+        // when
+        let markdown = generate_markdown(
+            &session,
+            &DiffSource::WorkingTree,
+            &comment_types(),
+            &ExportConfig::default(),
+            &[],
+            None,
+        );
+
+        // then the native-only reply is visible, indented under its root
+        assert!(
+            markdown.contains("\u{21b3} @bob - Sounds good, thanks"),
+            "expected native-only reply in:\n{markdown}"
+        );
+    }
+
+    #[test]
+    fn should_render_native_reply_once_per_group_not_once_per_grouped_legacy_comment() {
+        // given two legacy line comments at the same anchor (migrated into
+        // one thread — root + one legacy-derived reply) plus a native-only
+        // reply on top
+        let mut session = create_test_session();
+        if let Some(review) = session.get_file_mut(&PathBuf::from("src/main.rs")) {
+            review.add_line_comment(
+                42,
+                Comment::new(
+                    "agreed, let's fix".to_string(),
+                    CommentType::from_id("issue"),
+                    Some(LineSide::New),
+                ),
+            );
+        }
+        session.migrate_legacy_comments_to_threads();
+        let comments_at_42 = &session.files[&PathBuf::from("src/main.rs")].line_comments[&42];
+        assert_eq!(
+            comments_at_42.len(),
+            2,
+            "both legacy comments share one anchor"
+        );
+        let root_comment_id = comments_at_42[0].id.clone();
+        let thread_id = session
+            .find_thread_by_legacy_comment_id(&root_comment_id)
+            .unwrap()
+            .id()
+            .clone();
+        session.find_thread_mut(&thread_id).unwrap().thread.reply(
+            crate::model::thread::ThreadComment::new(
+                crate::model::thread::ThreadAuthor::human("carol"),
+                "one native reply",
+            ),
+        );
+
+        // when
+        let markdown = generate_markdown(
+            &session,
+            &DiffSource::WorkingTree,
+            &comment_types(),
+            &ExportConfig::default(),
+            &[],
+            None,
+        );
+
+        // then the native reply prints exactly once, not once per legacy
+        // comment sharing the thread's anchor.
+        assert_eq!(
+            markdown
+                .matches("\u{21b3} @carol - one native reply")
+                .count(),
+            1,
+            "expected the native reply exactly once in:\n{markdown}"
+        );
     }
 
     #[test]

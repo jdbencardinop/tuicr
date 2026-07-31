@@ -454,6 +454,22 @@ fn markdown_body_lines(
     out
 }
 
+/// Human-readable, lower-case status suffix appended to a comment box's
+/// badge for any [`crate::model::thread::ThreadStatus`] other than `Open`
+/// (which needs no callout — it's the default/expected state), mirroring
+/// the `resolved`/`outdated` suffix convention already used for remote PR
+/// threads (see [`format_remote_thread_lines`]). Returns `None` for `Open`.
+fn thread_status_suffix(status: crate::model::thread::ThreadStatus) -> Option<&'static str> {
+    use crate::model::thread::ThreadStatus;
+    match status {
+        ThreadStatus::Open => None,
+        ThreadStatus::Stale => Some("stale"),
+        ThreadStatus::Ambiguous => Some("ambiguous"),
+        ThreadStatus::Resolved => Some("resolved"),
+        ThreadStatus::Dismissed => Some("dismissed"),
+    }
+}
+
 pub fn format_comment_lines(
     theme: &Theme,
     comment_type: CommentTypePresentation,
@@ -461,22 +477,51 @@ pub fn format_comment_lines(
     line_range: Option<LineRange>,
     width: usize,
     author: Option<&str>,
+    thread_status: Option<crate::model::thread::ThreadStatus>,
 ) -> Vec<Line<'static>> {
-    let type_style = styles::comment_type_style(theme, comment_type.color);
-    let border_style = match author {
-        Some(name) => Style::default()
-            .fg(styles::author_color_for(name))
-            .add_modifier(ratatui::style::Modifier::BOLD),
-        None => styles::comment_border_style(theme, comment_type.color),
+    // Resolved/Dismissed threads are visually de-emphasized (a muted
+    // palette, same idea as `format_remote_thread_lines`'s `muted` flag),
+    // since they're closed and no longer need to draw the eye like an
+    // open/stale/ambiguous one does.
+    let muted = matches!(
+        thread_status,
+        Some(crate::model::thread::ThreadStatus::Resolved)
+            | Some(crate::model::thread::ThreadStatus::Dismissed)
+    );
+    let type_style = if muted {
+        Style::default().fg(theme.fg_dim)
+    } else {
+        styles::comment_type_style(theme, comment_type.color)
+    };
+    let border_style = if muted {
+        Style::default().fg(theme.fg_dim)
+    } else {
+        match author {
+            Some(name) => Style::default()
+                .fg(styles::author_color_for(name))
+                .add_modifier(ratatui::style::Modifier::BOLD),
+            None => styles::comment_border_style(theme, comment_type.color),
+        }
     };
 
+    let status_suffix = thread_status.and_then(thread_status_suffix);
+
     // `None` comments have an empty label: drop the `[TYPE]` badge, keeping the
-    // author tag when present so per-author coloring still reads.
-    let badge_text = match (author, comment_type.label.is_empty()) {
-        (Some(name), true) => format!("[@{name}] "),
-        (Some(name), false) => format!("[{} @{name}] ", comment_type.label),
-        (None, true) => String::new(),
-        (None, false) => format!("[{}] ", comment_type.label),
+    // author tag when present so per-author coloring still reads. A thread
+    // status suffix (stale/ambiguous/resolved/dismissed) is always shown
+    // when present, even with no author/type label, so a bare thread never
+    // silently loses its status callout.
+    let badge_text = match (author, comment_type.label.is_empty(), status_suffix) {
+        (Some(name), true, Some(status)) => format!("[@{name} {status}] "),
+        (Some(name), true, None) => format!("[@{name}] "),
+        (Some(name), false, Some(status)) => {
+            format!("[{} @{name} {status}] ", comment_type.label)
+        }
+        (Some(name), false, None) => format!("[{} @{name}] ", comment_type.label),
+        (None, true, Some(status)) => format!("[{status}] "),
+        (None, true, None) => String::new(),
+        (None, false, Some(status)) => format!("[{} {status}] ", comment_type.label),
+        (None, false, None) => format!("[{}] ", comment_type.label),
     };
     let badge_width = badge_text.width();
 
@@ -521,6 +566,62 @@ pub fn format_comment_lines(
         border_style,
     )]));
 
+    result
+}
+
+/// Render any [`ThreadComment`](crate::model::thread::ThreadComment)s in
+/// `thread` that have **no** legacy `Comment` counterpart.
+///
+/// Every call site that renders legacy comments via [`format_comment_lines`]
+/// only ever loops over the legacy `Comment`s in `ReviewSession` — but a
+/// reply added through the TUI's thread-reply keybinding
+/// (`App::reply_to_thread_at_cursor`) is appended directly onto the durable
+/// `Thread` as a genuinely thread-native `ThreadComment`, never mirrored
+/// back into a legacy `Comment` (seeing as legacy `Comment` has no
+/// root/reply concept of its own for line/range anchors, and file/review
+/// anchors are always exactly one legacy comment per thread). Without this
+/// function such native-only replies would be durably persisted yet
+/// invisible in the diff view — the opposite of req. 2's "avoid duplicate
+/// display" concern, this is "avoid a missing display" for content with no
+/// legacy shadow to draw from.
+///
+/// `is_legacy_comment_id` should be [`crate::model::review::ReviewSession::is_legacy_comment_id`]
+/// (or an equivalent closure in tests) — any
+/// [`ThreadComment`](crate::model::thread::ThreadComment) it returns
+/// `false` for is native-only and rendered here as an indented
+/// `↳ @author (local reply)` box, mirroring
+/// [`format_remote_thread_lines`]'s reply-badge convention. Returns an empty
+/// `Vec` (no visual change) when every thread comment already has a legacy
+/// counterpart.
+pub fn format_thread_native_reply_lines(
+    theme: &Theme,
+    thread: &crate::model::thread::Thread,
+    is_legacy_comment_id: impl Fn(&str) -> bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let border_style = Style::default().fg(theme.fg_dim);
+    let badge_style = Style::default().fg(theme.fg_dim);
+    let content_area = width.saturating_sub(BORDER_PREFIX_WIDTH + 2);
+
+    let mut result = Vec::new();
+    for comment in thread.comments() {
+        if is_legacy_comment_id(comment.id().as_str()) {
+            continue;
+        }
+        let badge_text = format!("↳ @{} (local reply) ", comment.author.name);
+        let top_fill = width.saturating_sub(8 + badge_text.width());
+        result.push(Line::from(vec![
+            Span::styled("    ├── ".to_string(), border_style),
+            Span::styled(badge_text, badge_style),
+            Span::styled("─".repeat(top_fill), border_style),
+        ]));
+        result.extend(markdown_body_lines(
+            theme,
+            &comment.body,
+            content_area,
+            border_style,
+        ));
+    }
     result
 }
 
@@ -908,6 +1009,7 @@ mod tests {
             content,
             None,
             80,
+            None,
             None,
         );
         // Header + footer wrap the body; reconstruct must round-trip the text.

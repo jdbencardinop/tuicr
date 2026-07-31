@@ -226,6 +226,14 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
     let mut lines: Vec<Line> = Vec::new();
     let mut line_idx: usize = 0;
 
+    // Dedup guard so a thread with multiple legacy comments grouped into it
+    // (see `ReviewSession::migrate_legacy_comments_to_threads`) only has its
+    // native-only (no legacy shadow) replies rendered once, not once per
+    // legacy comment in the group.
+    let mut rendered_native_reply_threads: std::collections::HashSet<
+        crate::model::thread::ThreadId,
+    > = std::collections::HashSet::new();
+
     // Track cursor position for IME when in Comment mode
     let mut comment_cursor_logical_line: Option<usize> = None;
     let mut comment_cursor_column: u16 = 0;
@@ -312,6 +320,9 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
                 None,
                 ctx.panel_width.saturating_sub(1),
                 (comment.author != app.username).then_some(comment.author.as_str()),
+                app.session
+                    .find_thread_by_legacy_comment_id(&comment.id)
+                    .map(|persisted| persisted.thread.status()),
             );
             for mut comment_line in comment_lines {
                 let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
@@ -322,6 +333,16 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
                 lines.push(comment_line);
                 line_idx += 1;
             }
+            crate::ui::diff_view::push_native_thread_replies(
+                app,
+                &comment.id,
+                &app.theme,
+                ctx.panel_width.saturating_sub(1),
+                ctx.current_line_idx,
+                &mut rendered_native_reply_threads,
+                &mut lines,
+                &mut line_idx,
+            );
         }
     }
 
@@ -482,6 +503,9 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
                         None,
                         ctx.panel_width.saturating_sub(1),
                         (comment.author != app.username).then_some(comment.author.as_str()),
+                        app.session
+                            .find_thread_by_legacy_comment_id(&comment.id)
+                            .map(|persisted| persisted.thread.status()),
                     );
                     for mut comment_line in comment_lines {
                         let indicator = cursor_indicator(line_idx, ctx.current_line_idx);
@@ -495,6 +519,16 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
                         lines.push(comment_line);
                         line_idx += 1;
                     }
+                    crate::ui::diff_view::push_native_thread_replies(
+                        app,
+                        &comment.id,
+                        &app.theme,
+                        ctx.panel_width.saturating_sub(1),
+                        ctx.current_line_idx,
+                        &mut rendered_native_reply_threads,
+                        &mut lines,
+                        &mut line_idx,
+                    );
                 }
             }
         }
@@ -1748,6 +1782,13 @@ fn add_comments_to_line(
         && file_idx == ctx.current_file_idx
         && ctx.comment_line == Some((line_num, side));
     let mut cursor_info_out: Option<SideBySideCursorInfo> = None;
+    // Dedup guard so a thread with multiple legacy comments grouped into it
+    // (see `ReviewSession::migrate_legacy_comments_to_threads`) only has its
+    // native-only (no legacy shadow) replies rendered once per call, not
+    // once per legacy comment in the group.
+    let mut rendered_native_reply_threads: std::collections::HashSet<
+        crate::model::thread::ThreadId,
+    > = std::collections::HashSet::new();
 
     if let Some(comments) = line_comments.get(&line_num) {
         for comment in comments {
@@ -1817,6 +1858,10 @@ fn add_comments_to_line(
                         line_range,
                         ctx.panel_width.saturating_sub(1),
                         (comment.author != ctx.app.username).then_some(comment.author.as_str()),
+                        ctx.app
+                            .session
+                            .find_thread_by_legacy_comment_id(&comment.id)
+                            .map(|persisted| persisted.thread.status()),
                     );
                     let box_top_row = line_idx;
                     for mut comment_line in comment_lines {
@@ -1835,6 +1880,16 @@ fn add_comments_to_line(
                         &mut ctx.comment_bars.borrow_mut(),
                         box_top_row,
                         line_range,
+                    );
+                    crate::ui::diff_view::push_native_thread_replies(
+                        ctx.app,
+                        &comment.id,
+                        ctx.theme,
+                        ctx.panel_width.saturating_sub(1),
+                        ctx.current_line_idx,
+                        &mut rendered_native_reply_threads,
+                        lines,
+                        &mut line_idx,
                     );
                 }
             }

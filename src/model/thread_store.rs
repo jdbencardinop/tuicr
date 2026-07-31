@@ -17,6 +17,7 @@ use super::thread::{
     ThreadComment, ThreadId,
 };
 use crate::error::Result;
+use crate::forge::remote_comments::{RemoteCommentSide, RemoteReviewThread};
 
 /// A [`Thread`] plus its provider-native ID/opaque-payload mappings, keyed
 /// by provider name (e.g. `"github"`, `"gitlab"`). Mirrors
@@ -289,6 +290,108 @@ pub(super) fn anchor_side_for_legacy(side: Option<LineSide>) -> AnchorSide {
         LineSide::Old => AnchorSide::Old,
         LineSide::New => AnchorSide::New,
     }
+}
+
+/// Map a fetched [`RemoteCommentSide`] to the frozen module's [`AnchorSide`].
+/// Remote threads never express `Both` either.
+fn anchor_side_for_remote(side: RemoteCommentSide) -> AnchorSide {
+    match side {
+        RemoteCommentSide::Left => AnchorSide::Old,
+        RemoteCommentSide::Right => AnchorSide::New,
+    }
+}
+
+/// Deterministically derive the [`ThreadId`] that importing `remote` from
+/// `provider` would produce, without constructing a full [`PersistedThread`].
+///
+/// Keyed on `(provider, remote.id)` rather than the anchor, unlike
+/// [`deterministic_thread_id`]: a provider-native thread ID is already
+/// globally unique and stable across re-fetches (unlike a legacy
+/// `Comment`, a remote thread's line/path can themselves change as the PR
+/// head advances without the provider minting a new thread ID), so basing
+/// the derivation on it — rather than the anchor — is what keeps a single
+/// remote thread mapped onto the same durable [`PersistedThread`] even
+/// after its anchor relocates.
+pub fn remote_thread_id_for(provider: &str, remote_id: &str) -> ThreadId {
+    thread_id_from_raw(&format!("remote-thread:{provider}:{remote_id}"))
+}
+
+/// Convert a fetched [`RemoteReviewThread`] into a [`PersistedThread`],
+/// preserving root/reply order, comment IDs, authors (as
+/// [`ThreadAuthor::remote`]), and the provider's resolved/outdated state.
+///
+/// Idempotent: the resulting [`Thread`]'s ID is derived solely from
+/// `(provider, remote.id)` (see [`remote_thread_id_for`]), and every
+/// comment/reply reuses the remote comment's own ID verbatim (via the same
+/// transparent-`Deserialize` technique as [`thread_from_legacy_comment`]),
+/// so converting the same remote thread twice always produces
+/// byte-identical IDs — callers (see
+/// [`super::review::ReviewSession::import_remote_review_threads`]) use
+/// this to replace rather than duplicate an already-imported thread.
+///
+/// `remote.line` is `None` for fully-outdated threads with no current
+/// anchor line; those import as a file-level [`Anchor::file`] rather than a
+/// line anchor, since a line anchor requires a concrete line number.
+///
+/// # Panics
+/// `remote.comments` must be non-empty (a thread always has a root); only
+/// call this after checking [`RemoteReviewThread::root`] is `Some`.
+pub fn thread_from_remote(provider: &str, remote: &RemoteReviewThread) -> PersistedThread {
+    let (root_comment, replies) = remote
+        .comments
+        .split_first()
+        .expect("thread_from_remote requires a non-empty RemoteReviewThread.comments");
+
+    let anchor = match remote.line {
+        Some(line) => Anchor::line(
+            remote.path.clone(),
+            anchor_side_for_remote(remote.side),
+            line,
+        ),
+        None => Anchor::file(remote.path.clone()),
+    };
+
+    let thread_id = remote_thread_id_for(provider, &remote.id);
+    let root = remote_thread_comment(root_comment);
+    let mut thread = thread_with_id(thread_id, anchor, root);
+    for reply in replies {
+        thread.reply(remote_thread_comment(reply));
+    }
+    if remote.is_resolved {
+        thread.resolve();
+    }
+
+    let mut persisted = PersistedThread::new(thread);
+    persisted.upsert_provider_mapping(
+        provider,
+        serde_json::json!({
+            "id": remote.id,
+            "path": remote.path,
+            "line": remote.line,
+            "is_outdated": remote.is_outdated,
+        }),
+    );
+    persisted
+}
+
+/// Build a [`ThreadComment`] from a fetched [`RemoteReviewComment`],
+/// preserving its ID verbatim and tagging its author
+/// [`ThreadAuthor::remote`] (the provider payload does not distinguish
+/// human vs. bot authors, so every remote import uses this one kind,
+/// unlike legacy migration's human/agent heuristic).
+fn remote_thread_comment(
+    comment: &crate::forge::remote_comments::RemoteReviewComment,
+) -> ThreadComment {
+    let author_name = comment
+        .author
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    thread_comment_with_id(
+        comment_id_from_raw(&comment.id),
+        ThreadAuthor::remote(author_name.clone(), author_name),
+        comment.body.clone(),
+        comment.created_at.unwrap_or_else(chrono::Utc::now),
+    )
 }
 
 #[cfg(test)]

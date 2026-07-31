@@ -474,6 +474,7 @@ impl App {
             comment_is_file_level: true,
             comment_line: None,
             editing_comment_id: None,
+            thread_reply_target: None,
             visual_selection: None,
             mouse_drag_active: false,
             comment_line_range: None,

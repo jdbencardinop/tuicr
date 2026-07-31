@@ -18,8 +18,8 @@ use crate::ui::diff_view::{
     apply_horizontal_scroll, comment_type_presentation, cursor_indicator, cursor_indicator_spaced,
     diff_stat_title, hunk_header_text_and_style, paint_cursor_line_highlight,
     paint_unified_diff_rows_with, paint_visual_selection_overlay, populate_row_to_annotation,
-    push_comment_bar, render_expander_line, render_hidden_lines, scroll_comment_input_into_view,
-    unified_line_bg_style,
+    push_comment_bar, push_native_thread_replies, render_expander_line, render_hidden_lines,
+    scroll_comment_input_into_view, unified_line_bg_style,
 };
 use crate::ui::styles;
 use crate::vcs::git::calculate_gap;
@@ -54,6 +54,14 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
     let mut lines: Vec<Line> = Vec::new();
     let mut line_idx: usize = 0;
     let current_line_idx = app.diff_state.cursor_line;
+
+    // Dedup guard so a thread with multiple legacy comments grouped into it
+    // (see `ReviewSession::migrate_legacy_comments_to_threads`) only has its
+    // native-only (no legacy shadow) replies rendered once, not once per
+    // legacy comment in the group.
+    let mut rendered_native_reply_threads: std::collections::HashSet<
+        crate::model::thread::ThreadId,
+    > = std::collections::HashSet::new();
 
     // Only build the expensive per-diff-line spans for lines that are actually
     // visible. Everything else still pushes (cheap) so `lines.len()` keeps
@@ -153,6 +161,9 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                 None,
                 comment_width,
                 (comment.author != app.username).then_some(comment.author.as_str()),
+                app.session
+                    .find_thread_by_legacy_comment_id(&comment.id)
+                    .map(|persisted| persisted.thread.status()),
             );
             for mut comment_line in comment_lines {
                 let indicator = cursor_indicator(line_idx, current_line_idx);
@@ -163,6 +174,16 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                 lines.push(comment_line);
                 line_idx += 1;
             }
+            push_native_thread_replies(
+                app,
+                &comment.id,
+                &app.theme,
+                comment_width,
+                current_line_idx,
+                &mut rendered_native_reply_threads,
+                &mut lines,
+                &mut line_idx,
+            );
         }
     }
 
@@ -330,6 +351,9 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                         None,
                         comment_width,
                         (comment.author != app.username).then_some(comment.author.as_str()),
+                        app.session
+                            .find_thread_by_legacy_comment_id(&comment.id)
+                            .map(|persisted| persisted.thread.status()),
                     );
                     for mut comment_line in comment_lines {
                         let indicator = cursor_indicator(line_idx, current_line_idx);
@@ -343,6 +367,16 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                         lines.push(comment_line);
                         line_idx += 1;
                     }
+                    push_native_thread_replies(
+                        app,
+                        &comment.id,
+                        &app.theme,
+                        comment_width,
+                        current_line_idx,
+                        &mut rendered_native_reply_threads,
+                        &mut lines,
+                        &mut line_idx,
+                    );
                 }
             }
         }
@@ -690,6 +724,9 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                                             comment_width,
                                             (comment.author != app.username)
                                                 .then_some(comment.author.as_str()),
+                                            app.session
+                                                .find_thread_by_legacy_comment_id(&comment.id)
+                                                .map(|persisted| persisted.thread.status()),
                                         );
                                         let box_top_row = line_idx;
                                         for mut comment_line in comment_lines {
@@ -711,6 +748,16 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                                             &mut comment_bars,
                                             box_top_row,
                                             line_range,
+                                        );
+                                        push_native_thread_replies(
+                                            app,
+                                            &comment.id,
+                                            &app.theme,
+                                            comment_width,
+                                            current_line_idx,
+                                            &mut rendered_native_reply_threads,
+                                            &mut lines,
+                                            &mut line_idx,
                                         );
                                     }
                                 }
@@ -857,6 +904,9 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                                             comment_width,
                                             (comment.author != app.username)
                                                 .then_some(comment.author.as_str()),
+                                            app.session
+                                                .find_thread_by_legacy_comment_id(&comment.id)
+                                                .map(|persisted| persisted.thread.status()),
                                         );
                                         let box_top_row = line_idx;
                                         for mut comment_line in comment_lines {
@@ -878,6 +928,16 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                                             &mut comment_bars,
                                             box_top_row,
                                             line_range,
+                                        );
+                                        push_native_thread_replies(
+                                            app,
+                                            &comment.id,
+                                            &app.theme,
+                                            comment_width,
+                                            current_line_idx,
+                                            &mut rendered_native_reply_threads,
+                                            &mut lines,
+                                            &mut line_idx,
                                         );
                                     }
                                 }
@@ -1332,7 +1392,8 @@ mod remote_comments_snapshot_tests {
     };
     use crate::forge::traits::{ForgeRepository, PrSessionKey};
     use crate::model::{
-        DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin, ReviewSession, SessionDiffSource,
+        DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin, LineSide, ReviewSession,
+        SessionDiffSource,
     };
     use crate::syntax::SyntaxHighlighter;
     use crate::theme::Theme;
@@ -1661,6 +1722,56 @@ mod remote_comments_snapshot_tests {
         assert!(
             body.contains("looks good?"),
             "expected remote comment body in:\n{body}"
+        );
+    }
+
+    #[test]
+    fn should_render_thread_native_reply_with_no_legacy_comment_shadow() {
+        // given a revision-diff app with a legacy line comment (which
+        // dual-writes a mirrored durable Thread via
+        // `App::mirror_new_comments_as_threads`)
+        let mut app = make_revision_app(vec![sample_diff_file()]);
+        app.enter_comment_mode(false, Some((2, LineSide::New)));
+        app.comment_buffer = "please check".to_string();
+        app.save_comment();
+        app.rebuild_annotations();
+        assert_eq!(
+            app.session.threads.len(),
+            1,
+            "dual-write should mint one thread"
+        );
+
+        // when a reply is appended directly onto the durable Thread (the
+        // same mechanism `App::reply_to_thread_at_cursor` uses) — this
+        // reply has no legacy `Comment` counterpart at all
+        let thread_id = app.session.threads[0].id().clone();
+        app.session
+            .find_thread_mut(&thread_id)
+            .expect("thread exists")
+            .thread
+            .reply(crate::model::thread::ThreadComment::new(
+                crate::model::thread::ThreadAuthor::human("bob"),
+                "Sounds good to me",
+            ));
+
+        // then the reply is visible in the diff view even though it has
+        // no legacy Comment backing it (req. 2's "render local durable
+        // thread roots/replies" — orphaned native replies must not be
+        // invisible just because they have no legacy shadow to render
+        // through).
+        let buffer = draw_unified_diff(&mut app);
+        let body = body_text(&buffer);
+        assert!(
+            body.contains("please check"),
+            "expected the original legacy comment body in:\n{body}"
+        );
+        assert!(
+            body.contains("local reply"),
+            "expected a native-reply badge in:\n{body}"
+        );
+        assert!(
+            body.contains("Sounds good to me"),
+            "expected the native reply's body in:\n{body}"
         );
     }
 

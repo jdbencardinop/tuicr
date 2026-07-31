@@ -362,7 +362,7 @@ impl App {
         )
     }
 
-    fn find_comment_at_cursor(&self) -> Option<CommentLocation> {
+    pub(in crate::app) fn find_comment_at_cursor(&self) -> Option<CommentLocation> {
         let target = self.diff_state.cursor_line;
         let commit_set = self.selected_commit_set();
         match self.line_annotations.get(target) {
@@ -705,6 +705,7 @@ impl App {
         self.comment_is_review_level = false;
         self.editing_comment_id = None;
         self.comment_line_range = None;
+        self.thread_reply_target = None;
     }
 
     pub fn save_comment(&mut self) {
@@ -714,6 +715,16 @@ impl App {
         }
 
         let content = self.comment_buffer.trim().to_string();
+
+        // A reply composed via `t` (`enter_thread_reply_mode`) appends
+        // directly to the durable thread rather than falling through to
+        // the legacy review/file/line comment branches below — see
+        // `App::reply_to_thread_at_cursor` in `threads.rs`.
+        if self.thread_reply_target.take().is_some() {
+            self.reply_to_thread_at_cursor(content);
+            self.exit_comment_mode();
+            return;
+        }
 
         let mut message = "Error: Could not save comment".to_string();
         let mut autosave_error = None;
@@ -772,7 +783,10 @@ impl App {
                 commit_id: None,
             };
             message = match add_comment_to_session(&mut self.session, request) {
-                Ok(_) => "Review comment added".to_string(),
+                Ok(_) => {
+                    self.mirror_new_comments_as_threads();
+                    "Review comment added".to_string()
+                }
                 Err(e) => format!("Error: Could not save comment: {e}"),
             };
         } else if let Some(path) = self.current_file_path().cloned() {
@@ -808,7 +822,10 @@ impl App {
                 commit_id: self.commit_id_for_new_comment(),
             };
             message = match add_comment_to_session(&mut self.session, request) {
-                Ok(_) => success_message,
+                Ok(_) => {
+                    self.mirror_new_comments_as_threads();
+                    success_message
+                }
                 Err(e) => format!("Error: Could not save comment: {e}"),
             };
         }

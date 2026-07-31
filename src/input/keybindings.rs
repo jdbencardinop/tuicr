@@ -43,6 +43,12 @@ pub enum Action {
     EditComment,
     /// Edit the comment at cursor with the text cursor at end (vim `A`).
     EditCommentAtEnd,
+    /// Reply to the durable thread mirroring the comment at cursor (`t`).
+    ReplyToThread,
+    /// Toggle the thread at cursor between resolved and reopened (`x`).
+    ToggleThreadResolved,
+    /// Dismiss ("won't fix") the thread at cursor (`X`).
+    DismissThread,
     PendingDCommand,
     EditFile,
     SearchNext,
@@ -210,6 +216,9 @@ fn map_normal_mode(key: KeyEvent, leader_key: char) -> Action {
         (KeyCode::Char('e'), KeyModifiers::NONE) => Action::EditFile,
         (KeyCode::Char('n'), KeyModifiers::NONE) => Action::SearchNext,
         (KeyCode::Char('N'), _) => Action::SearchPrev,
+        (KeyCode::Char('t'), KeyModifiers::NONE) => Action::ReplyToThread,
+        (KeyCode::Char('x'), KeyModifiers::NONE) => Action::ToggleThreadResolved,
+        (KeyCode::Char('X'), _) => Action::DismissThread,
 
         // Mode changes (use _ for shifted characters like : and ?)
         (KeyCode::Char(':'), _) => Action::EnterCommandMode,

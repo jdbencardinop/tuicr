@@ -549,6 +549,7 @@ impl App {
             let backend = create_forge_backend(&request.repository, local_checkout.clone());
             let previous_message = self.message.clone();
             self.enter_pr_diff_mode(backend, opened)?;
+            self.refresh_thread_anchors_after_head_advance();
             self.spawn_pr_threads_fetch(&details_for_threads, local_checkout);
             if self.message == previous_message {
                 self.set_message("Reloaded PR at new head".to_string());
@@ -630,8 +631,12 @@ impl App {
             let details_for_threads = opened.details.clone();
             let opened = self.opened_pr_with_new_head_session(opened)?;
             self.enter_pr_diff_mode(backend, opened)?;
-            // Fetch threads against the new head; old-head threads stay
-            // tied to the old session and are dropped here.
+            self.refresh_thread_anchors_after_head_advance();
+            // Fetch remote threads against the new head. Local threads
+            // carried forward from the old head (see
+            // `reviewed_state_carried_forward`) are never dropped here —
+            // they survive across the head advance and get their anchors
+            // refreshed just above.
             self.spawn_pr_threads_fetch(&details_for_threads, local_checkout.clone());
         } else {
             // Same head: re-parse the diff to pick up any side-channel
@@ -1015,6 +1020,9 @@ impl App {
                         had_error = true;
                     }
                 }
+                if threads_loaded {
+                    self.import_remote_review_threads_from_current_pr();
+                }
                 match summaries {
                     Ok(s) => {
                         self.forge_review_summaries = s;
@@ -1037,6 +1045,30 @@ impl App {
                 self.rebuild_annotations();
             }
         }
+    }
+
+    /// Idempotently import `self.forge_review_threads` (the just-fetched
+    /// remote threads for whichever PR is currently open) into
+    /// `self.session.threads` as durable [`PersistedThread`]s, so the
+    /// canonical TUI thread state reflects remote discussions without
+    /// requiring an explicit user action.
+    ///
+    /// No-op outside PR mode (there is no [`ForgeKind`] to key the
+    /// `provider_mappings` entry on). Safe to call after every fetch —
+    /// [`crate::model::review::ReviewSession::import_remote_review_threads`]
+    /// replaces rather than duplicates an already-imported thread, so
+    /// re-fetching twice (e.g. `:e` then another `:e`) never creates
+    /// duplicate threads.
+    ///
+    /// [`ForgeKind`]: crate::forge::traits::ForgeKind
+    /// [`PersistedThread`]: crate::model::thread_store::PersistedThread
+    pub(in crate::app) fn import_remote_review_threads_from_current_pr(&mut self) {
+        let DiffSource::PullRequest(pr) = &self.diff_source else {
+            return;
+        };
+        let provider = pr.key.repository.kind.provider_key();
+        self.session
+            .import_remote_review_threads(provider, &self.forge_review_threads);
     }
 
     /// Update the per-session remote comments visibility and repaint.
@@ -1141,6 +1173,7 @@ impl App {
         self.enter_pr_diff_mode(backend, opened)?;
         self.forge_review_threads = threads;
         self.forge_review_summaries = summaries;
+        self.import_remote_review_threads_from_current_pr();
         self.prune_locked_comments();
         self.rebuild_annotations();
         Ok(())

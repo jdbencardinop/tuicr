@@ -205,6 +205,18 @@ pub fn render_submit_confirm(frame: &mut Frame, app: &App) {
         )));
     }
 
+    if app.has_unpublished_thread_activity() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Note: thread replies/resolve/dismiss are local-only.",
+            Style::default().fg(theme.pending),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("They will not be published to {forge} by this submit."),
+            Style::default().fg(theme.pending),
+        )));
+    }
+
     lines.push(Line::from(""));
     lines.push(Line::from(prompt_spans(stale, state.event)));
 
@@ -659,5 +671,83 @@ mod tests {
         let text = buffer_text(&buffer);
         assert!(text.contains("Moved to summary: 1"), "counts: {text}");
         assert!(text.contains("Omitted: 1"));
+    }
+
+    #[test]
+    fn confirm_omits_thread_only_warning_when_no_thread_activity() {
+        let mut app = make_pr_app();
+        app.submit_state = Some(SubmitState {
+            event: SubmitEvent::Comment,
+            mappable: vec![inline(11)],
+            unmappable: Vec::new(),
+            resolver_choices: Vec::new(),
+            resolver_cursor: 0,
+            commit_id: "abcdef0123".to_string(),
+            skip_confirm: false,
+        });
+        let buffer = draw_confirm(&app);
+        let text = buffer_text(&buffer);
+        assert!(
+            !text.contains("local-only"),
+            "no thread activity yet: {text}"
+        );
+    }
+
+    #[test]
+    fn confirm_warns_when_thread_has_native_only_reply() {
+        use crate::model::thread::{Anchor, ThreadAuthor, ThreadComment};
+        let mut app = make_pr_app();
+        let root = ThreadComment::new(ThreadAuthor::human("user"), "root");
+        let thread_id = app.session.add_thread(Anchor::review(), root);
+        let reply = ThreadComment::new(ThreadAuthor::human("user"), "native reply");
+        app.session
+            .find_thread_mut(&thread_id)
+            .expect("thread exists")
+            .thread
+            .reply(reply);
+        app.submit_state = Some(SubmitState {
+            event: SubmitEvent::Comment,
+            mappable: vec![inline(11)],
+            unmappable: Vec::new(),
+            resolver_choices: Vec::new(),
+            resolver_cursor: 0,
+            commit_id: "abcdef0123".to_string(),
+            skip_confirm: false,
+        });
+        let buffer = draw_confirm(&app);
+        let text = buffer_text(&buffer);
+        assert!(
+            text.contains("local-only"),
+            "native reply should trigger warning: {text}"
+        );
+        assert!(text.contains("will not be published to GitHub"));
+    }
+
+    #[test]
+    fn confirm_warns_when_thread_is_resolved() {
+        use crate::model::thread::{Anchor, ThreadAuthor, ThreadComment};
+        let mut app = make_pr_app();
+        let root = ThreadComment::new(ThreadAuthor::human("user"), "root");
+        let thread_id = app.session.add_thread(Anchor::review(), root);
+        app.session
+            .find_thread_mut(&thread_id)
+            .expect("thread exists")
+            .thread
+            .resolve();
+        app.submit_state = Some(SubmitState {
+            event: SubmitEvent::Comment,
+            mappable: vec![inline(11)],
+            unmappable: Vec::new(),
+            resolver_choices: Vec::new(),
+            resolver_cursor: 0,
+            commit_id: "abcdef0123".to_string(),
+            skip_confirm: false,
+        });
+        let buffer = draw_confirm(&app);
+        let text = buffer_text(&buffer);
+        assert!(
+            text.contains("local-only"),
+            "resolved thread should trigger warning: {text}"
+        );
     }
 }

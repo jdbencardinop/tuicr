@@ -4,6 +4,7 @@ use crate::forge::traits::{
     PullRequestReviewMetadata, PullRequestReviewRecord, PullRequestSummary,
 };
 use crate::model::FileStatus;
+use crate::model::thread::{AnchorState, ThreadStatus};
 use crate::vcs::traits::{VcsChangeStatus, VcsType};
 
 struct TestReviewsDir {
@@ -350,6 +351,13 @@ struct FakeForgeBackend {
     commits: Vec<crate::forge::traits::PullRequestCommit>,
     review_metadata: PullRequestReviewMetadata,
     range_patch: Option<String>,
+    /// Full file content served by `fetch_file_lines`/`file_line_count`,
+    /// keyed by repo-relative path. Used by thread-anchor-refresh tests
+    /// that need to control the exact "new head" file content
+    /// independently of `patch` (which only needs to be a valid diff so
+    /// the file appears in `self.diff_files`; anchor relocation reads full
+    /// file content through this map instead of the patch hunks).
+    file_lines: std::collections::HashMap<PathBuf, Vec<String>>,
 }
 
 impl FakeForgeBackend {
@@ -360,7 +368,13 @@ impl FakeForgeBackend {
             commits: Vec::new(),
             review_metadata: PullRequestReviewMetadata::default(),
             range_patch: None,
+            file_lines: std::collections::HashMap::new(),
         }
+    }
+
+    fn with_file_lines(mut self, path: &str, lines: Vec<String>) -> Self {
+        self.file_lines.insert(PathBuf::from(path), lines);
+        self
     }
 }
 
@@ -385,9 +399,37 @@ impl crate::forge::traits::ForgeBackend for FakeForgeBackend {
     }
     fn fetch_file_lines(
         &self,
-        _request: crate::forge::traits::ForgeFileLinesRequest,
+        request: crate::forge::traits::ForgeFileLinesRequest,
     ) -> Result<Vec<crate::model::DiffLine>> {
-        Ok(Vec::new())
+        let Some(lines) = self.file_lines.get(&request.path) else {
+            return Ok(Vec::new());
+        };
+        let start = request.start_line.max(1) as usize;
+        let end = (request.end_line as usize).min(lines.len());
+        if start > end {
+            return Ok(Vec::new());
+        }
+        Ok(lines[(start - 1)..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, content)| {
+                let lineno = (start + offset) as u32;
+                crate::model::DiffLine {
+                    origin: crate::model::LineOrigin::Context,
+                    content: content.clone(),
+                    old_lineno: Some(lineno),
+                    new_lineno: Some(lineno),
+                    highlighted_spans: None,
+                }
+            })
+            .collect())
+    }
+    fn file_line_count(&self, request: crate::forge::traits::ForgeFileLinesRequest) -> Result<u32> {
+        Ok(self
+            .file_lines
+            .get(&request.path)
+            .map(|lines| lines.len() as u32)
+            .unwrap_or(0))
     }
     fn list_review_threads(
         &self,
@@ -1435,9 +1477,11 @@ fn should_ignore_exact_session_file_when_pr_session_key_does_not_match() {
 }
 
 #[test]
-fn should_ignore_manifest_session_when_pr_session_key_does_not_match() {
-    // given a manifest entry for the requested PR head whose session file
-    // contains a mismatched embedded key
+fn should_reconcile_via_lineage_when_manifest_session_key_head_differs() {
+    // given a manifest entry for this PR slug whose session file's own
+    // embedded `pr_session_key.head_sha` differs from the head being
+    // requested (e.g. a previous head's session, still the manifest's
+    // current entry for this PR)
     let _reviews = TestReviewsDir::new();
     let mut app = build_app();
     let summary = sample_pr(424252, "manifest-mismatch");
@@ -1468,7 +1512,8 @@ fn should_ignore_manifest_session_when_pr_session_key_does_not_match() {
         ));
     std::fs::write(saved_path, serde_json::to_vec_pretty(&mismatched).unwrap()).unwrap();
 
-    // when the PR is opened at the original head
+    // when the PR is opened at a head that doesn't exact-match that file's
+    // own embedded key
     let mut reopened = build_app();
     let backend = Box::new(FakeForgeBackend::open_pr_details(
         details,
@@ -1478,10 +1523,20 @@ fn should_ignore_manifest_session_when_pr_session_key_does_not_match() {
         .open_pr_with_backend(&summary, backend, None)
         .unwrap();
 
-    // then the manifest-loaded mismatch is rejected too.
+    // then the exact-head lookup misses (as before), but the PR-lineage
+    // fallback (`reconciled_session_from_pr_lineage`) still finds the
+    // manifest's session for this PR slug and carries its reviewed
+    // state/comments forward via `reviewed_state_carried_forward` — this
+    // is exactly the "never silently drop threads/comments on a PR head
+    // advance" guarantee requirement 4 exists to provide, applied at cold
+    // start (no running `App` yet) rather than an in-session reload.
     let stable_review = reopened.session.files.get(&stable_path).unwrap();
-    assert!(!stable_review.reviewed);
-    assert!(stable_review.file_comments.is_empty());
+    assert!(stable_review.reviewed);
+    assert_eq!(stable_review.file_comments.len(), 1);
+    assert_eq!(
+        stable_review.file_comments[0].content,
+        "wrong-manifest draft"
+    );
 }
 
 #[test]
@@ -1651,7 +1706,11 @@ fn should_carry_reviewed_marks_for_unchanged_files_when_pr_head_advances() {
         .unwrap();
 
     // then unchanged files stay reviewed, changed files reopen, and
-    // draft comments on unchanged files move to the new head.
+    // draft comments are carried forward for both unchanged *and* changed
+    // files — legacy comments have no anchor-relocation concept of their
+    // own, so a content-hash change no longer wipes them out wholesale
+    // (see `file_review_carried_forward`); only genuinely deleted/removed
+    // files stop carrying comments forward.
     assert!(head_changed);
     assert!(app.session.is_file_reviewed(&stable_path));
     assert!(!app.session.is_file_reviewed(&changed_path));
@@ -1659,7 +1718,11 @@ fn should_carry_reviewed_marks_for_unchanged_files_when_pr_head_advances() {
     assert_eq!(stable_review.file_comments.len(), 1);
     assert_eq!(stable_review.file_comments[0].content, "old-head draft");
     let changed_review = app.session.files.get(&changed_path).unwrap();
-    assert!(changed_review.file_comments.is_empty());
+    assert_eq!(changed_review.file_comments.len(), 1);
+    assert_eq!(
+        changed_review.file_comments[0].content,
+        "changed-file draft"
+    );
 }
 
 #[test]
@@ -2625,4 +2688,233 @@ fn should_discard_stale_remote_threads_event_after_switching_pr() {
     app.poll_pr_threads_events();
     // then — stale result was dropped
     assert!(app.forge_review_threads.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// Requirement 4 regression tests: thread anchor refresh on PR head
+// advance, driven end-to-end through `reload_pull_request_with_backend`
+// (which wires `refresh_thread_anchors_after_head_advance` after the
+// head-advance carry-forward, exactly like the production reload path).
+// ---------------------------------------------------------------------
+
+fn thread_anchor_line_content(n: usize) -> String {
+    format!("row-{n:04}")
+}
+
+fn thread_anchor_big_file(len: usize) -> Vec<String> {
+    (1..=len).map(thread_anchor_line_content).collect()
+}
+
+/// A single-file, single-line diff for `src/big.rs`. Its own hunk content
+/// is irrelevant to anchor relocation (which reads full file content
+/// through `FakeForgeBackend::file_lines`, not the patch text) — it only
+/// needs to be a valid diff so the file appears in `self.diff_files` and
+/// is therefore eligible for anchor refresh.
+fn big_file_patch() -> String {
+    "diff --git a/src/big.rs b/src/big.rs\n\
+     index 1111111..2222222 100644\n\
+     --- a/src/big.rs\n\
+     +++ b/src/big.rs\n\
+     @@ -1 +1 @@\n\
+     -old first line\n\
+     +new first line\n"
+        .to_string()
+}
+
+fn push_line_thread(
+    app: &mut App,
+    path: &str,
+    line: u32,
+    context: crate::model::thread::AnchorContext,
+) -> crate::model::thread::ThreadId {
+    let anchor = crate::model::thread::Anchor::line_with_context(
+        path,
+        crate::model::thread::AnchorSide::New,
+        line,
+        context,
+    )
+    .unwrap();
+    let root = crate::model::thread::ThreadComment::new(
+        crate::model::thread::ThreadAuthor::human("reviewer"),
+        "why is this here?",
+    );
+    let thread = crate::model::thread::Thread::open(anchor, root);
+    let id = thread.id().clone();
+    app.session
+        .threads
+        .push(crate::model::thread_store::PersistedThread::new(thread));
+    id
+}
+
+fn open_big_file_pr_at_head(app: &mut App, number: u64, head: &str) {
+    let summary = sample_pr(number, "big-file");
+    let mut details = test_pr_details(number, "big-file");
+    details.head_sha = head.to_string();
+    let backend = Box::new(
+        FakeForgeBackend::open_pr_details(details, big_file_patch())
+            .with_file_lines("src/big.rs", thread_anchor_big_file(60)),
+    );
+    app.open_pr_with_backend(&summary, backend, None).unwrap();
+}
+
+fn reload_big_file_pr_at_head(app: &mut App, head: &str, new_content: Vec<String>) {
+    let mut details = match &app.diff_source {
+        DiffSource::PullRequest(pr) => test_pr_details(pr.key.number, "big-file"),
+        _ => panic!("expected PullRequest diff source"),
+    };
+    details.head_sha = head.to_string();
+    let backend = Box::new(
+        FakeForgeBackend::open_pr_details(details, big_file_patch())
+            .with_file_lines("src/big.rs", new_content),
+    );
+    app.reload_pull_request_with_backend(backend, None).unwrap();
+}
+
+fn thread_by_id<'a>(
+    app: &'a App,
+    id: &crate::model::thread::ThreadId,
+) -> &'a crate::model::thread_store::PersistedThread {
+    app.session
+        .threads
+        .iter()
+        .find(|persisted| persisted.id() == id)
+        .expect("carried-forward thread not found after head advance")
+}
+
+#[test]
+fn should_keep_thread_anchor_current_when_unrelated_line_changes_after_head_advance() {
+    // given a thread anchored at line 42 of a 60-line file at head A
+    let mut app = build_app();
+    open_big_file_pr_at_head(&mut app, 424301, "aaaaaaaaaaaaaaaa");
+    let original = thread_anchor_big_file(60);
+    let refs = original.iter().map(String::as_str).collect::<Vec<_>>();
+    let context = crate::model::thread::AnchorContext::capture(&refs, 41, 41, 2).unwrap();
+    let id = push_line_thread(&mut app, "src/big.rs", 42, context);
+
+    // when the head advances but only an unrelated line (60) changes
+    let mut new_content = original.clone();
+    new_content[59] = "row-0060-CHANGED".to_string();
+    reload_big_file_pr_at_head(&mut app, "bbbbbbbbbbbbbbbb", new_content);
+
+    // then the anchor stays put and Current: an unrelated edit elsewhere
+    // in the file must never perturb a thread whose own context is intact.
+    let persisted = thread_by_id(&app, &id);
+    assert_eq!(persisted.thread.anchor().state(), AnchorState::Current);
+    match persisted.thread.anchor().target() {
+        crate::model::thread::AnchorTarget::Line { line, .. } => assert_eq!(*line, 42),
+        other => panic!("expected a line anchor, got {other:?}"),
+    }
+}
+
+#[test]
+fn should_relocate_thread_anchor_from_line_42_to_47_after_five_line_shift() {
+    // given a thread anchored at line 42 of a 60-line file at head A
+    let mut app = build_app();
+    open_big_file_pr_at_head(&mut app, 424302, "aaaaaaaaaaaaaaaa");
+    let original = thread_anchor_big_file(60);
+    let refs = original.iter().map(String::as_str).collect::<Vec<_>>();
+    let context = crate::model::thread::AnchorContext::capture(&refs, 41, 41, 2).unwrap();
+    let id = push_line_thread(&mut app, "src/big.rs", 42, context);
+
+    // when the head advances with 5 new lines inserted before the anchor,
+    // shifting every subsequent line (including line 42) down by 5
+    let mut new_content: Vec<String> = (1..=5).map(|i| format!("inserted-{i:02}")).collect();
+    new_content.extend(original.clone());
+    reload_big_file_pr_at_head(&mut app, "bbbbbbbbbbbbbbbb", new_content);
+
+    // then the anchor relocates to the unique match at line 47 and stays
+    // Current — never a nearest-line guess, an exact unique context match.
+    let persisted = thread_by_id(&app, &id);
+    assert_eq!(persisted.thread.anchor().state(), AnchorState::Current);
+    match persisted.thread.anchor().target() {
+        crate::model::thread::AnchorTarget::Line { line, .. } => assert_eq!(*line, 47),
+        other => panic!("expected a line anchor, got {other:?}"),
+    }
+}
+
+#[test]
+fn should_mark_thread_anchor_stale_when_context_has_zero_matches_after_head_advance() {
+    // given a thread anchored at line 42 of a 60-line file at head A
+    let mut app = build_app();
+    open_big_file_pr_at_head(&mut app, 424303, "aaaaaaaaaaaaaaaa");
+    let original = thread_anchor_big_file(60);
+    let refs = original.iter().map(String::as_str).collect::<Vec<_>>();
+    let context = crate::model::thread::AnchorContext::capture(&refs, 41, 41, 2).unwrap();
+    let id = push_line_thread(&mut app, "src/big.rs", 42, context);
+
+    // when the head advances and the whole neighborhood around the old
+    // anchor line is replaced with content that never appears elsewhere
+    let mut new_content = original.clone();
+    for (i, line) in new_content.iter_mut().enumerate().take(45).skip(38) {
+        *line = format!("replaced-{i:02}");
+    }
+    reload_big_file_pr_at_head(&mut app, "bbbbbbbbbbbbbbbb", new_content);
+
+    // then relocation finds zero matches for the captured context, so the
+    // anchor goes Stale rather than guessing a nearby line.
+    let persisted = thread_by_id(&app, &id);
+    assert_eq!(persisted.thread.anchor().state(), AnchorState::Stale);
+    assert_eq!(persisted.thread.status(), ThreadStatus::Stale);
+}
+
+#[test]
+fn should_mark_thread_anchor_ambiguous_when_context_duplicated_after_head_advance() {
+    // given a thread anchored at line 42 of a 60-line file at head A
+    let mut app = build_app();
+    open_big_file_pr_at_head(&mut app, 424304, "aaaaaaaaaaaaaaaa");
+    let original = thread_anchor_big_file(60);
+    let refs = original.iter().map(String::as_str).collect::<Vec<_>>();
+    let context = crate::model::thread::AnchorContext::capture(&refs, 41, 41, 2).unwrap();
+    let id = push_line_thread(&mut app, "src/big.rs", 42, context);
+
+    // when the head advances and the exact 5-line neighborhood around the
+    // old anchor (lines 40..=44, 1-based) is duplicated elsewhere in the
+    // file, so the captured context now matches twice
+    let mut new_content = original.clone();
+    let duplicated_block: Vec<String> = new_content[39..44].to_vec();
+    new_content.extend(duplicated_block);
+    reload_big_file_pr_at_head(&mut app, "bbbbbbbbbbbbbbbb", new_content);
+
+    // then relocation finds more than one match, so the anchor goes
+    // Ambiguous rather than picking either occurrence.
+    let persisted = thread_by_id(&app, &id);
+    assert_eq!(persisted.thread.anchor().state(), AnchorState::Ambiguous);
+    assert_eq!(persisted.thread.status(), ThreadStatus::Ambiguous);
+}
+
+#[test]
+fn should_freeze_closed_thread_anchor_through_head_advance_that_would_otherwise_relocate() {
+    // given a *resolved* thread anchored at line 42 of a 60-line file at
+    // head A
+    let mut app = build_app();
+    open_big_file_pr_at_head(&mut app, 424305, "aaaaaaaaaaaaaaaa");
+    let original = thread_anchor_big_file(60);
+    let refs = original.iter().map(String::as_str).collect::<Vec<_>>();
+    let context = crate::model::thread::AnchorContext::capture(&refs, 41, 41, 2).unwrap();
+    let id = push_line_thread(&mut app, "src/big.rs", 42, context);
+    app.session
+        .threads
+        .iter_mut()
+        .find(|persisted| persisted.id() == &id)
+        .unwrap()
+        .thread
+        .resolve();
+
+    // when the head advances with the same 5-line shift that (per
+    // `should_relocate_thread_anchor_from_line_42_to_47_after_five_line_shift`)
+    // would otherwise relocate an *open* thread's anchor from 42 to 47
+    let mut new_content: Vec<String> = (1..=5).map(|i| format!("inserted-{i:02}")).collect();
+    new_content.extend(original.clone());
+    reload_big_file_pr_at_head(&mut app, "bbbbbbbbbbbbbbbb", new_content);
+
+    // then the anchor is frozen: target/state are untouched by the head
+    // advance, and the thread remains Resolved rather than reopening or
+    // silently relocating while closed.
+    let persisted = thread_by_id(&app, &id);
+    assert_eq!(persisted.thread.status(), ThreadStatus::Resolved);
+    assert_eq!(persisted.thread.anchor().state(), AnchorState::Current);
+    match persisted.thread.anchor().target() {
+        crate::model::thread::AnchorTarget::Line { line, .. } => assert_eq!(*line, 42),
+        other => panic!("expected a line anchor, got {other:?}"),
+    }
 }

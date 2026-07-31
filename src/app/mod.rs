@@ -1067,6 +1067,11 @@ pub struct App {
     pub comment_is_file_level: bool,
     pub comment_line: Option<(u32, LineSide)>,
     pub editing_comment_id: Option<String>,
+    /// Set while composing a reply to the durable thread mirroring the
+    /// comment at cursor (`t`); consumed by `save_comment` to append a
+    /// genuinely thread-native reply instead of a new legacy `Comment`.
+    /// `None` for every other comment-mode entry point.
+    pub(crate) thread_reply_target: Option<crate::model::thread::ThreadId>,
 
     pub visual_selection: Option<VisualSelection>,
     /// True once the active mouse drag has actually moved off the press cell.
@@ -1510,6 +1515,7 @@ mod reviewed;
 mod search;
 mod session;
 mod submit;
+mod threads;
 mod tree;
 mod visual;
 

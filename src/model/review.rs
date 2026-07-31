@@ -255,6 +255,59 @@ impl ReviewSession {
         self.threads.iter_mut().find(|thread| thread.id() == id)
     }
 
+    /// Find the thread that mirrors a legacy `Comment` with `comment_id`,
+    /// whether it is that thread's root (the common case for
+    /// `review_comments`/`file_comments`, which never group — see
+    /// [`Self::migrate_legacy_comments_to_threads`]) or one of its replies
+    /// (the common case for `line_comments` sharing one anchor). Lets TUI
+    /// thread interactions (reply/resolve/reopen/dismiss keybindings) map a
+    /// cursor position over a legacy comment onto its durable `ThreadId`
+    /// without needing to re-derive the anchor/grouping the migration used.
+    pub fn find_thread_by_legacy_comment_id(&self, comment_id: &str) -> Option<&PersistedThread> {
+        self.threads.iter().find(|thread| {
+            thread
+                .thread
+                .comments()
+                .iter()
+                .any(|c| c.id().as_str() == comment_id)
+        })
+    }
+
+    /// Mutable counterpart of [`Self::find_thread_by_legacy_comment_id`].
+    pub fn find_thread_by_legacy_comment_id_mut(
+        &mut self,
+        comment_id: &str,
+    ) -> Option<&mut PersistedThread> {
+        self.threads.iter_mut().find(|thread| {
+            thread
+                .thread
+                .comments()
+                .iter()
+                .any(|c| c.id().as_str() == comment_id)
+        })
+    }
+
+    /// Whether `id` is the id of some legacy `Comment` still tracked by
+    /// this session (`review_comments`, any file's `file_comments`, or any
+    /// file's `line_comments`) — i.e. it has an existing rendering via the
+    /// legacy comment-box path, so a durable [`crate::model::thread::ThreadComment`]
+    /// carrying this same id (see [`Self::migrate_legacy_comments_to_threads`],
+    /// which reuses legacy `Comment.id`s verbatim) must not be rendered a
+    /// second time. Any thread comment whose id this returns `false` for has
+    /// no legacy shadow — most commonly a reply added natively via the
+    /// TUI's thread-reply keybinding — and needs its own rendering path
+    /// (see `format_thread_native_reply_lines` in `ui::comment_panel`).
+    pub fn is_legacy_comment_id(&self, id: &str) -> bool {
+        self.review_comments.iter().any(|c| c.id == id)
+            || self.files.values().any(|file| {
+                file.file_comments.iter().any(|c| c.id == id)
+                    || file
+                        .line_comments
+                        .values()
+                        .any(|comments| comments.iter().any(|c| c.id == id))
+            })
+    }
+
     /// Find a thread previously imported/mapped from `provider` under
     /// `provider_id`. Used by (future) provider adapters to make repeated
     /// import/sync passes idempotent instead of creating duplicate threads.
@@ -276,6 +329,52 @@ impl ReviewSession {
         self.threads.push(PersistedThread::new(thread));
         self.updated_at = Utc::now();
         id
+    }
+
+    /// Idempotently import fetched `remote_threads` (from `provider`, e.g.
+    /// `"github"`/`"gitlab"`/`"gitea"`/`"forgejo"` — see
+    /// [`crate::forge::traits::ForgeKind::provider_key`]) as durable
+    /// [`PersistedThread`]s, preserving root/reply order, comment IDs,
+    /// authors, and resolved/outdated state (see
+    /// [`thread_store::thread_from_remote`]).
+    ///
+    /// Each remote thread converts to a [`PersistedThread`] whose ID is
+    /// derived solely from `(provider, remote.id)`
+    /// ([`thread_store::remote_thread_id_for`]), so re-importing the exact
+    /// same remote threads (e.g. re-fetching twice, or a session
+    /// reload) *replaces* the existing entry in place rather than
+    /// appending a duplicate. Threads with no comments are skipped (a
+    /// thread always needs a root). Returns the number of *newly* created
+    /// threads (replacements of an already-imported thread are not
+    /// counted, mirroring [`Self::migrate_legacy_comments_to_threads`]'s
+    /// convention).
+    pub fn import_remote_review_threads(
+        &mut self,
+        provider: &str,
+        remote_threads: &[crate::forge::remote_comments::RemoteReviewThread],
+    ) -> usize {
+        let mut created = 0;
+        for remote in remote_threads {
+            if remote.comments.is_empty() {
+                continue;
+            }
+            let persisted = thread_store::thread_from_remote(provider, remote);
+            match self
+                .threads
+                .iter()
+                .position(|existing| existing.id() == persisted.id())
+            {
+                Some(index) => self.threads[index] = persisted,
+                None => {
+                    self.threads.push(persisted);
+                    created += 1;
+                }
+            }
+        }
+        if created > 0 {
+            self.updated_at = Utc::now();
+        }
+        created
     }
 
     /// Deterministically and idempotently sync this session's legacy
@@ -1696,6 +1795,152 @@ mod tests {
             let restored: ReviewSession = serde_json::from_str(&json).unwrap();
             assert_eq!(restored.threads().len(), 1);
             assert_eq!(restored.threads()[0].thread.root().unwrap().body, "root");
+        }
+
+        fn remote_thread(
+            id: &str,
+            path: &str,
+            line: Option<u32>,
+            is_resolved: bool,
+            is_outdated: bool,
+            comment_bodies: &[(&str, &str)],
+        ) -> crate::forge::remote_comments::RemoteReviewThread {
+            use crate::forge::remote_comments::{
+                RemoteCommentSide, RemoteReviewComment, RemoteReviewThread,
+            };
+            RemoteReviewThread {
+                id: id.to_string(),
+                path: path.to_string(),
+                line,
+                side: RemoteCommentSide::Right,
+                is_resolved,
+                is_outdated,
+                comments: comment_bodies
+                    .iter()
+                    .map(|(author, body)| RemoteReviewComment {
+                        id: format!("{id}-{author}"),
+                        author: Some(author.to_string()),
+                        body: body.to_string(),
+                        created_at: None,
+                        in_reply_to: None,
+                        url: format!("https://example.invalid/{id}"),
+                    })
+                    .collect(),
+            }
+        }
+
+        #[test]
+        fn should_import_remote_thread_preserving_root_reply_order_ids_and_authors() {
+            let mut session = test_session();
+            let remote = remote_thread(
+                "R_1",
+                "src/lib.rs",
+                Some(42),
+                false,
+                false,
+                &[("alice", "why here?"), ("bob", "good question")],
+            );
+
+            let created =
+                session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+            assert_eq!(created, 1);
+            assert_eq!(session.threads().len(), 1);
+
+            let thread = &session.threads()[0].thread;
+            assert_eq!(thread.status(), ThreadStatus::Open);
+            assert_eq!(thread.comments().len(), 2);
+            assert_eq!(thread.root().unwrap().body, "why here?");
+            assert_eq!(thread.root().unwrap().author.name, "alice");
+            assert_eq!(thread.root().unwrap().author.kind, AuthorKind::Remote);
+            assert_eq!(thread.root().unwrap().id().as_str(), "R_1-alice");
+            let reply = thread.replies().next().unwrap();
+            assert_eq!(reply.body, "good question");
+            assert_eq!(reply.author.name, "bob");
+            assert_eq!(reply.id().as_str(), "R_1-bob");
+
+            match thread.anchor().target() {
+                AnchorTarget::Line { path, line, .. } => {
+                    assert_eq!(path, "src/lib.rs");
+                    assert_eq!(*line, 42);
+                }
+                other => panic!("expected a line anchor, got {other:?}"),
+            }
+
+            assert!(
+                session.threads()[0].has_provider_id("github", "R_1"),
+                "provider mapping must record the remote thread id"
+            );
+        }
+
+        #[test]
+        fn should_not_duplicate_thread_when_reimporting_the_same_remote_thread_twice() {
+            let mut session = test_session();
+            let remote = remote_thread("R_2", "a.rs", Some(5), false, false, &[("alice", "note")]);
+
+            let first =
+                session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+            let second =
+                session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+
+            assert_eq!(first, 1, "first import creates exactly one thread");
+            assert_eq!(second, 0, "re-import must not create a new thread");
+            assert_eq!(
+                session.threads().len(),
+                1,
+                "re-fetching twice must not duplicate the thread"
+            );
+        }
+
+        #[test]
+        fn should_reflect_updated_remote_resolution_state_on_reimport() {
+            let mut session = test_session();
+            let open_remote =
+                remote_thread("R_3", "a.rs", Some(5), false, false, &[("alice", "note")]);
+            session.import_remote_review_threads("github", std::slice::from_ref(&open_remote));
+            assert_eq!(session.threads()[0].thread.status(), ThreadStatus::Open);
+
+            let resolved_remote =
+                remote_thread("R_3", "a.rs", Some(5), true, false, &[("alice", "note")]);
+            let created = session
+                .import_remote_review_threads("github", std::slice::from_ref(&resolved_remote));
+
+            assert_eq!(
+                created, 0,
+                "updating an existing import is not a new thread"
+            );
+            assert_eq!(session.threads().len(), 1);
+            assert_eq!(session.threads()[0].thread.status(), ThreadStatus::Resolved);
+        }
+
+        #[test]
+        fn should_import_fully_outdated_remote_thread_as_file_anchor() {
+            let mut session = test_session();
+            let remote =
+                remote_thread("R_4", "a.rs", None, false, true, &[("alice", "stale note")]);
+
+            session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+
+            match session.threads()[0].thread.anchor().target() {
+                AnchorTarget::File { path } => assert_eq!(path, "a.rs"),
+                other => {
+                    panic!("expected a file anchor for a lineless remote thread, got {other:?}")
+                }
+            }
+        }
+
+        #[test]
+        fn should_keep_remote_threads_from_different_providers_distinct() {
+            let mut session = test_session();
+            let remote = remote_thread("R_5", "a.rs", Some(1), false, false, &[("alice", "note")]);
+
+            session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+            session.import_remote_review_threads("gitlab", std::slice::from_ref(&remote));
+
+            assert_eq!(
+                session.threads().len(),
+                2,
+                "the same remote id under different providers must not collapse into one thread"
+            );
         }
     }
 }

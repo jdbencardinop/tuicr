@@ -243,6 +243,51 @@ pub(super) fn cursor_indicator_spaced(line_idx: usize, current_line_idx: usize) 
     }
 }
 
+/// Push any thread-native-only replies (no legacy `Comment` counterpart —
+/// see `comment_panel::format_thread_native_reply_lines`) for the thread
+/// mirroring legacy `comment_id`, right after that legacy comment's own box
+/// has just been rendered. `rendered_native_reply_threads` is a per-render-
+/// pass dedup guard (declared once by the caller) so a thread with several
+/// legacy comments grouped into it (line/range anchors —
+/// see `ReviewSession::migrate_legacy_comments_to_threads`) only has its
+/// native replies rendered once, not once per legacy comment in the group.
+/// No-op (nothing pushed) when the legacy comment has no thread, or its
+/// thread's native replies were already rendered by an earlier call in this
+/// pass, or it simply has none.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_native_thread_replies<'a>(
+    app: &App,
+    comment_id: &str,
+    theme: &Theme,
+    width: usize,
+    current_line_idx: usize,
+    rendered_native_reply_threads: &mut std::collections::HashSet<crate::model::thread::ThreadId>,
+    lines: &mut Vec<Line<'a>>,
+    line_idx: &mut usize,
+) {
+    let Some(persisted) = app.session.find_thread_by_legacy_comment_id(comment_id) else {
+        return;
+    };
+    if !rendered_native_reply_threads.insert(persisted.id().clone()) {
+        return;
+    }
+    let extra_lines = comment_panel::format_thread_native_reply_lines(
+        theme,
+        &persisted.thread,
+        |id| app.session.is_legacy_comment_id(id),
+        width,
+    );
+    for mut extra_line in extra_lines {
+        let indicator = cursor_indicator(*line_idx, current_line_idx);
+        extra_line.spans.insert(
+            0,
+            Span::styled(indicator, styles::current_line_indicator_style(theme)),
+        );
+        lines.push(extra_line);
+        *line_idx += 1;
+    }
+}
+
 pub(super) fn hunk_header_text_and_style(
     theme: &Theme,
     hunk: &DiffHunk,

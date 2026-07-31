@@ -556,8 +556,49 @@ impl App {
     ) -> Result<crate::forge::pr_open::OpenedPullRequest> {
         match Self::load_pr_session_for_opened(&opened)? {
             Some(session) => Ok(crate::forge::pr_open::OpenedPullRequest { session, ..opened }),
-            None => Ok(opened),
+            None => match Self::reconciled_session_from_pr_lineage(&opened)? {
+                Some(session) => Ok(crate::forge::pr_open::OpenedPullRequest { session, ..opened }),
+                None => Ok(opened),
+            },
         }
+    }
+
+    /// Cold-start fallback for when no session was persisted for this PR's
+    /// exact head SHA (see [`Self::load_pr_session_for_opened`]): look up a
+    /// previous session for the same PR *lineage* (forge kind, host,
+    /// owner/repo, and PR number — ignoring `head_sha`) and reconcile it
+    /// onto the newly-opened head via [`Self::reviewed_state_carried_forward`],
+    /// instead of silently starting a brand-new blank session and
+    /// permanently orphaning the old one's threads/comments — which is
+    /// exactly what happened before this fallback existed: a plain process
+    /// restart after a PR head advance found no exact-head match and threw
+    /// the previous review session away forever.
+    ///
+    /// Anchor relocation against the new head's real file content still
+    /// requires a running `App` (see
+    /// [`Self::refresh_thread_anchors_after_head_advance`] in `threads.rs`)
+    /// and is intentionally not attempted here — a thread's anchor state
+    /// may be momentarily stale immediately after this cold start, but the
+    /// thread itself always survives, which is the invariant this fallback
+    /// exists to guarantee.
+    fn reconciled_session_from_pr_lineage(
+        opened: &crate::forge::pr_open::OpenedPullRequest,
+    ) -> Result<Option<ReviewSession>> {
+        let Some((_path, previous)) = crate::persistence::load_pr_session_lineage(&opened.key)?
+        else {
+            return Ok(None);
+        };
+        if previous.pr_session_key.as_ref() == Some(&opened.key) {
+            // Exact head after all (e.g. a manifest race with
+            // `load_pr_session_for_opened`'s own lookups) — nothing to
+            // reconcile.
+            return Ok(Some(previous));
+        }
+        Ok(Some(Self::reviewed_state_carried_forward(
+            &previous,
+            opened.session.clone(),
+            &opened.diff_files,
+        )))
     }
 
     pub(in crate::app) fn opened_pr_with_new_head_session(
@@ -600,9 +641,23 @@ impl App {
             .cloned()
             .collect();
 
+        // Durable threads are the canonical review state and must never be
+        // silently dropped on a PR head advance — unlike legacy comments
+        // (which have no anchor-relocation concept and are carried forward
+        // as-is below), every previous thread survives here verbatim.
+        // Anchor relocation against the new head's actual file content
+        // happens separately, once an `App` (and therefore a
+        // `context_provider()`) exists — see
+        // `refresh_thread_anchors_after_head_advance` — so a thread's
+        // `Current`/`Stale`/`Ambiguous` state may be momentarily stale
+        // immediately after this call, but the thread itself is always
+        // preserved.
+        let threads = previous.threads.clone();
+
         ReviewSession {
             files,
             review_comments,
+            threads,
             ..next
         }
     }
@@ -628,19 +683,24 @@ impl App {
             .filter(|key| valid_hunks.contains(*key))
             .cloned()
             .collect();
-        let (file_comments, line_comments) = if unchanged_file {
-            (
-                previous_review
-                    .file_comments
-                    .iter()
-                    .filter(|comment| !comment.is_locked())
-                    .cloned()
-                    .collect(),
-                Self::line_draft_comments_carried_forward(previous_review),
-            )
-        } else {
-            (review.file_comments, review.line_comments)
-        };
+        // Carry legacy comments forward regardless of whether the file's
+        // content changed. Previously, any content-hash change dropped
+        // *every* `file_comments`/`line_comments` entry for the file
+        // wholesale (the "all-or-nothing" bug this reconciliation exists
+        // to fix) — even a single-character change elsewhere in the file
+        // would silently delete unrelated comments. Legacy `Comment`s have
+        // no anchor-relocation concept of their own (unlike `Thread`s), so
+        // they are preserved at their original line/range keys; the
+        // mirrored `Thread` for the same anchor is what actually tracks
+        // current/stale/ambiguous position drift once anchors are
+        // refreshed against the new content.
+        let file_comments = previous_review
+            .file_comments
+            .iter()
+            .filter(|comment| !comment.is_locked())
+            .cloned()
+            .collect();
+        let line_comments = Self::line_draft_comments_carried_forward(previous_review);
 
         (
             path,

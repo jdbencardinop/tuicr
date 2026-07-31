@@ -1519,6 +1519,13 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
         Action::EditComment => edit_comment_at_cursor(app, !app.comment_vim_enabled),
         // `A` (vim only) edits with the text cursor at end-of-line.
         Action::EditCommentAtEnd if app.comment_vim_enabled => edit_comment_at_cursor(app, true),
+        Action::ReplyToThread => app.enter_thread_reply_mode(),
+        Action::ToggleThreadResolved => {
+            app.toggle_thread_resolved_at_cursor();
+        }
+        Action::DismissThread => {
+            app.dismiss_thread_at_cursor();
+        }
         Action::ExportToClipboard => handle_export(app),
         Action::SearchNext => {
             app.search_next_in_diff();
