@@ -722,6 +722,7 @@ mod remote_thread_cursor_resolution {
                 created_at: Some(chrono::DateTime::UNIX_EPOCH),
                 in_reply_to: None,
                 url: String::new(),
+                rest_id: None,
             }],
         }
     }

@@ -220,6 +220,11 @@ fn notes_into_comments(notes: Vec<GlabNote>) -> Vec<RemoteReviewComment> {
                 created_at: note.created_at,
                 in_reply_to,
                 url: String::new(),
+                // GitLab discussion/note `id`s are already REST-compatible
+                // (`reply_to_thread` reads the bare mapping's `id`
+                // directly, never `root_comment_id`), so there is nothing
+                // distinct to capture here.
+                rest_id: None,
             }
         })
         .collect()

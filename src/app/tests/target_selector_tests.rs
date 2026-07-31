@@ -2522,6 +2522,7 @@ fn sample_thread(line: u32, body: &str, resolved: bool, outdated: bool) -> Remot
             created_at: None,
             in_reply_to: None,
             url: "https://example.com/c".to_string(),
+            rest_id: None,
         }],
     }
 }

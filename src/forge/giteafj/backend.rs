@@ -570,6 +570,9 @@ impl ForgeBackend for GiteaForgejoBackend {
                         // a reply.
                         in_reply_to: None,
                         url: comment.html_url,
+                        // Gitea/Forgejo comment IDs are already
+                        // REST-compatible; nothing distinct to capture.
+                        rest_id: None,
                     }],
                 });
             }

@@ -775,6 +775,7 @@ mod tests {
                     created_at: Some(chrono::DateTime::UNIX_EPOCH),
                     in_reply_to: None,
                     url: String::new(),
+                    rest_id: None,
                 },
                 RemoteReviewComment {
                     id: "remote-reply".to_string(),
@@ -783,6 +784,7 @@ mod tests {
                     created_at: Some(chrono::DateTime::UNIX_EPOCH),
                     in_reply_to: Some("remote-root".to_string()),
                     url: String::new(),
+                    rest_id: None,
                 },
             ],
         }

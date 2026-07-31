@@ -45,6 +45,20 @@ pub struct RemoteReviewComment {
     pub in_reply_to: Option<String>,
     /// Permalink to the comment on the forge.
     pub url: String,
+    /// This comment's REST-API-compatible identifier, when it differs from
+    /// [`Self::id`]. GitHub's review-thread import goes through GraphQL,
+    /// whose node IDs (`id`) are NOT accepted by the REST `in_reply_to`
+    /// field `ForgeBackend::reply_to_thread`'s GitHub implementation must
+    /// post a reply with; that implementation needs the legacy numeric
+    /// database ID instead. `None` when the provider's `id` is already
+    /// REST-compatible (GitLab discussion/note IDs, Gitea/Forgejo comment
+    /// IDs) or simply unavailable. Consumed by
+    /// [`crate::model::thread_store::thread_from_remote`], which uses the
+    /// root comment's `rest_id` (falling back to `id` when `None`) to seed
+    /// the provider's namespaced root-comment ledger at import time — the
+    /// same ledger `create_thread` populates — so a thread reply is
+    /// possible even for threads this tool never created itself.
+    pub rest_id: Option<String>,
 }
 
 /// State of a remote review at submit time. GitHub exposes one of
@@ -349,6 +363,7 @@ mod tests {
                 created_at: None,
                 in_reply_to: None,
                 url: format!("https://example.com/{id}"),
+                rest_id: None,
             }],
         }
     }

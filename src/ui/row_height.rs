@@ -596,6 +596,7 @@ mod tests {
                 created_at: None,
                 in_reply_to: None,
                 url: "https://example.com/comment".to_string(),
+                rest_id: None,
             }],
         }];
         // `sort_files_by_directory` reorders diff_files by parent directory,

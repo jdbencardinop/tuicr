@@ -1090,6 +1090,7 @@ fn total_lines_must_match_annotations_with_remote_threads() {
             created_at: None,
             in_reply_to: None,
             url: "https://example.com/c1".into(),
+            rest_id: None,
         }],
     }];
     app.rebuild_annotations();
@@ -1205,6 +1206,7 @@ fn comment_navigator_items_follow_rendered_comment_order() {
             created_at: None,
             in_reply_to: None,
             url: "https://example.com/c1".into(),
+            rest_id: None,
         }],
     }];
     app.rebuild_annotations();
@@ -1331,6 +1333,7 @@ fn should_update_current_file_when_navigating_to_remote_comment() {
             created_at: None,
             in_reply_to: None,
             url: "https://example.com/c1".into(),
+            rest_id: None,
         }],
     }];
     app.rebuild_annotations();
@@ -1379,6 +1382,7 @@ fn should_rebuild_single_file_annotations_when_navigating_to_outdated_remote_com
             created_at: None,
             in_reply_to: None,
             url: "https://example.com/c1".into(),
+            rest_id: None,
         }],
     }];
     app.rebuild_annotations();

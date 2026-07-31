@@ -1878,6 +1878,7 @@ mod tests {
                         created_at: Some(chrono::DateTime::UNIX_EPOCH),
                         in_reply_to: None,
                         url: format!("https://example.invalid/{id}"),
+                        rest_id: None,
                     })
                     .collect(),
             }

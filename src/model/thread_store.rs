@@ -466,6 +466,17 @@ pub fn thread_from_remote(provider: &str, remote: &RemoteReviewThread) -> Persis
             "is_resolved": remote.is_resolved,
         }),
     );
+    // Seed the namespaced root-comment ledger from the remote payload
+    // itself, the same ledger `create_thread` populates via
+    // `record_root_comment_id`, so `ForgeBackend::reply_to_thread` can
+    // reply to a thread this tool never created (only ever imported).
+    // Only providers whose reply mutation needs an ID distinct from the
+    // thread-lookup `id` populate `rest_id` (currently: GitHub, via
+    // `databaseId`); other providers' bare `id` is already what
+    // `reply_to_thread` needs, so there is nothing to seed for them.
+    if let Some(rest_id) = &root_comment.rest_id {
+        persisted.record_root_comment_id(provider, rest_id.clone());
+    }
     persisted
 }
 

@@ -2058,6 +2058,7 @@ mod remote_comments_side_by_side_snapshot_tests {
                 created_at: None,
                 in_reply_to: None,
                 url: "https://example.com".to_string(),
+                rest_id: None,
             }],
         }
     }

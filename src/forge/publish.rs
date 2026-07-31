@@ -166,7 +166,18 @@ fn execute_one(
                          `{thread_id}`"
                     ))
                 })?;
-            let mapping = persisted
+            // Read the namespaced root-comment ledger *before* cloning the
+            // bare mapping: a remote re-import between `create_thread` (or
+            // the original import) and this `Reply` wholesale-replaces the
+            // bare `provider` mapping (see
+            // `thread_store::merge_remote_thread_into_existing`), dropping
+            // any `root_comment_id` it carried, but the ledger survives
+            // that replacement by design. Backends that need a
+            // `root_comment_id` distinct from the bare mapping's own `id`
+            // (currently: GitHub) would otherwise fail to reply to any
+            // thread re-imported since it was created/first fetched.
+            let root_comment_id = persisted.root_comment_id(provider).map(str::to_string);
+            let mut mapping = persisted
                 .provider_mapping(provider)
                 .cloned()
                 .ok_or_else(|| {
@@ -174,6 +185,9 @@ fn execute_one(
                         "thread `{thread_id}` has no `{provider}` mapping to reply against"
                     ))
                 })?;
+            if let Some(root_comment_id) = root_comment_id {
+                mapping["root_comment_id"] = serde_json::Value::String(root_comment_id);
+            }
             let response = backend.reply_to_thread(pr, &mapping, &body)?;
             persisted.record_published_reply(provider, comment_id.as_str(), response.comment_id);
             Ok(())
@@ -487,6 +501,137 @@ mod tests {
         assert_eq!(
             persisted.published_reply_id("github", reply_id.as_str()),
             Some("222")
+        );
+    }
+
+    #[test]
+    fn should_reply_using_root_comment_ledger_after_remote_reimport_replaces_bare_mapping() {
+        // Regression test for a bug the parity audit found: a remote
+        // re-import between `create_thread` and a later `Reply`
+        // wholesale-replaces the bare `github` mapping via
+        // `thread_store::merge_remote_thread_into_existing` (dropping the
+        // `root_comment_id` that mapping originally carried right after
+        // `create_thread`), but the namespaced `github:root` ledger
+        // survives that replacement by design. `execute_one`'s `Reply` arm
+        // must consult that ledger — not just the bare mapping — or this
+        // scenario fails with "provider mapping is missing
+        // `root_comment_id`; cannot reply" even though the correct root
+        // comment ID is sitting right next to it.
+        let mut thread = open_local_thread();
+        let reply_id = thread
+            .thread
+            .reply(ThreadComment::new(ThreadAuthor::human("bob"), "on it"));
+        // Simulate the post-reimport state directly: bare mapping without
+        // `root_comment_id` (the exact shape `thread_from_remote` produces
+        // when the remote thread's root comment carries no `rest_id`),
+        // plus the ledger entry that a prior `create_thread` (or, per the
+        // companion test below, an import with a `rest_id`) would have
+        // left behind and which a reimport's bare-key replacement never
+        // touches.
+        thread.upsert_provider_mapping(
+            "github",
+            serde_json::json!({"id": "PRRT_1", "is_resolved": false}),
+        );
+        thread.record_root_comment_id("github", "111");
+        assert!(
+            thread
+                .provider_mapping("github")
+                .unwrap()
+                .get("root_comment_id")
+                .is_none(),
+            "bare mapping must NOT carry root_comment_id in this scenario"
+        );
+        let mut session = session_with_thread(thread);
+
+        let plan = plan_publication(&session, &capabilities::github(), None);
+        assert!(
+            !plan
+                .operations
+                .iter()
+                .any(|op| matches!(op.op, OperationKind::CreateThread)),
+            "an already-mapped thread must never replan CreateThread"
+        );
+
+        let runner = ScriptedGhRunner::default().queue(GH_REPLY);
+        let backend = GitHubGhBackend::with_runner(None, runner);
+        let pr = pr(ForgeKind::GitHub);
+        let report = execute_plan(&backend, &pr, &mut session, &plan, "");
+        assert!(report.is_success(), "{report:?}");
+        assert_eq!(
+            session.threads[0].published_reply_id("github", reply_id.as_str()),
+            Some("222"),
+            "reply must succeed by falling back to the root-comment ledger"
+        );
+    }
+
+    #[test]
+    fn should_seed_root_comment_ledger_from_remote_import_enabling_reply_to_a_thread_never_created_locally()
+     {
+        // Regression test for the audit's "likely bigger practical gap":
+        // a thread fetched directly from an existing remote PR (never
+        // created via this tool's own `create_thread`) has to still be
+        // repliable. GitHub's GraphQL thread-lookup query now requests
+        // `databaseId` on each comment node (see
+        // `github::review_threads::convert_comment`), surfacing a
+        // REST-compatible ID as `RemoteReviewComment::rest_id`;
+        // `thread_store::thread_from_remote` seeds the namespaced
+        // root-comment ledger from the root comment's `rest_id` at import
+        // time, the same ledger `create_thread` populates, so
+        // `execute_one`'s `Reply` arm can find a root comment ID for a
+        // thread it never created.
+        use crate::forge::remote_comments::{
+            RemoteCommentSide, RemoteReviewComment, RemoteReviewThread,
+        };
+
+        let remote = RemoteReviewThread {
+            id: "PRRT_imported".to_string(),
+            path: "src/a.rs".to_string(),
+            line: Some(10),
+            side: RemoteCommentSide::Right,
+            is_resolved: false,
+            is_outdated: false,
+            comments: vec![RemoteReviewComment {
+                id: "PRRC_root_node".to_string(),
+                author: Some("teammate".to_string()),
+                body: "please double check this".to_string(),
+                created_at: None,
+                in_reply_to: None,
+                url: String::new(),
+                rest_id: Some("999".to_string()),
+            }],
+        };
+
+        let mut session = session_with_threads(Vec::new());
+        let created = session.import_remote_review_threads("github", std::slice::from_ref(&remote));
+        assert_eq!(created, 1);
+        assert_eq!(
+            session.threads[0].root_comment_id("github"),
+            Some("999"),
+            "import must seed the root-comment ledger from the remote root comment's rest_id"
+        );
+
+        let reply_id = session.threads[0]
+            .thread
+            .reply(ThreadComment::new(ThreadAuthor::human("bob"), "on it"));
+
+        let plan = plan_publication(&session, &capabilities::github(), None);
+        assert!(
+            !plan
+                .operations
+                .iter()
+                .any(|op| matches!(op.op, OperationKind::CreateThread)),
+            "an imported thread must never replan CreateThread"
+        );
+
+        let runner = ScriptedGhRunner::default().queue(GH_REPLY);
+        let backend = GitHubGhBackend::with_runner(None, runner);
+        let pr = pr(ForgeKind::GitHub);
+        let report = execute_plan(&backend, &pr, &mut session, &plan, "");
+        assert!(report.is_success(), "{report:?}");
+        assert_eq!(
+            session.threads[0].published_reply_id("github", reply_id.as_str()),
+            Some("222"),
+            "reply to a never-locally-created thread must succeed"
         );
     }
 

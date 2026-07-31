@@ -34,6 +34,7 @@
 //!                 "nodes": [
 //!                   {
 //!                     "id": "PRRC_kw...",
+//!                     "databaseId": 1234567890,
 //!                     "body": "Can this be simplified?",
 //!                     "author": { "login": "alice" },
 //!                     "createdAt": "2026-05-12T18:30:00Z",
@@ -49,6 +50,15 @@
 //!   }
 //! }
 //! ```
+//!
+//! `databaseId` is deprecated by GitHub in favor of the Relay-style `id`
+//! (see the GraphQL schema reference for `PullRequestReviewComment`), but
+//! it is the only way to recover the legacy numeric comment ID a REST
+//! reply (`POST .../pulls/{n}/comments` with `in_reply_to`) requires —
+//! `id` here is a GraphQL node ID, not accepted by that endpoint. It seeds
+//! [`crate::model::thread_store::PersistedThread::record_root_comment_id`]
+//! at import time (see [`convert_comment`]) so a thread this tool never
+//! created can still be replied to.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -66,6 +76,8 @@ struct GhAuthor {
 #[serde(rename_all = "camelCase")]
 struct GhReviewComment {
     id: String,
+    #[serde(default)]
+    database_id: Option<u64>,
     #[serde(default)]
     body: String,
     #[serde(default)]
@@ -228,6 +240,7 @@ fn convert_comment(raw: GhReviewComment) -> RemoteReviewComment {
         created_at: raw.created_at,
         in_reply_to: raw.reply_to.map(|r| r.id),
         url: raw.url.unwrap_or_default(),
+        rest_id: raw.database_id.map(|id| id.to_string()),
     }
 }
 
@@ -254,6 +267,7 @@ pub(crate) fn build_query(after_cursor: Option<&str>) -> String {
           comments(first: 100) {{
             nodes {{
               id
+              databaseId
               body
               author {{ login }}
               createdAt
