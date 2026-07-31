@@ -11,6 +11,13 @@
 //! - `TUICR_LIVE_HOST` = e.g. `http://127.0.0.1:34521` (explicit scheme —
 //!   see `auth::base_url_from_host`)
 //! - `TUICR_LIVE_OWNER`, `TUICR_LIVE_REPO`, `TUICR_LIVE_PR`
+//! - `TUICR_LIVE_PR2` — a second, distinct open PR number in the same
+//!   repository, used only to prove real multi-page `list_pull_requests`
+//!   pagination against a live instance (a single PR can never exercise a
+//!   `has_more` transition). Optional: pagination assertions are skipped
+//!   (not silently passed) when unset, since a `#[ignore]`-gated live test
+//!   never runs by accident and every asserted claim must be evidence-backed
+//!   rather than assumed from just one PR existing.
 //! - `GITEA_TOKEN` or `FORGEJO_TOKEN` (matching `TUICR_LIVE_KIND`) — the
 //!   reviewer account's token, per `auth::resolve_token`'s existing
 //!   contract.
@@ -25,6 +32,7 @@
 use std::path::PathBuf;
 
 use crate::forge::giteafj::backend::GiteaForgejoBackend;
+use crate::forge::remote_comments::RemoteCommentSide;
 use crate::forge::submit::{GhSide, InlineComment, SubmitEvent};
 use crate::forge::traits::{
     CreateReviewRequest, ForgeBackend, ForgeFileLinesRequest, ForgeFileSide, ForgeKind,
@@ -38,6 +46,7 @@ struct LiveEnv {
     owner: String,
     repo: String,
     pr_number: u64,
+    pr2_number: Option<u64>,
 }
 
 fn live_env() -> Option<LiveEnv> {
@@ -52,6 +61,9 @@ fn live_env() -> Option<LiveEnv> {
         owner: std::env::var("TUICR_LIVE_OWNER").ok()?,
         repo: std::env::var("TUICR_LIVE_REPO").ok()?,
         pr_number: std::env::var("TUICR_LIVE_PR").ok()?.parse().ok()?,
+        pr2_number: std::env::var("TUICR_LIVE_PR2")
+            .ok()
+            .and_then(|v| v.parse().ok()),
     })
 }
 
@@ -89,6 +101,98 @@ fn should_drive_full_review_lifecycle_against_live_instance() {
         "expected PR #{} in list_pull_requests results",
         env.pr_number
     );
+
+    // Real multi-page pagination evidence: only runs when the caller
+    // provisioned a second distinct open PR (TUICR_LIVE_PR2), since a
+    // single PR can never produce a genuine `has_more` transition. This
+    // directly exercises the `has_more` fix (previously `rows.len() >
+    // page_size`, which is unreachable when the request itself asks for
+    // exactly `limit=page_size` rows, so pagination silently always
+    // reported `has_more: false` past the first page).
+    //
+    // The fixed heuristic (`rows.len() >= page_size`, "received a full
+    // page") is a standard, self-correcting approximation for a page/limit
+    // API with no total-count field: with exactly 2 open PRs and
+    // page_size=1, page 2 still receives a full page (1 row) and so also
+    // reports `has_more=true` -- confirmed live below -- and only a third,
+    // empty fetch (already_loaded=2) actually observes `has_more=false`.
+    // This costs one harmless extra empty fetch; it never drops a PR.
+    if let Some(pr2_number) = env.pr2_number {
+        let page1 = backend
+            .list_pull_requests(PullRequestListQuery::first_page(repo.clone(), 1))
+            .expect("list_pull_requests page 1 should succeed");
+        assert_eq!(
+            page1.pull_requests.len(),
+            1,
+            "page_size=1 should return exactly one row"
+        );
+        assert!(
+            page1.has_more,
+            "with 2 open PRs and page_size=1, page 1 must report has_more=true"
+        );
+        assert_eq!(page1.total_loaded, 1);
+
+        let page2_query = PullRequestListQuery {
+            repository: repo.clone(),
+            already_loaded: page1.total_loaded,
+            page_size: 1,
+            scope: crate::forge::traits::PullRequestListScope::Open,
+        };
+        let page2 = backend
+            .list_pull_requests(page2_query)
+            .expect("list_pull_requests page 2 should succeed");
+        assert_eq!(
+            page2.pull_requests.len(),
+            1,
+            "page_size=1 should return exactly one row on page 2 as well"
+        );
+        assert!(
+            page2.has_more,
+            "receiving a full page (1 row for page_size=1) on page 2 must still \
+             report has_more=true under the full-page heuristic, even though \
+             there happen to be no more PRs beyond it -- this is the documented, \
+             self-correcting false-positive cost of a page/limit API with no \
+             total-count field"
+        );
+
+        let page3_query = PullRequestListQuery {
+            repository: repo.clone(),
+            already_loaded: page1.total_loaded + page2.pull_requests.len(),
+            page_size: 1,
+            scope: crate::forge::traits::PullRequestListScope::Open,
+        };
+        let page3 = backend
+            .list_pull_requests(page3_query)
+            .expect("list_pull_requests page 3 should succeed");
+        assert!(
+            page3.pull_requests.is_empty(),
+            "page 3 (already_loaded=2) should return zero rows: only 2 PRs exist"
+        );
+        assert!(
+            !page3.has_more,
+            "an empty page must finally report has_more=false, terminating pagination"
+        );
+
+        let mut seen: Vec<u64> = page1
+            .pull_requests
+            .iter()
+            .chain(page2.pull_requests.iter())
+            .map(|pr| pr.number)
+            .collect();
+        seen.sort_unstable();
+        let mut expected = vec![env.pr_number, pr2_number];
+        expected.sort_unstable();
+        assert_eq!(
+            seen, expected,
+            "the union of both pages must contain exactly the two known open PRs, \
+             proving no PR was dropped or duplicated across the page boundary"
+        );
+    } else {
+        eprintln!(
+            "skipping multi-page pagination evidence: TUICR_LIVE_PR2 not set \
+             (a single PR cannot exercise a has_more transition)"
+        );
+    }
 
     let target = PullRequestTarget::with_repository(
         repo.clone(),
@@ -132,6 +236,34 @@ fn should_drive_full_review_lifecycle_against_live_instance() {
         .expect("file_line_count should succeed");
     assert!(count > 0, "file should report a positive line count");
 
+    // Old-side (base) file-context read. `src/catalog/service_01.ts` is
+    // fully rewritten by the fixture (every base line differs from the
+    // review-side content), so its base blob at `pr.base_sha` is a valid,
+    // distinct old-side anchor target independent of the head-side read
+    // above.
+    let old_side_file_request = ForgeFileLinesRequest {
+        repository: repo.clone(),
+        base_sha: pr.base_sha.clone(),
+        head_sha: pr.head_sha.clone(),
+        path: PathBuf::from("src/catalog/service_01.ts"),
+        status: FileStatus::Modified,
+        side: ForgeFileSide::Base,
+        start_line: 1,
+        end_line: 5,
+    };
+    let old_side_lines = backend
+        .fetch_file_lines(old_side_file_request)
+        .expect("fetch_file_lines on the old (base) side should succeed");
+    assert!(
+        !old_side_lines.is_empty(),
+        "expected at least one line of old-side context"
+    );
+    assert!(
+        old_side_lines.iter().any(|l| l.content.contains("base-01")),
+        "old-side read of src/catalog/service_01.ts should return fixture-base \
+         content (\"base-01-...\"), not the review-side rewrite; got: {old_side_lines:?}"
+    );
+
     // Existing threads/summaries/metadata should not error even when empty.
     let _threads = backend
         .list_review_threads(&pr)
@@ -143,17 +275,24 @@ fn should_drive_full_review_lifecycle_against_live_instance() {
         .list_pull_request_review_metadata(&pr)
         .expect("list_pull_request_review_metadata should succeed");
 
-    // Commit-range diff via the API (no local checkout, single commit range).
-    if !commits.is_empty() {
-        let end = &commits[commits.len() - 1].oid;
-        let start = &pr.base_sha;
-        match backend.get_pull_request_commit_range_diff(&pr, start, end) {
-            Ok(range_diff) => assert!(!range_diff.is_empty()),
-            Err(err) => {
-                eprintln!("commit range diff unsupported/unavailable on this instance: {err}");
-            }
-        }
-    }
+    // Commit-range diff via the API (no local checkout, single commit
+    // range). Confirmed live against both pinned stable images (Gitea
+    // 1.24 and Forgejo 16, `compare/{start}...{end}?output=diff`
+    // succeeds), so this is now a hard assertion rather than a
+    // log-and-continue soft check.
+    assert!(
+        !commits.is_empty(),
+        "PR should have at least one commit for the range-diff check"
+    );
+    let end = &commits[commits.len() - 1].oid;
+    let start = &pr.base_sha;
+    let range_diff = backend
+        .get_pull_request_commit_range_diff(&pr, start, end)
+        .expect("get_pull_request_commit_range_diff should succeed on stable Gitea/Forgejo");
+    assert!(
+        !range_diff.is_empty(),
+        "commit range diff should not be empty"
+    );
 
     // Create a pending review with a single-line comment, then finalize
     // with REQUEST_CHANGES. This proves one-pending-review-per-reviewer
@@ -185,7 +324,24 @@ fn should_drive_full_review_lifecycle_against_live_instance() {
         body: "Live-fixture range comment (lines 10-12).".to_string(),
         comment_id: "live-fixture-range".to_string(),
     };
-    let comments = [comment, range_comment];
+    // Old-side (base) anchor: `src/catalog/service_01.ts` is fully rewritten
+    // by the fixture, so every line on the PR's base (`GhSide::Left`) is a
+    // real, valid deletion anchor distinct from the new-side comments above.
+    // This proves old-side comments round-trip through `create_review` and
+    // `list_review_threads` (`original_position` -> `RemoteCommentSide::Left`),
+    // not just the new-side-only coverage the prior live run had.
+    let old_side_comment = InlineComment {
+        path: PathBuf::from("src/catalog/service_01.ts"),
+        line: 5,
+        side: GhSide::Left,
+        counterpart_line: None,
+        start_line: None,
+        start_side: None,
+        old_path: None,
+        body: "Live-fixture old-side (base) comment.".to_string(),
+        comment_id: "live-fixture-old-side".to_string(),
+    };
+    let comments = [comment, range_comment, old_side_comment];
     let request = CreateReviewRequest {
         event: SubmitEvent::RequestChanges,
         commit_id: &pr.head_sha,
@@ -196,4 +352,29 @@ fn should_drive_full_review_lifecycle_against_live_instance() {
         .create_review(&pr, request)
         .expect("create_review with REQUEST_CHANGES should succeed");
     assert!(response.id > 0);
+
+    // Verify the old-side anchor round-tripped correctly: the thread must
+    // report the base-side path/line and `RemoteCommentSide::Left`, proving
+    // `original_position` (not `position`) was populated and parsed back
+    // correctly rather than silently collapsing to the new side.
+    let threads_after = backend
+        .list_review_threads(&pr)
+        .expect("list_review_threads after create_review should succeed");
+    let old_side_thread = threads_after.iter().find(|t| {
+        t.path == "src/catalog/service_01.ts"
+            && t.side == RemoteCommentSide::Left
+            && t.comments
+                .iter()
+                .any(|c| c.body.contains("Live-fixture old-side (base) comment."))
+    });
+    assert!(
+        old_side_thread.is_some(),
+        "expected an old-side (RemoteCommentSide::Left) thread on \
+         src/catalog/service_01.ts after create_review; got threads: {threads_after:?}"
+    );
+    assert_eq!(
+        old_side_thread.unwrap().line,
+        Some(5),
+        "old-side thread should anchor at the exact base-side line requested"
+    );
 }

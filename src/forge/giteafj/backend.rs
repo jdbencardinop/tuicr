@@ -160,11 +160,24 @@ impl GiteaForgejoBackend {
         Ok(())
     }
 
+    /// Build a client for `repo` and gate it behind the evidence-backed
+    /// version/capability probe (`Self::capabilities_for`) before handing
+    /// it back. This runs (and is cached) on the **first** call for any
+    /// host, for **every** `ForgeBackend` method — not just `create_review`
+    /// — so a version this family has no evidence for (or a
+    /// Gitea/Forgejo `kind` mismatch against the live server) is rejected
+    /// with a typed error before any read or write operation, per the
+    /// "never classify by hostname alone / reject unevidenced versions"
+    /// requirement. Remote-URL hostname markers
+    /// (`giteafj::detect_self_hosted_kind`) only choose which backend to
+    /// *construct*; this probe is the authoritative live check.
     fn client_for(&self, repo: &ForgeRepository) -> Result<GfHttpClient> {
         self.check_kind(repo)?;
         let base_url = base_url_from_host(&repo.host);
         let token = resolve_token(self.kind, &repo.host)?;
-        Ok(GfHttpClient::new(base_url, token))
+        let client = GfHttpClient::new(base_url, token);
+        self.capabilities_for(&client, repo)?;
+        Ok(client)
     }
 
     /// Resolve (fetching and caching on first use) the evidence-backed
@@ -202,6 +215,39 @@ impl GiteaForgejoBackend {
 
     fn base_path(repo: &ForgeRepository) -> String {
         format!("/api/v1/repos/{}/{}", repo.owner, repo.name)
+    }
+
+    /// Turn one `limit={page_size}`-bounded page of raw rows into a
+    /// `PagedPullRequests`, isolated as a pure function so its `has_more`
+    /// math can be unit-tested without a live/mock HTTP round trip.
+    /// Gitea/Forgejo's `page`/`limit` pagination has no documented
+    /// total-count field or `Link` header this codebase has live evidence
+    /// for (see `docs/findings/providers/`), so "received a full page"
+    /// (`rows.len() >= page_size`) is the standard, self-correcting
+    /// heuristic for "there may be more" — a false positive here only
+    /// costs one extra empty-page fetch on the next call, never drops
+    /// data. (Comparing a `limit={page_size}`-bounded response's length
+    /// against that same bound with `>` — the prior implementation — could
+    /// never be true and always reported `has_more: false` past the first
+    /// page.)
+    fn paginate_open_rows(
+        rows: Vec<GfPullRequest>,
+        repository: &ForgeRepository,
+        page_size: usize,
+        already_loaded: usize,
+    ) -> PagedPullRequests {
+        let has_more = rows.len() >= page_size;
+        let pull_requests = rows
+            .into_iter()
+            .take(page_size)
+            .map(|row| row.into_summary(repository))
+            .collect::<Vec<_>>();
+        let total_loaded = already_loaded + pull_requests.len();
+        PagedPullRequests {
+            pull_requests,
+            has_more,
+            total_loaded,
+        }
     }
 
     /// Bounded-pagination fetch of every open PR, used both for the plain
@@ -384,18 +430,12 @@ impl ForgeBackend for GiteaForgejoBackend {
                     Self::base_path(&query.repository)
                 );
                 let rows: Vec<GfPullRequest> = client.get_json(&path)?;
-                let has_more = rows.len() > page_size;
-                let pull_requests = rows
-                    .into_iter()
-                    .take(page_size)
-                    .map(|row| row.into_summary(&query.repository))
-                    .collect::<Vec<_>>();
-                let total_loaded = query.already_loaded + pull_requests.len();
-                Ok(PagedPullRequests {
-                    pull_requests,
-                    has_more,
-                    total_loaded,
-                })
+                Ok(Self::paginate_open_rows(
+                    rows,
+                    &query.repository,
+                    page_size,
+                    query.already_loaded,
+                ))
             }
             PullRequestListScope::ReviewRequested => {
                 let viewer = self.viewer_login(&client)?;
@@ -879,5 +919,122 @@ mod tests {
             GiteaForgejoBackend::base_path(&repo),
             "/api/v1/repos/owner/repo"
         );
+    }
+
+    #[test]
+    fn should_report_has_more_when_a_full_page_is_received() {
+        let repo = ForgeRepository::gitea("http://example.com", "owner", "repo");
+        let row_json =
+            r#"{"number":1,"base":{"ref":"main","sha":"a"},"head":{"ref":"feat","sha":"b"}}"#;
+        let rows: Vec<GfPullRequest> = vec![
+            serde_json::from_str(row_json).unwrap(),
+            serde_json::from_str(row_json).unwrap(),
+        ];
+        let page = GiteaForgejoBackend::paginate_open_rows(rows, &repo, 2, 0);
+        assert_eq!(page.pull_requests.len(), 2);
+        assert_eq!(page.total_loaded, 2);
+        assert!(
+            page.has_more,
+            "a full page (2 rows for page_size 2) must signal has_more, \
+             even though the server was asked for exactly limit=page_size"
+        );
+    }
+
+    #[test]
+    fn should_report_no_more_when_a_partial_page_is_received() {
+        let repo = ForgeRepository::gitea("http://example.com", "owner", "repo");
+        let row: GfPullRequest = serde_json::from_str(
+            r#"{"number":1,"base":{"ref":"main","sha":"a"},"head":{"ref":"feat","sha":"b"}}"#,
+        )
+        .unwrap();
+        let page = GiteaForgejoBackend::paginate_open_rows(vec![row], &repo, 5, 10);
+        assert_eq!(page.pull_requests.len(), 1);
+        assert_eq!(page.total_loaded, 11);
+        assert!(
+            !page.has_more,
+            "a short page (1 row for page_size 5) is the last page"
+        );
+    }
+
+    #[test]
+    fn should_reject_unevidenced_version_before_any_read_or_write_operation() {
+        use crate::forge::giteafj::client::GfHttpClient;
+        use crate::forge::giteafj::test_support::start_mock_server;
+        use std::collections::HashMap;
+
+        let mut responses = HashMap::new();
+        responses.insert(
+            "/api/v1/version".to_string(),
+            (200u16, r#"{"version":"1.20.0"}"#.to_string()),
+        );
+        let base_url = start_mock_server(responses);
+
+        let backend = GiteaForgejoBackend::new(ForgeKind::Gitea, None);
+        let repo = ForgeRepository::gitea(&base_url, "owner", "repo");
+        let client = GfHttpClient::new(base_url, "mock-token".to_string());
+
+        // This is the same gate `client_for` now runs before every
+        // `ForgeBackend` method (list/get/diff/commits/threads/create_review
+        // all call `client_for` first) — proving it here proves every one
+        // of them refuses an unevidenced version rather than guessing.
+        let err = backend.capabilities_for(&client, &repo).unwrap_err();
+        assert!(
+            matches!(err, TuicrError::UnsupportedOperation(_)),
+            "unevidenced version 1.20.0 must be a typed UnsupportedOperation, not silently \
+             accepted: {err:?}"
+        );
+    }
+
+    #[test]
+    fn should_reject_kind_mismatch_against_live_forgejo_fingerprint() {
+        use crate::forge::giteafj::client::GfHttpClient;
+        use crate::forge::giteafj::test_support::start_mock_server;
+        use std::collections::HashMap;
+
+        let mut responses = HashMap::new();
+        responses.insert(
+            "/api/v1/version".to_string(),
+            (200u16, r#"{"version":"16.0.1+gitea-1.22.0"}"#.to_string()),
+        );
+        let base_url = start_mock_server(responses);
+
+        // Configured as Gitea, but the live server is Forgejo-fingerprinted.
+        let backend = GiteaForgejoBackend::new(ForgeKind::Gitea, None);
+        let repo = ForgeRepository::gitea(&base_url, "owner", "repo");
+        let client = GfHttpClient::new(base_url, "mock-token".to_string());
+
+        let err = backend.capabilities_for(&client, &repo).unwrap_err();
+        assert!(matches!(err, TuicrError::UnsupportedOperation(_)));
+    }
+
+    #[test]
+    fn should_accept_and_cache_evidenced_version_across_repeated_calls() {
+        use crate::forge::giteafj::client::GfHttpClient;
+        use crate::forge::giteafj::test_support::start_mock_server;
+        use std::collections::HashMap;
+
+        // Exactly one `/api/v1/version` response is registered; the mock
+        // server thread exits after serving it once. If `capabilities_for`
+        // re-fetched on the second call instead of using
+        // `capability_cache`, the second call would fail to connect
+        // (listener already dropped) instead of returning `Ok` again.
+        let mut responses = HashMap::new();
+        responses.insert(
+            "/api/v1/version".to_string(),
+            (200u16, r#"{"version":"1.24.7"}"#.to_string()),
+        );
+        let base_url = start_mock_server(responses);
+
+        let backend = GiteaForgejoBackend::new(ForgeKind::Gitea, None);
+        let repo = ForgeRepository::gitea(&base_url, "owner", "repo");
+        let client = GfHttpClient::new(base_url, "mock-token".to_string());
+
+        let first = backend
+            .capabilities_for(&client, &repo)
+            .expect("first call");
+        let second = backend
+            .capabilities_for(&client, &repo)
+            .expect("second call must hit the cache, not the network");
+        assert_eq!(first.range, second.range);
     }
 }
