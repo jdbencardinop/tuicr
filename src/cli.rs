@@ -622,16 +622,18 @@ fn non_empty_theme_name(s: &str) -> Result<String, String> {
     }
 }
 
-/// Reject `--repo-url` values that don't parse as a GitHub remote URL so the
-/// failure is surfaced at startup rather than when the PR tab is opened.
+/// Reject `--repo-url` values that don't parse as a recognized forge remote
+/// URL (GitHub, GitLab, or self-hosted Gitea/Forgejo) so the failure is
+/// surfaced at startup rather than when the PR tab is opened.
 fn parse_repo_url(s: &str) -> Result<String, String> {
-    if crate::forge::github::gh::parse_github_remote_url(s).is_some() {
+    if crate::forge::parse_any_remote_url(s).is_some() {
         Ok(s.to_string())
     } else {
         Err(format!(
-            "--repo-url value '{s}' is not a recognized GitHub URL. \
+            "--repo-url value '{s}' is not a recognized forge URL. \
              Expected forms: https://github.com/owner/repo, git@github.com:owner/repo, \
-             or ssh://git@github.com/owner/repo"
+             ssh://git@github.com/owner/repo, or the equivalent GitLab/self-hosted \
+             Gitea/Forgejo forms"
         ))
     }
 }
@@ -1099,7 +1101,31 @@ mod tests {
         let err =
             parse_for_test(&["tuicr", "--repo-url", "not-a-url"]).expect_err("parse should fail");
         assert_eq!(err.kind(), ErrorKind::ValueValidation);
-        assert!(err.to_string().contains("not a recognized GitHub URL"));
+        assert!(err.to_string().contains("not a recognized forge URL"));
+    }
+
+    #[test]
+    fn should_parse_repo_url_self_hosted_gitea() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "--repo-url",
+            "https://gitea.example.com/agavra/tuicr",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.repo_url,
+            Some("https://gitea.example.com/agavra/tuicr".to_string())
+        );
+    }
+
+    #[test]
+    fn should_parse_repo_url_forgejo_codeberg() {
+        let parsed = parse_for_test(&["tuicr", "--repo-url", "https://codeberg.org/agavra/tuicr"])
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed.repo_url,
+            Some("https://codeberg.org/agavra/tuicr".to_string())
+        );
     }
 
     #[test]

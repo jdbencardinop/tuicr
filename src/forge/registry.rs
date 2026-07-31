@@ -29,11 +29,13 @@ pub fn capabilities(
 /// Construct a transport for `repo`.
 ///
 /// Returns `Ok` for `ForgeKind::GitHub`/`ForgeKind::GitLab`, reusing the
-/// existing `gh`/`glab`-shelling backends unchanged. Returns a typed
-/// `Err(TuicrError::UnsupportedOperation(_))` for the placeholder kinds
-/// (`AzureDevOps`/`Gitea`/`Forgejo`) — no transport exists for them yet, and
-/// this factory must never panic or silently substitute another kind's
-/// backend.
+/// existing `gh`/`glab`-shelling backends unchanged, and for
+/// `ForgeKind::Gitea`/`ForgeKind::Forgejo`, which use the shared
+/// `crate::forge::giteafj::backend::GiteaForgejoBackend` HTTP transport.
+/// Returns a typed `Err(TuicrError::UnsupportedOperation(_))` for the
+/// remaining placeholder kind (`AzureDevOps`) — no transport exists for it
+/// yet, and this factory must never panic or silently substitute another
+/// kind's backend.
 pub fn create_backend(
     repo: &ForgeRepository,
     local_checkout: Option<PathBuf>,
@@ -51,14 +53,18 @@ pub fn create_backend(
                 GitLabGlabBackend::new(Some(repo.clone())).with_local_checkout(local_checkout),
             ))
         }
-        ForgeKind::AzureDevOps | ForgeKind::Gitea | ForgeKind::Forgejo => {
-            Err(TuicrError::UnsupportedOperation(format!(
-                "{} has no transport yet; only capability profiles and dry-run planning are \
-                 supported for it (see docs/follow-on-map/tickets/12-implement-azure-adapter.md \
-                 and 13-implement-gitea-forgejo-adapter.md)",
-                repo.kind.provider_key()
-            )))
+        ForgeKind::Gitea | ForgeKind::Forgejo => {
+            use crate::forge::giteafj::backend::GiteaForgejoBackend;
+            Ok(Box::new(
+                GiteaForgejoBackend::new(repo.kind, Some(repo.clone()))
+                    .with_local_checkout(local_checkout),
+            ))
         }
+        ForgeKind::AzureDevOps => Err(TuicrError::UnsupportedOperation(format!(
+            "{} has no transport yet; only capability profiles and dry-run planning are \
+             supported for it (see docs/follow-on-map/tickets/12-implement-azure-adapter.md)",
+            repo.kind.provider_key()
+        ))),
     }
 }
 
@@ -89,23 +95,15 @@ mod tests {
     }
 
     #[test]
-    fn should_return_typed_error_for_gitea_placeholder() {
+    fn should_build_gitea_backend() {
         let repo = ForgeRepository::gitea("gitea.example.com", "owner", "repo");
-        let err = match create_backend(&repo, None) {
-            Ok(_) => panic!("expected no Gitea transport yet"),
-            Err(err) => err,
-        };
-        assert!(matches!(err, TuicrError::UnsupportedOperation(_)));
+        assert!(create_backend(&repo, None).is_ok());
     }
 
     #[test]
-    fn should_return_typed_error_for_forgejo_placeholder() {
+    fn should_build_forgejo_backend() {
         let repo = ForgeRepository::forgejo("codeberg.org", "owner", "repo");
-        let err = match create_backend(&repo, None) {
-            Ok(_) => panic!("expected no Forgejo transport yet"),
-            Err(err) => err,
-        };
-        assert!(matches!(err, TuicrError::UnsupportedOperation(_)));
+        assert!(create_backend(&repo, None).is_ok());
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, TuicrError};
 use crate::forge::remote_comments::{RemoteReviewSummary, RemoteReviewThread};
 use crate::forge::traits::{
-    ForgeBackend, ForgeFileLinesRequest, ForgeRepository, GhCreateReviewResponse,
+    ForgeBackend, ForgeFileLinesRequest, ForgeKind, ForgeRepository, GhCreateReviewResponse,
     PagedPullRequests, PullRequestCommit, PullRequestDetails, PullRequestListQuery,
     PullRequestListScope, PullRequestTarget,
 };
@@ -647,6 +647,12 @@ fn parse_url_target(target: &str) -> Option<PullRequestTarget> {
             parts.next()?.parse::<u64>().ok()?,
             ForgeRepository::github(host, owner, strip_git_suffix(repo)),
         )
+    } else if segment == "pulls" {
+        // Gitea/Forgejo: /<owner>/<repo>/pulls/<n>
+        (
+            parts.next()?.parse::<u64>().ok()?,
+            forge_repo_from_host(host, owner, strip_git_suffix(repo)),
+        )
     } else if segment == "-" {
         // GitLab: /<owner>/<repo>/-/merge_requests/<n>
         if parts.next()? != "merge_requests" {
@@ -692,10 +698,19 @@ fn parse_repo_hash_target(target: &str) -> Option<PullRequestTarget> {
 }
 
 /// Build a `ForgeRepository` from host/owner/repo, picking the forge kind
-/// based on the host name.
+/// based on the host name. GitLab wins on an explicit `"gitlab"` marker;
+/// self-hosted Gitea/Forgejo instances are detected via
+/// `crate::forge::giteafj::detect_self_hosted_kind` (hostname markers plus
+/// opt-in `TUICR_GITEA_HOSTS`/`TUICR_FORGEJO_HOSTS` allow-lists), and
+/// anything else falls back to GitHub (covers github.com and GHE hosts).
 fn forge_repo_from_host(host: &str, owner: &str, repo: &str) -> ForgeRepository {
     if host.contains("gitlab") {
         ForgeRepository::gitlab(host, owner, repo)
+    } else if let Some(kind) = crate::forge::giteafj::detect_self_hosted_kind(host) {
+        match kind {
+            ForgeKind::Forgejo => ForgeRepository::forgejo(host, owner, repo),
+            _ => ForgeRepository::gitea(host, owner, repo),
+        }
     } else {
         ForgeRepository::github(host, owner, repo)
     }
@@ -1270,6 +1285,35 @@ index 1111111..2222222 100644
         assert_eq!(repository.kind, crate::forge::traits::ForgeKind::GitHub);
         assert_eq!(repository.host, "gitlab.ghe.company.com");
         assert_eq!(repository.slug(), "agavra/tuicr");
+    }
+
+    #[test]
+    fn parses_self_hosted_gitea_pulls_url_with_plural_segment() {
+        let target =
+            parse_pull_request_target("https://gitea.example.com/agavra/tuicr/pulls/125").unwrap();
+        let repository = target.repository.unwrap();
+        assert_eq!(target.number, 125);
+        assert_eq!(repository.kind, crate::forge::traits::ForgeKind::Gitea);
+        assert_eq!(repository.host, "gitea.example.com");
+        assert_eq!(repository.slug(), "agavra/tuicr");
+    }
+
+    #[test]
+    fn parses_codeberg_pulls_url_as_forgejo_with_plural_segment() {
+        let target =
+            parse_pull_request_target("https://codeberg.org/agavra/tuicr/pulls/125").unwrap();
+        let repository = target.repository.unwrap();
+        assert_eq!(target.number, 125);
+        assert_eq!(repository.kind, crate::forge::traits::ForgeKind::Forgejo);
+        assert_eq!(repository.host, "codeberg.org");
+    }
+
+    #[test]
+    fn parses_gitea_hash_target_via_self_hosted_host_marker() {
+        let target = parse_pull_request_target("gitea.example.com/agavra/tuicr#125").unwrap();
+        let repository = target.repository.unwrap();
+        assert_eq!(repository.kind, crate::forge::traits::ForgeKind::Gitea);
+        assert_eq!(repository.host, "gitea.example.com");
     }
 
     #[test]

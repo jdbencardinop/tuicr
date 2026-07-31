@@ -9,6 +9,7 @@ pub mod canonical;
 pub mod capabilities;
 pub mod context;
 pub mod dryrun;
+pub mod giteafj;
 pub mod github;
 pub mod gitlab;
 pub mod pr_open;
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use git2::Repository;
 
+use crate::forge::giteafj::parse_gitea_forgejo_remote_url;
 use crate::forge::github::gh::parse_github_remote_url;
 use crate::forge::gitlab::glab::parse_gitlab_remote_url;
 use crate::forge::traits::ForgeRepository;
@@ -101,11 +103,17 @@ fn remote_urls(repo_root: &Path) -> Vec<String> {
 /// Parse `url` as a forge remote repository.
 ///
 /// Tries GitLab first — its parser already filters to "gitlab" hosts, so
-/// trying it first won't claim GitHub Enterprise remotes — then falls back
-/// to GitHub, which accepts any host (covers github.com and GHE hosts whose
-/// hostname does not literally contain "github").
-fn parse_any_remote_url(url: &str) -> Option<ForgeRepository> {
-    parse_gitlab_remote_url(url).or_else(|| parse_github_remote_url(url))
+/// trying it first won't claim GitHub Enterprise remotes — then Gitea/
+/// Forgejo (also host-filtered; see
+/// `crate::forge::giteafj::detect_self_hosted_kind`), then falls back to
+/// GitHub, which accepts any host (covers github.com and GHE hosts whose
+/// hostname does not literally contain "github"). The Gitea/Forgejo check
+/// must run before the GitHub catch-all or it would never get a chance to
+/// match anything.
+pub fn parse_any_remote_url(url: &str) -> Option<ForgeRepository> {
+    parse_gitlab_remote_url(url)
+        .or_else(|| parse_gitea_forgejo_remote_url(url))
+        .or_else(|| parse_github_remote_url(url))
 }
 
 /// Detect the forge repository for the local checkout at `repo_root`.
@@ -142,6 +150,37 @@ mod tests {
         assert_eq!(
             detect_forge_repository(dir.path()),
             Some(ForgeRepository::github("github.com", "agavra", "tuicr"))
+        );
+    }
+
+    #[test]
+    fn detects_self_hosted_gitea_repository_from_origin() {
+        let dir = init_repo_with_origin("https://gitea.example.com/agavra/tuicr.git");
+        assert_eq!(
+            detect_forge_repository(dir.path()),
+            Some(ForgeRepository::gitea(
+                "gitea.example.com",
+                "agavra",
+                "tuicr"
+            ))
+        );
+    }
+
+    #[test]
+    fn detects_codeberg_repository_as_forgejo_from_origin() {
+        let dir = init_repo_with_origin("https://codeberg.org/agavra/tuicr");
+        assert_eq!(
+            detect_forge_repository(dir.path()),
+            Some(ForgeRepository::forgejo("codeberg.org", "agavra", "tuicr"))
+        );
+    }
+
+    #[test]
+    fn still_detects_gitlab_repository_from_origin_unaffected_by_gitea_forgejo_ordering() {
+        let dir = init_repo_with_origin("https://gitlab.com/agavra/tuicr");
+        assert_eq!(
+            detect_forge_repository(dir.path()),
+            Some(ForgeRepository::gitlab("gitlab.com", "agavra", "tuicr"))
         );
     }
 
