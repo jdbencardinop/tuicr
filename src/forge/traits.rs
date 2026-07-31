@@ -660,6 +660,41 @@ pub trait ForgeBackend {
             "this backend has no thread-resolution implementation".to_string(),
         ))
     }
+
+    /// Add one anchored comment to an *already-created* pending (draft)
+    /// review, without submitting it — GitHub's incremental pending-review
+    /// primitive (`POST
+    /// /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/comments`),
+    /// distinct from [`Self::create_thread`] (a standalone comment posted
+    /// immediately, outside any review) and from [`Self::create_review`]
+    /// (which creates the pending review itself, optionally with its own
+    /// initial batch of comments). `pending_review_id` is the numeric REST
+    /// review ID from [`GhCreateReviewResponse::id`] when `create_review`
+    /// was called with [`crate::forge::submit::SubmitEvent::Draft`].
+    ///
+    /// Default returns [`TuicrError::UnsupportedOperation`]; only backends
+    /// with a verified add-to-pending-review endpoint (GitHub) override it
+    /// — see `capabilities.rs`'s `PendingReviewSupport::incremental()`.
+    /// **Not yet wired into [`crate::forge::dryrun`]/[`crate::forge::publish`]'s
+    /// per-thread operation graph**: the durable `Thread`/`PersistedThread`
+    /// model has no concept yet of "this thread belongs to in-progress
+    /// pending review #123" (only [`Self::create_review`]'s legacy batch
+    /// path tracks a review ID at all, and only transiently in its own
+    /// response). Adding that session-level tracking is a separate,
+    /// follow-on concern from this ticket's per-thread reply/resolve
+    /// durability; this method exists so the `incremental()` capability
+    /// claim is backed by a real, tested transport instead of being
+    /// aspirational.
+    fn add_comment_to_pending_review(
+        &self,
+        _pr: &PullRequestDetails,
+        _pending_review_id: u64,
+        _request: NewThreadRequest<'_>,
+    ) -> Result<CreateThreadResponse> {
+        Err(TuicrError::UnsupportedOperation(
+            "this backend has no add_comment_to_pending_review implementation".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]

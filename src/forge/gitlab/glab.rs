@@ -1178,7 +1178,11 @@ pub(super) fn map_glab_error(error: GlabCommandError, host: &str) -> TuicrError 
                     .map(|code| format!("glab exited with status {code}"))
                     .unwrap_or_else(|| "glab command failed".to_string())
             } else {
-                stderr
+                // Defense in depth: see the analogous comment in
+                // `github::gh::map_gh_error` — this fallback embeds raw
+                // stderr verbatim for any error shape not explicitly
+                // recognized above, so scrub known token shapes first.
+                crate::forge::redact_secrets(&stderr)
             };
             TuicrError::Forge(format!("GitLab command failed: {detail}"))
         }
@@ -2351,6 +2355,36 @@ mod tests {
             err.to_string().contains("503") && err.to_string().contains("Service Unavailable"),
             "got: {}",
             err
+        );
+    }
+
+    #[test]
+    fn should_redact_token_shaped_text_from_unrecognized_glab_stderr_fallback() {
+        // Same defense-in-depth as `gh.rs`'s analogous test: a stderr shape
+        // `map_glab_error` doesn't otherwise recognize falls through to the
+        // raw-stderr-embedding branch, which must scrub known token
+        // prefixes rather than ever surfacing one verbatim.
+        let runner = ErrorRunner::default();
+        *runner.run_error.borrow_mut() = Some(GlabCommandError::Failed {
+            status: Some(1),
+            stderr: "glab: unexpected proxy response, header X-Auth-Token: \
+                      glpat-SENTINEL0123456789abcdef was rejected"
+                .to_string(),
+        });
+        let backend = GitLabGlabBackend::with_runner(None, runner);
+        let pr = gitlab_pr();
+        let mapping = serde_json::json!({"id": "123"});
+        let err = backend
+            .set_thread_resolution(&pr, &mapping, true)
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            !message.contains("glpat-SENTINEL"),
+            "token leaked into error message: {message}"
+        );
+        assert!(
+            message.contains("<redacted>"),
+            "expected redaction marker in: {message}"
         );
     }
 

@@ -1,5 +1,6 @@
 //! Durable-thread write operations for GitHub: create a single review
-//! comment/thread, reply to one, and resolve/unresolve a thread.
+//! comment/thread, reply to one, resolve/unresolve a thread, and add an
+//! incremental comment to an already-created pending (draft) review.
 //!
 //! Distinct from `submit.rs`'s batch `create_review` path (pending/draft
 //! review creation): these three calls each act immediately, outside any
@@ -29,6 +30,16 @@
 //!   <https://docs.github.com/en/graphql/reference/mutations#resolvereviewthread>,
 //!   <https://docs.github.com/en/graphql/reference/mutations#unresolvereviewthread>,
 //!   <https://docs.github.com/en/graphql/reference/objects#pullrequestreviewcomment>.
+//! - `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/comments`
+//!   — the plain (non-`in_reply_to`) form of the review-comment create
+//!   endpoint, scoped under a specific `review_id`, is GitHub's documented
+//!   way to add another comment to a pending review that has already been
+//!   created (via `create_review` with no `event`, i.e.
+//!   `SubmitEvent::Draft`) but not yet submitted — see the pending-review
+//!   lifecycle described at
+//!   <https://docs.github.com/en/rest/pulls/reviews?apiVersion=2022-11-28#create-a-review-for-a-pull-request>
+//!   and the comment-create shape at
+//!   <https://docs.github.com/en/rest/pulls/comments?apiVersion=2022-11-28#create-a-review-comment-for-a-pull-request>.
 
 use crate::error::{Result, TuicrError};
 use crate::forge::traits::{
@@ -48,6 +59,34 @@ fn gh_side(side: AnchorSide) -> Result<&'static str> {
                 .to_string(),
         )),
     }
+}
+
+/// Build the anchored-comment JSON payload shared by
+/// [`build_create_thread_request`]'s inline branch and
+/// [`build_add_pending_review_comment_request`]: `body`/`commit_id`/`path`
+/// plus either `line`/`side` (and optional `start_line`/`start_side` for a
+/// range) or `subject_type: "file"` for a whole-file comment.
+fn build_anchor_payload(request: &NewThreadRequest<'_>, path: &str) -> Result<serde_json::Value> {
+    let mut payload = serde_json::json!({
+        "body": request.body,
+        "commit_id": request.commit_id,
+        "path": path,
+    });
+    match request.line {
+        None => {
+            payload["subject_type"] = serde_json::Value::String("file".to_string());
+        }
+        Some(line) => {
+            let side = gh_side(request.side.unwrap_or(AnchorSide::New))?;
+            payload["line"] = serde_json::json!(line);
+            payload["side"] = serde_json::Value::String(side.to_string());
+            if let Some(start_line) = request.range_start {
+                payload["start_line"] = serde_json::json!(start_line);
+                payload["start_side"] = serde_json::Value::String(side.to_string());
+            }
+        }
+    }
+    Ok(payload)
 }
 
 /// Build the `gh api` args + JSON body for [`super::gh::GitHubGhBackend::create_thread`].
@@ -73,26 +112,7 @@ pub(crate) fn build_create_thread_request(
     };
 
     let payload = if let Some(path) = request.path {
-        let mut payload = serde_json::json!({
-            "body": request.body,
-            "commit_id": request.commit_id,
-            "path": path,
-        });
-        match request.line {
-            None => {
-                payload["subject_type"] = serde_json::Value::String("file".to_string());
-            }
-            Some(line) => {
-                let side = gh_side(request.side.unwrap_or(AnchorSide::New))?;
-                payload["line"] = serde_json::json!(line);
-                payload["side"] = serde_json::Value::String(side.to_string());
-                if let Some(start_line) = request.range_start {
-                    payload["start_line"] = serde_json::json!(start_line);
-                    payload["start_side"] = serde_json::Value::String(side.to_string());
-                }
-            }
-        }
-        payload
+        build_anchor_payload(request, path)?
     } else {
         serde_json::json!({ "body": request.body })
     };
@@ -111,6 +131,53 @@ pub(crate) fn build_create_thread_request(
         args.push(pr.repository.host.clone());
     }
     Ok((args, payload_json, is_general))
+}
+
+/// Build the `gh api` args + JSON body for
+/// [`super::gh::GitHubGhBackend::add_comment_to_pending_review`]:
+/// `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/comments`
+/// — "Add a review comment to a pending review" (an already-created but
+/// not-yet-submitted review, per
+/// <https://docs.github.com/en/rest/pulls/reviews?apiVersion=2022-11-28#update-a-review-comment-for-a-pull-request>
+/// and the pending-review lifecycle documented at
+/// <https://docs.github.com/en/rest/pulls/reviews?apiVersion=2022-11-28#create-a-review-for-a-pull-request>).
+/// Distinct from [`build_create_thread_request`]: it targets one specific
+/// pending review by numeric ID instead of posting a standalone comment
+/// outside any review, and (matching the real endpoint) always requires an
+/// anchor — a review-level general comment cannot be added to a pending
+/// review this way, so this returns `Err` up front when `request.path` is
+/// `None` rather than silently falling back to the issue-comments endpoint.
+pub(crate) fn build_add_pending_review_comment_request(
+    pr: &PullRequestDetails,
+    pending_review_id: u64,
+    request: &NewThreadRequest<'_>,
+) -> Result<(Vec<String>, String)> {
+    let path = request.path.ok_or_else(|| {
+        TuicrError::UnsupportedOperation(
+            "GitHub pending-review comments require an anchor (path); a review-level general \
+             comment cannot be added to a pending review this way"
+                .to_string(),
+        )
+    })?;
+    let payload = build_anchor_payload(request, path)?;
+    let payload_json = serde_json::to_string(&payload)?;
+    let endpoint = format!(
+        "repos/{}/{}/pulls/{}/reviews/{}/comments",
+        pr.repository.owner, pr.repository.name, pr.number, pending_review_id
+    );
+    let mut args = vec![
+        "api".to_string(),
+        endpoint,
+        "--method".to_string(),
+        "POST".to_string(),
+        "--input".to_string(),
+        "-".to_string(),
+    ];
+    if pr.repository.host != DEFAULT_GITHUB_HOST {
+        args.push("--hostname".to_string());
+        args.push(pr.repository.host.clone());
+    }
+    Ok((args, payload_json))
 }
 
 /// Parse the REST response shared by both the review-comment and
@@ -567,5 +634,60 @@ mod tests {
             .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("Could not resolve to a node"));
+    }
+
+    #[test]
+    fn should_build_pending_review_comment_request_targeting_review_id() {
+        let request = NewThreadRequest {
+            commit_id: "headsha",
+            body: "incremental pending-review comment",
+            path: Some("src/lib.rs"),
+            line: Some(10),
+            side: Some(AnchorSide::New),
+            range_start: None,
+        };
+        let (args, body) =
+            build_add_pending_review_comment_request(&pr("github.com"), 555, &request)
+                .expect("anchored pending-review comment request should build");
+        assert!(
+            args.iter()
+                .any(|a| a.contains("/pulls/125/reviews/555/comments")),
+            "expected reviews/555/comments endpoint, got {args:?}"
+        );
+        let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(payload["line"], serde_json::json!(10));
+        assert_eq!(payload["side"], serde_json::json!("RIGHT"));
+    }
+
+    #[test]
+    fn should_reject_general_comment_for_pending_review_endpoint() {
+        let request = NewThreadRequest {
+            commit_id: "headsha",
+            body: "general comment",
+            path: None,
+            line: None,
+            side: None,
+            range_start: None,
+        };
+        let err =
+            build_add_pending_review_comment_request(&pr("github.com"), 555, &request).unwrap_err();
+        assert!(matches!(err, TuicrError::UnsupportedOperation(_)));
+    }
+
+    #[test]
+    fn should_include_hostname_for_pending_review_comment_on_enterprise_host() {
+        let request = NewThreadRequest {
+            commit_id: "headsha",
+            body: "enterprise",
+            path: Some("src/lib.rs"),
+            line: Some(1),
+            side: Some(AnchorSide::New),
+            range_start: None,
+        };
+        let (args, _body) =
+            build_add_pending_review_comment_request(&pr("github.example.com"), 1, &request)
+                .expect("request should build for enterprise host");
+        assert!(args.iter().any(|a| a == "--hostname"));
+        assert!(args.iter().any(|a| a == "github.example.com"));
     }
 }

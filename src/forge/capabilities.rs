@@ -133,9 +133,17 @@ pub enum RequestChangesSupport {
     /// Expressed as a reviewer vote value rather than a review state
     /// (Azure DevOps vote `-10`).
     Vote,
-    /// No native state; substitutable with the given explicit behavior
-    /// (GitLab: no request-changes review state, emulated by leaving an
-    /// unresolved discussion thread).
+    /// No native *review-level* state; substitutable with the given
+    /// explicit behavior. GitLab: no review-level `REQUEST_CHANGES` object
+    /// exists (unlike GitHub), but a real, narrower, documented
+    /// `mergeRequestRequestChanges` GraphQL mutation sets the *calling
+    /// user's own per-reviewer* review state to "requested changes" (part
+    /// of GitLab's Merge Request Reviewers feature — see
+    /// `gitlab/glab.rs`'s `create_review`). This requires the caller to
+    /// already be an assigned reviewer and does not, by itself, leave any
+    /// discussion unresolved — it is a genuine (if reviewer-scoped rather
+    /// than review-scoped) provider mutation, not merely "leave a
+    /// discussion open".
     Emulated { substitute: String },
     /// No native state and no reasonable substitute is modeled.
     Unsupported,
@@ -301,8 +309,18 @@ pub fn github() -> ProviderCapabilities {
 }
 
 /// GitLab: discussion-based comments/resolution, no verified pending-review
-/// object (explicit evidence gap), no native request-changes state
-/// (emulated via an unresolved discussion), applyable suggestions.
+/// object (explicit evidence gap). No review-level request-changes state
+/// exists (unlike GitHub); the calling reviewer's own per-reviewer review
+/// state is instead set via the real `mergeRequestRequestChanges` GraphQL
+/// mutation (GitLab's Merge Request Reviewers feature) — narrower than
+/// GitHub's review-level state and requires the caller to already be an
+/// assigned reviewer, but a genuine provider mutation, not merely leaving a
+/// discussion unresolved. Draft notes (this tool's GitLab pending-review
+/// substitute) remain GitLab-native drafts — invisible to other reviewers
+/// and never counted as a real comment — until the *user* manually
+/// publishes them from GitLab's own "Submit review" UI; this tool never
+/// calls GitLab's bulk-publish endpoint itself (see
+/// `gitlab/glab.rs`'s `should_not_publish_draft_notes`).
 pub fn gitlab() -> ProviderCapabilities {
     ProviderCapabilities {
         kind: ForgeKind::GitLab,
@@ -315,8 +333,11 @@ pub fn gitlab() -> ProviderCapabilities {
         // "Not verified as public REST object" per provider-semantics.md.
         pending_review: PendingReviewSupport::unsupported(),
         request_changes: RequestChangesSupport::Emulated {
-            substitute: "open an unresolved discussion thread requesting changes; GitLab has no \
-                         native request-changes review state"
+            substitute: "call the mergeRequestRequestChanges GraphQL mutation, setting the \
+                         calling user's own per-reviewer review state to \"requested changes\" \
+                         (GitLab has no review-level REQUEST_CHANGES state like GitHub's; this \
+                         requires the caller to already be an assigned reviewer and does not \
+                         leave any discussion unresolved by itself)"
                 .to_string(),
         },
         reply: ReplySupport::Native,
@@ -472,11 +493,17 @@ mod tests {
     }
 
     #[test]
-    fn should_emulate_gitlab_request_changes_via_unresolved_discussion() {
+    fn should_emulate_gitlab_request_changes_via_reviewer_state_graphql_mutation() {
         let caps = gitlab();
         match caps.request_changes {
             RequestChangesSupport::Emulated { substitute } => {
-                assert!(substitute.contains("unresolved"));
+                // Truthful per the parity audit: GitLab's request-changes
+                // path calls a real `mergeRequestRequestChanges` GraphQL
+                // mutation (a per-reviewer state), not "leave a discussion
+                // unresolved" — the profile text must say so, matching
+                // `gitlab/glab.rs`'s actual `create_review` implementation.
+                assert!(substitute.contains("mergeRequestRequestChanges"));
+                assert!(!substitute.contains("open an unresolved discussion"));
             }
             other => panic!("expected Emulated, got {other:?}"),
         }

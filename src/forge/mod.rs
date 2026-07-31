@@ -86,6 +86,66 @@ pub fn local_checkout_for_repo(root: &Path, target_repo: &ForgeRepository) -> Op
         .then(|| root.to_path_buf())
 }
 
+/// Known credential-shaped token prefixes GitHub/GitLab issue for personal
+/// access tokens. Neither backend ever reads or constructs a token value
+/// itself (`gh`/`glab` resolve credentials from their own auth state — see
+/// `github::gh`/`gitlab::glab`'s `should_never_leak_environment_token_into_*`
+/// structural regression tests), so in normal operation none of these ever
+/// appear in a command's stderr. This is a defense-in-depth backstop for
+/// the "unmatched error" fallback paths (`github::gh::map_gh_error`,
+/// `gitlab::glab::map_glab_error`) that otherwise embed a CLI's raw stderr
+/// verbatim: if `gh`/`glab` diagnostics ever changed to echo a credential,
+/// it would still never reach a persisted session, a rendered error
+/// message, or a log.
+const KNOWN_TOKEN_PREFIXES: &[&str] = &[
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "glpat-",
+    "glpat_",
+];
+
+fn is_token_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+}
+
+/// Replace every occurrence of a [`KNOWN_TOKEN_PREFIXES`] entry (at a token
+/// boundary — not embedded mid-word) through the end of the run of
+/// token-shaped characters that follows it with `<redacted>`. Everything
+/// else, including surrounding text/whitespace/punctuation, passes through
+/// unchanged.
+pub(crate) fn redact_secrets(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let at_boundary = i == 0 || !is_token_char(bytes[i - 1]);
+        let matched = at_boundary
+            .then(|| {
+                KNOWN_TOKEN_PREFIXES
+                    .iter()
+                    .find(|prefix| text[i..].starts_with(**prefix))
+            })
+            .flatten();
+        if let Some(prefix) = matched {
+            let mut end = i + prefix.len();
+            while end < text.len() && is_token_char(bytes[end]) {
+                end += 1;
+            }
+            out.push_str("<redacted>");
+            i = end;
+        } else {
+            let ch = text[i..].chars().next().expect("i < text.len()");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +155,32 @@ mod tests {
         let repo = Repository::init(dir.path()).expect("init repo");
         repo.remote("origin", url).expect("add origin");
         dir
+    }
+
+    #[test]
+    fn should_redact_github_and_gitlab_token_prefixes_leaving_surrounding_text_intact() {
+        let input = "gh: HTTP 500: token ghp_abcDEF0123456789abcdefABCDEF012345 rejected \
+                     by proxy for glpat-XyZ_0123456789abcdef";
+        let redacted = redact_secrets(input);
+        assert!(!redacted.contains("ghp_"));
+        assert!(!redacted.contains("glpat-"));
+        assert_eq!(redacted.matches("<redacted>").count(), 2);
+        assert!(redacted.starts_with("gh: HTTP 500: token <redacted> rejected by proxy for "));
+    }
+
+    #[test]
+    fn should_not_redact_text_that_merely_contains_a_prefix_mid_word() {
+        // `is_token_char` boundary check: a prefix embedded inside a larger
+        // identifier (not preceded by a non-token-char boundary) is not a
+        // real token occurrence and must pass through untouched.
+        let input = "xghp_not_a_real_token_boundary";
+        assert_eq!(redact_secrets(input), input);
+    }
+
+    #[test]
+    fn should_leave_ordinary_error_text_completely_unchanged() {
+        let input = "HTTP 403: Resource not accessible by integration";
+        assert_eq!(redact_secrets(input), input);
     }
 
     #[test]

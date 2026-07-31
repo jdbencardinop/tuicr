@@ -1048,12 +1048,18 @@ mod tests {
     }
 
     #[test]
-    fn should_emulate_gitlab_request_changes_as_unresolved_discussion() {
+    fn should_emulate_gitlab_request_changes_via_reviewer_state_graphql_mutation() {
         let session = session_with_threads(vec![]);
         let plan = plan_publication(&session, &gitlab(), Some(SubmitEvent::RequestChanges));
         match &plan.operations[0].outcome {
             OperationOutcome::Emulated { substitute } => {
-                assert!(substitute.contains("unresolved"));
+                // Truthful per the parity audit (§3/§8): dry-run's message
+                // must describe the real `mergeRequestRequestChanges`
+                // GraphQL mutation `glab.rs`'s `create_review` actually
+                // sends, not a fictional "leave an unresolved discussion"
+                // substitute.
+                assert!(substitute.contains("mergeRequestRequestChanges"));
+                assert!(!substitute.contains("open an unresolved discussion"));
             }
             other => panic!("expected Emulated, got {other:?}"),
         }

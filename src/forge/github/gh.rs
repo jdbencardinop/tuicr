@@ -568,6 +568,40 @@ where
         updated["is_resolved"] = serde_json::Value::Bool(is_resolved);
         Ok(updated)
     }
+
+    fn add_comment_to_pending_review(
+        &self,
+        pr: &PullRequestDetails,
+        pending_review_id: u64,
+        request: NewThreadRequest<'_>,
+    ) -> Result<CreateThreadResponse> {
+        let (args, payload_json) = super::mutations::build_add_pending_review_comment_request(
+            pr,
+            pending_review_id,
+            &request,
+        )?;
+        let output = self
+            .runner
+            .run_with_stdin(&args, &payload_json)
+            .map_err(|err| map_create_review_error(err, &pr.repository.host))?;
+        let (comment_id, comment_node_id) =
+            super::mutations::parse_create_comment_response(&output)?;
+
+        // A pending-review comment is anchored (build_add_pending_review_
+        // comment_request refuses a general/no-path request), so it always
+        // has an owning thread once GitHub materializes one.
+        let lookup_args = super::mutations::build_thread_lookup_args(pr, &comment_node_id);
+        let lookup_output = self
+            .run_gh(lookup_args, &pr.repository.host)
+            .unwrap_or_default();
+        let thread = super::mutations::parse_thread_lookup_response(&lookup_output).unwrap_or(None);
+
+        Ok(super::mutations::build_create_thread_response(
+            comment_id,
+            &comment_node_id,
+            thread,
+        ))
+    }
 }
 
 impl<R> GitHubGhBackend<R>
@@ -929,7 +963,12 @@ fn map_gh_error(error: GhCommandError, host: &str) -> TuicrError {
                     .map(|code| format!("gh exited with status {code}"))
                     .unwrap_or_else(|| "gh command failed".to_string())
             } else {
-                stderr
+                // Defense in depth: `gh` diagnostics should never echo a
+                // credential, but this fallback embeds raw stderr verbatim
+                // for any error shape we don't explicitly recognize above,
+                // so scrub known token shapes before it can reach a
+                // rendered message or a persisted session.
+                crate::forge::redact_secrets(&stderr)
             };
             TuicrError::Forge(format!("GitHub command failed: {detail}"))
         }
@@ -2464,6 +2503,8 @@ Match host github-work
             let mapping = serde_json::json!({"id": "PRRT_1", "root_comment_id": "111"});
             let _ = backend.reply_to_thread(&details, &mapping, "on it");
             let _ = backend.set_thread_resolution(&details, &mapping, true);
+            let _ =
+                backend.add_comment_to_pending_review(&details, 555, thread_request("also fix"));
 
             for call in backend.runner.calls.borrow().iter() {
                 for arg in call {
@@ -2483,5 +2524,120 @@ Match host github-work
                 );
             }
         });
+    }
+
+    const PENDING_REVIEW_COMMENT_RESPONSE_JSON: &str = r##"{
+        "id": 987654,
+        "node_id": "PRRC_pending1"
+    }"##;
+
+    #[test]
+    fn should_add_comment_to_pending_review_via_reviews_id_comments_endpoint() {
+        let runner = FakeGhRunner::default();
+        *runner.stdin_response.borrow_mut() =
+            Some(PENDING_REVIEW_COMMENT_RESPONSE_JSON.to_string());
+        let backend = GitHubGhBackend::with_runner(Some(repo()), runner);
+        let details = backend
+            .get_pull_request(parse_pull_request_target("125").unwrap())
+            .unwrap();
+        let response = backend
+            .add_comment_to_pending_review(&details, 555, thread_request("please fix"))
+            .expect("pending-review comment should succeed");
+        assert_eq!(response.root_comment_id, "987654");
+        assert!(
+            backend
+                .runner
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.iter().any(|a| a.contains("/reviews/555/comments"))),
+            "expected a call targeting reviews/555/comments"
+        );
+    }
+
+    #[test]
+    fn should_reject_general_comment_when_adding_to_pending_review() {
+        let runner = FakeGhRunner::default();
+        let backend = GitHubGhBackend::with_runner(Some(repo()), runner);
+        let details = backend
+            .get_pull_request(parse_pull_request_target("125").unwrap())
+            .unwrap();
+        let general = NewThreadRequest {
+            commit_id: "abcdef1234567890",
+            body: "general",
+            path: None,
+            line: None,
+            side: None,
+            range_start: None,
+        };
+        let err = backend
+            .add_comment_to_pending_review(&details, 555, general)
+            .unwrap_err();
+        assert!(matches!(err, TuicrError::UnsupportedOperation(_)));
+        // Never even attempted a network call (beyond the earlier
+        // `get_pull_request` fetch above) for a request the real endpoint
+        // would reject.
+        assert!(
+            !backend
+                .runner
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.iter().any(|a| a.contains("/reviews/555/comments"))),
+            "should never have called the reviews/555/comments endpoint"
+        );
+    }
+
+    #[test]
+    fn should_map_401_bad_credentials_during_add_comment_to_pending_review() {
+        let runner = FakeGhRunner::default();
+        *runner.stdin_error.borrow_mut() = Some(GhCommandError::Failed {
+            status: Some(1),
+            stderr: "gh: Bad credentials (HTTP 401)".to_string(),
+        });
+        let backend = GitHubGhBackend::with_runner(Some(repo()), runner);
+        let details = backend
+            .get_pull_request(parse_pull_request_target("125").unwrap())
+            .unwrap();
+        let err = backend
+            .add_comment_to_pending_review(&details, 555, thread_request("please fix"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("GitHub authentication failed"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn should_redact_token_shaped_text_from_unrecognized_gh_stderr_fallback() {
+        // A stderr shape `map_gh_error` doesn't otherwise recognize (not
+        // auth, not permission, not a known conflict) falls through to the
+        // raw-stderr-embedding branch. Prove that branch scrubs known token
+        // prefixes rather than ever surfacing one verbatim, even though
+        // `gh` itself never actually echoes credentials in practice.
+        let runner = FakeGhRunner::default();
+        *runner.stdin_error.borrow_mut() = Some(GhCommandError::Failed {
+            status: Some(22),
+            stderr: "gh: unexpected proxy response, header X-Auth-Token: \
+                      ghp_SENTINEL0123456789abcdefABCDEF01234567 was rejected"
+                .to_string(),
+        });
+        let backend = GitHubGhBackend::with_runner(Some(repo()), runner);
+        let details = backend
+            .get_pull_request(parse_pull_request_target("125").unwrap())
+            .unwrap();
+        let err = backend
+            .add_comment_to_pending_review(&details, 555, thread_request("please fix"))
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            !message.contains("ghp_SENTINEL"),
+            "token leaked into error message: {message}"
+        );
+        assert!(
+            message.contains("<redacted>"),
+            "expected redaction marker in: {message}"
+        );
     }
 }

@@ -193,6 +193,38 @@ pub struct GlabDiscussion {
     pub notes: Vec<GlabNote>,
 }
 
+/// Convert `notes` (already filtered/ordered so `notes[0]` is the thread
+/// root) into [`RemoteReviewComment`]s, populating `in_reply_to` with
+/// thread-grouping semantics: GitLab discussions are flat (every note in a
+/// discussion belongs to the same thread; there is no nested reply-to-a
+/// -specific-reply structure), so every non-root note's `in_reply_to`
+/// points at the root note's own ID — mirroring how GitHub's GraphQL
+/// `replyTo` also always resolves to the thread's original comment even
+/// for a reply to a reply (see `github/review_threads.rs`'s
+/// `should_parse_multi_comment_thread_with_replies`, where the second and
+/// third comments both carry `in_reply_to: Some("PRRC_1")`). Root/reply
+/// *order* was already preserved by relying on `notes`' own array order
+/// (GitLab returns notes in creation order); this only fixes the
+/// previously-hardcoded `in_reply_to: None` on every note.
+fn notes_into_comments(notes: Vec<GlabNote>) -> Vec<RemoteReviewComment> {
+    let root_id = notes.first().map(|n| n.id.to_string());
+    notes
+        .into_iter()
+        .enumerate()
+        .map(|(index, note)| {
+            let in_reply_to = if index == 0 { None } else { root_id.clone() };
+            RemoteReviewComment {
+                id: note.id.to_string(),
+                author: Some(note.author.username),
+                body: note.body,
+                created_at: note.created_at,
+                in_reply_to,
+                url: String::new(),
+            }
+        })
+        .collect()
+}
+
 impl GlabDiscussion {
     pub fn into_review_thread(self) -> Option<RemoteReviewThread> {
         let root = self.notes.first()?;
@@ -203,22 +235,15 @@ impl GlabDiscussion {
             if root.system || root.body.is_empty() {
                 return None;
             }
-            let comments = self
+            let notes: Vec<GlabNote> = self
                 .notes
                 .into_iter()
                 .filter(|n| !n.system && !n.body.is_empty())
-                .map(|note| RemoteReviewComment {
-                    id: note.id.to_string(),
-                    author: Some(note.author.username),
-                    body: note.body,
-                    created_at: note.created_at,
-                    in_reply_to: None,
-                    url: String::new(),
-                })
-                .collect::<Vec<_>>();
-            if comments.is_empty() {
+                .collect();
+            if notes.is_empty() {
                 return None;
             }
+            let comments = notes_into_comments(notes);
             return Some(RemoteReviewThread {
                 id: self.id,
                 path: String::new(),
@@ -258,18 +283,7 @@ impl GlabDiscussion {
         }
 
         let is_resolved = root.resolved;
-        let comments = self
-            .notes
-            .into_iter()
-            .map(|note| RemoteReviewComment {
-                id: note.id.to_string(),
-                author: Some(note.author.username),
-                body: note.body,
-                created_at: note.created_at,
-                in_reply_to: None,
-                url: String::new(),
-            })
-            .collect();
+        let comments = notes_into_comments(self.notes);
 
         Some(RemoteReviewThread {
             id: self.id,
@@ -496,5 +510,69 @@ mod tests {
             }],
         };
         assert!(discussion.into_review_thread().is_none());
+    }
+
+    fn note(id: u64, body: &str, username: &str) -> GlabNote {
+        GlabNote {
+            id,
+            body: body.to_string(),
+            author: GlabNoteAuthor {
+                username: username.to_string(),
+                name: username.to_string(),
+            },
+            created_at: None,
+            commit_id: None,
+            position: None,
+            resolved: false,
+            system: false,
+        }
+    }
+
+    #[test]
+    fn should_group_positional_discussion_replies_under_root_note_id() {
+        // Mandatory constraint (parity audit §3): GitLab discussions are
+        // flat — every reply in a discussion belongs to the same thread,
+        // so `in_reply_to` must point at the root note's own ID for every
+        // note after the first, never hardcoded `None`.
+        let mut root = note(300, "please fix this", "reviewer");
+        root.position = Some(GlabNotePosition {
+            position_type: "text".to_string(),
+            head_sha: None,
+            new_path: Some("src/lib.rs".to_string()),
+            new_line: Some(10),
+            old_path: None,
+            old_line: None,
+        });
+        let discussion = GlabDiscussion {
+            id: "disc-5".to_string(),
+            individual_note: false,
+            notes: vec![
+                root,
+                note(301, "on it", "author"),
+                note(302, "done, please re-check", "author"),
+            ],
+        };
+        let thread = discussion.into_review_thread().unwrap();
+        assert_eq!(thread.comments.len(), 3);
+        assert_eq!(thread.comments[0].id, "300");
+        assert_eq!(thread.comments[0].in_reply_to, None);
+        assert_eq!(thread.comments[1].in_reply_to.as_deref(), Some("300"));
+        assert_eq!(thread.comments[2].in_reply_to.as_deref(), Some("300"));
+    }
+
+    #[test]
+    fn should_group_individual_note_discussion_replies_under_root_note_id() {
+        let discussion = GlabDiscussion {
+            id: "disc-6".to_string(),
+            individual_note: true,
+            notes: vec![
+                note(400, "overall looks good", "reviewer"),
+                note(401, "thanks!", "author"),
+            ],
+        };
+        let thread = discussion.into_review_thread().unwrap();
+        assert_eq!(thread.comments.len(), 2);
+        assert_eq!(thread.comments[0].in_reply_to, None);
+        assert_eq!(thread.comments[1].in_reply_to.as_deref(), Some("400"));
     }
 }

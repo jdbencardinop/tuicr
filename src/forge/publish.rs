@@ -330,19 +330,33 @@ mod tests {
     }
 
     fn session_with_thread(thread: crate::model::thread_store::PersistedThread) -> ReviewSession {
+        session_with_threads(vec![thread])
+    }
+
+    fn session_with_threads(
+        threads: Vec<crate::model::thread_store::PersistedThread>,
+    ) -> ReviewSession {
         let mut session = ReviewSession::new(
             PathBuf::from("/repo"),
             "base".to_string(),
             None,
             SessionDiffSource::default(),
         );
-        session.threads.push(thread);
+        session.threads = threads;
         session
     }
 
     fn open_local_thread() -> crate::model::thread_store::PersistedThread {
-        let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
-        let root = ThreadComment::new(ThreadAuthor::human("alice"), "please fix this");
+        open_local_thread_at("src/a.rs", 10, "please fix this")
+    }
+
+    fn open_local_thread_at(
+        path: &str,
+        line: u32,
+        body: &str,
+    ) -> crate::model::thread_store::PersistedThread {
+        let anchor = Anchor::line(path, AnchorSide::New, line);
+        let root = ThreadComment::new(ThreadAuthor::human("alice"), body);
         crate::model::thread_store::PersistedThread::new(Thread::open(anchor, root))
     }
 
@@ -789,6 +803,121 @@ mod tests {
                 .results
                 .iter()
                 .any(|r| matches!(r, ExecutedOperation::Skipped(op) if matches!(op.op, OperationKind::Resolve)))
+        );
+    }
+
+    #[test]
+    fn should_dismiss_thread_via_the_same_resolution_call_as_resolve() {
+        // Exhaustive operation-graph mapping proof (mandatory constraint
+        // 5): every `OperationKind` variant must have a proven, exercised
+        // executor path. `CreateThread`/`Reply`/`Resolve`/`Reopen`/
+        // `SubmitReview` each already have a dedicated scenario test above;
+        // this is `Dismiss`'s — it shares `Resolve`'s provider call (no
+        // distinct native "won't fix" state exists on GitHub or GitLab),
+        // so completing it must still durably record `is_resolved: true`.
+        let runner = ScriptedGhRunner::default()
+            .queue(GH_CREATE_COMMENT)
+            .queue(GH_THREAD_LOOKUP)
+            .queue(GH_RESOLVE);
+        let backend = GitHubGhBackend::with_runner(None, runner);
+        let pr = pr(ForgeKind::GitHub);
+
+        let mut thread = open_local_thread();
+        thread.thread.dismiss();
+        let mut session = session_with_thread(thread);
+
+        let plan = plan_publication(&session, &capabilities::github(), None);
+        assert!(
+            plan.operations
+                .iter()
+                .any(|op| matches!(op.op, OperationKind::Dismiss)),
+            "expected a planned Dismiss operation, got {plan:?}"
+        );
+        let report = execute_plan(&backend, &pr, &mut session, &plan, "");
+        assert!(report.is_success(), "{report:?}");
+        assert_eq!(report.completed().count(), 2, "CreateThread + Dismiss");
+        assert_eq!(
+            session.threads[0].provider_mapping("github").unwrap()["is_resolved"],
+            true
+        );
+    }
+
+    #[test]
+    fn should_resume_gitlab_one_at_a_time_prefix_failure_without_reposting_created_threads() {
+        // Mandatory constraint 6: GitLab posts each thread as its own
+        // `/discussions` call (no single ambiguous batch endpoint the way
+        // GitHub's legacy `create_review` has) — a mid-loop failure must
+        // leave an unambiguous, provider-ID-backed per-op state: threads
+        // already created (a "prefix" of the plan) are durably mapped, and
+        // a retry replans only the threads still missing a mapping,
+        // resuming exactly at the failure point without re-posting the
+        // already-created prefix.
+        let thread_a_created = serde_json::json!({
+            "id": "disc-a",
+            "individual_note": false,
+            "notes": [{"id": 1, "body": "fix a", "resolved": false}],
+        })
+        .to_string();
+
+        let runner = ScriptedGlabRunner::default()
+            .queue(&thread_a_created) // thread A's CreateThread succeeds
+            .queue_err(); // thread B's CreateThread fails (simulated 5xx)
+        let backend = GitLabGlabBackend::with_runner(None, runner);
+        let pr = pr(ForgeKind::GitLab);
+
+        let thread_a = open_local_thread_at("src/a.rs", 10, "fix a");
+        let thread_b = open_local_thread_at("src/b.rs", 20, "fix b");
+        let mut session = session_with_threads(vec![thread_a, thread_b]);
+
+        let plan = plan_publication(&session, &capabilities::gitlab(), None);
+        assert_eq!(plan.operations.len(), 2, "two independent CreateThreads");
+        let first = execute_plan(&backend, &pr, &mut session, &plan, "");
+        assert!(!first.is_success());
+        assert_eq!(
+            first.completed().count(),
+            1,
+            "thread A's CreateThread should have completed before thread B's failed"
+        );
+
+        // Thread A's provider mapping is durably recorded — a naive retry
+        // must not re-post it as a duplicate discussion.
+        assert_eq!(
+            session.threads[0].provider_mapping("gitlab").unwrap()["id"],
+            "disc-a"
+        );
+        assert!(session.threads[1].provider_mapping("gitlab").is_none());
+
+        // Resume: re-plan against the partially-updated session (thread A
+        // is now skipped; only thread B's CreateThread remains) and retry.
+        let thread_b_created = serde_json::json!({
+            "id": "disc-b",
+            "individual_note": false,
+            "notes": [{"id": 2, "body": "fix b", "resolved": false}],
+        })
+        .to_string();
+        let retry_runner = ScriptedGlabRunner::default().queue(&thread_b_created);
+        let retry_backend = GitLabGlabBackend::with_runner(None, retry_runner);
+        let resume_plan = plan_publication(&session, &capabilities::gitlab(), None);
+        assert_eq!(
+            resume_plan.operations.len(),
+            1,
+            "only thread B's CreateThread should remain planned"
+        );
+        assert_eq!(
+            resume_plan.operations[0].thread_id.as_deref(),
+            Some(session.threads[1].id().as_str())
+        );
+        let second = execute_plan(&retry_backend, &pr, &mut session, &resume_plan, "");
+        assert!(second.is_success(), "{second:?}");
+        assert_eq!(
+            session.threads[1].provider_mapping("gitlab").unwrap()["id"],
+            "disc-b"
+        );
+        // Thread A's mapping from the first attempt is untouched — never
+        // resent.
+        assert_eq!(
+            session.threads[0].provider_mapping("gitlab").unwrap()["id"],
+            "disc-a"
         );
     }
 }
