@@ -31,13 +31,52 @@ tools present in the packaging environment.
   binary/text distinction in scan coverage to misrepresent.
 - Secret-shaped patterns checked (see `SECRET_SCAN_PATTERNS` /
   `SECRET_SCAN_PATTERN_IDS` in the script for the exact regexes): GitHub
-  classic PAT (`ghp_`), GitHub other prefixes (`gho_`/`ghs_`/`ghu_`/`ghe_`),
-  GitHub fine-grained PAT (`github_pat_`), GitLab PAT (`glpat-`), AWS access
-  key ID (`AKIA...`), Slack token (`xox[baprs]-...`), PEM private key
-  header. The GitHub/GitLab patterns are open-ended (`{36,}`, `{20,}`, not a
-  fixed `{36}`/`{20}`) so a match captures a full contiguous token rather
-  than silently truncating a longer real value to a prefix, which would
-  otherwise make exact-value allowlist comparison unreliable.
+  classic PAT (`ghp_`), GitHub other prefixes (`gho_`/`ghs_`/`ghu_`/`ghr_`,
+  plus `ghe_` kept as extra defense-in-depth margin), GitHub fine-grained
+  PAT (`github_pat_`), GitLab PAT (`glpat-` **or** `glpat_`, matched by a
+  single `glpat[-_]...` pattern), AWS access key ID (`AKIA...`), Slack
+  token (`xox[baprs]-...`), PEM private key header. The GitHub/GitLab
+  patterns are open-ended (`{36,}`, `{20,}`, not a fixed `{36}`/`{20}`) so a
+  match captures a full contiguous token rather than silently truncating a
+  longer real value to a prefix, which would otherwise make exact-value
+  allowlist comparison unreliable.
+
+## Prefix synchronization contract
+
+`SECRET_SCAN_PATTERNS`' GitHub/GitLab coverage exists to catch every
+credential shape in `KNOWN_TOKEN_PREFIXES` (`src/forge/mod.rs`) -- the
+app's own defense-in-depth redaction prefix list used by `redact_secrets()`.
+A hand-maintained regex list next to a hand-maintained Rust array can
+silently drift (a prefix added to one and not the other) without any
+review noticing, since neither list fails to compile or run on its own.
+
+To prevent that, the script keeps `SECRET_SCAN_KNOWN_TOKEN_PREFIXES`, a
+manual mirror of `KNOWN_TOKEN_PREFIXES`, and `self_test_secret_scan()`
+enforces, **every time packaging runs, before any real scan result is
+trusted**:
+
+1. **Sync check**: `_secret_scan_extract_source_prefixes()` parses the
+   literal `KNOWN_TOKEN_PREFIXES` array directly out of the tracked
+   `src/forge/mod.rs` and compares it (as a set) against
+   `SECRET_SCAN_KNOWN_TOKEN_PREFIXES`. Any difference -- a prefix added,
+   removed, or renamed in the Rust source without a matching update here --
+   aborts packaging (`die`) with an explicit message naming both files to
+   update.
+2. **Coverage check**: once the two lists are confirmed identical, the
+   self-test builds one synthetic, non-allowlisted, binary-embedded token
+   per prefix (fragment-split at runtime so no full token literal ever
+   appears contiguously in tracked source) and asserts
+   `_secret_scan_detect` actually flags every single one. This catches the
+   case where a prefix is correctly added to the mirror list but
+   `SECRET_SCAN_PATTERNS`' regexes were not actually updated to match it
+   (e.g. a bracket character class missing a letter).
+
+If either check fails, packaging aborts before any build or archive is
+created -- a scanner whose prefix coverage cannot be proven should not be
+trusted to gate a release. Whenever `KNOWN_TOKEN_PREFIXES` changes in
+`src/forge/mod.rs`, a maintainer must update, in the same change:
+`SECRET_SCAN_KNOWN_TOKEN_PREFIXES`, `SECRET_SCAN_PATTERNS` (so the new
+prefix is actually matched), and this table.
 
 ## Report contents: filenames + categories only, never values
 
@@ -176,6 +215,14 @@ positive on the clean file, or a false negative (binary-skip regression) on
 the dirty file -- packaging aborts immediately (`die`), because a
 scanning mechanism that hasn't been shown to work should not be trusted to
 gate a release.
+
+`self_test_secret_scan()` then runs the two additional checks described in
+"Prefix synchronization contract" above: confirming
+`SECRET_SCAN_KNOWN_TOKEN_PREFIXES` matches `KNOWN_TOKEN_PREFIXES` in
+`src/forge/mod.rs`, and confirming a synthetic, non-allowlisted,
+runtime-assembled token for *every one* of those prefixes (including
+`ghr_` and `glpat_`) is independently detected -- not just the single
+`ghp_` example above.
 
 ## Fail-closed behavior
 

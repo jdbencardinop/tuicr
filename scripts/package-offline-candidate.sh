@@ -310,12 +310,34 @@ SECRET_SCAN_PATTERN_IDS=(
 )
 SECRET_SCAN_PATTERNS=(
   'ghp_[0-9A-Za-z]{36,}'
-  'gh[oesu]_[0-9A-Za-z]{36,}'
+  'gh[oesur]_[0-9A-Za-z]{36,}'
   'github_pat_[0-9A-Za-z_]{22,}'
-  'glpat-[0-9A-Za-z_-]{20,}'
+  'glpat[-_][0-9A-Za-z_-]{20,}'
   'AKIA[0-9A-Z]{16}'
   'xox[baprs]-[0-9A-Za-z-]{10,}'
   '-----BEGIN[A-Z ]*PRIVATE KEY-----'
+)
+
+# Single documented source of truth for which credential-shaped *prefixes*
+# the patterns above must cover: this list is a manually-kept mirror of
+# `KNOWN_TOKEN_PREFIXES` in `src/forge/mod.rs` (the app's own defense-in-depth
+# redaction prefix list). It exists so the two lists can be verified
+# byte-for-byte identical, and so every prefix can be proven actually
+# detected, every time this script runs -- see
+# `_secret_scan_check_prefix_sync()` in `self_test_secret_scan()` below. If
+# `src/forge/mod.rs` ever adds, removes, or renames a prefix without this
+# array (and the patterns above) being updated to match, packaging fails
+# loudly instead of silently losing scan coverage. See
+# docs/offline-candidate/SECRET-SCAN.md's "Prefix synchronization contract".
+SECRET_SCAN_KNOWN_TOKEN_PREFIXES=(
+  'ghp_'
+  'gho_'
+  'ghu_'
+  'ghs_'
+  'ghr_'
+  'github_pat_'
+  'glpat-'
+  'glpat_'
 )
 
 # Narrow, exact-value allowlist. Every entry here is a complete, literal
@@ -390,10 +412,45 @@ _secret_scan_detect() {
   done < <(find "$scan_root" -type f ! -path '*/.git/*' -print0)
 }
 
+# Extracts the `KNOWN_TOKEN_PREFIXES` string literals from
+# src/forge/mod.rs (the app's own defense-in-depth redaction prefix list),
+# in the exact form used in that Rust source. Used by
+# `self_test_secret_scan` to prove `SECRET_SCAN_KNOWN_TOKEN_PREFIXES` above
+# has not silently drifted out of sync with it.
+_secret_scan_extract_source_prefixes() {
+  python3 - "$ROOT_DIR/src/forge/mod.rs" <<'PYEOF'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    text = f.read()
+
+match = re.search(
+    r"const KNOWN_TOKEN_PREFIXES:\s*&\[&str\]\s*=\s*&\[(.*?)\];",
+    text,
+    re.DOTALL,
+)
+if not match:
+    print("ERROR: could not find KNOWN_TOKEN_PREFIXES in src/forge/mod.rs", file=sys.stderr)
+    sys.exit(1)
+
+for literal in re.findall(r'"([^"]*)"', match.group(1)):
+    print(literal)
+PYEOF
+}
+
 # Proves the scanner is byte-aware (does not silently skip binary files, the
 # bug this hardening round fixes) and that the allowlist is genuinely narrow
 # (a brand-new synthetic secret-shaped value is NOT waved through), before
 # any real scan result is trusted. Aborts packaging if either check fails.
+#
+# Also proves prefix coverage cannot silently drift: `_secret_scan_check_
+# prefix_sync` below asserts `SECRET_SCAN_KNOWN_TOKEN_PREFIXES` is byte-for-
+# byte identical (as a set) to `KNOWN_TOKEN_PREFIXES` in src/forge/mod.rs,
+# then proves every single one of those prefixes is actually detected by
+# SECRET_SCAN_PATTERNS via a synthetic non-allowlisted payload -- not just
+# documented as covered.
 self_test_secret_scan() {
   local test_root="$WORK_DIR/self-test-secret-scan"
   rm -rf "$test_root"
@@ -426,6 +483,37 @@ self_test_secret_scan() {
 
   rm -rf "$test_root"
   log "secret-scan self-test passed: dummy binary with a synthetic non-allowlisted token is flagged, clean dummy binary is not"
+
+  # ---- Prefix synchronization + per-prefix detection coverage check -------
+  local source_prefixes mirror_sorted source_sorted
+  source_prefixes="$(_secret_scan_extract_source_prefixes)"
+  mirror_sorted="$(printf '%s\n' "${SECRET_SCAN_KNOWN_TOKEN_PREFIXES[@]}" | sort)"
+  source_sorted="$(printf '%s\n' "$source_prefixes" | sort)"
+  [[ "$mirror_sorted" == "$source_sorted" ]] \
+    || die "secret-scan self-test failed: SECRET_SCAN_KNOWN_TOKEN_PREFIXES in this script no longer matches KNOWN_TOKEN_PREFIXES in src/forge/mod.rs (prefix list drift). Update both SECRET_SCAN_KNOWN_TOKEN_PREFIXES and SECRET_SCAN_PATTERNS above to cover every current prefix, then update docs/offline-candidate/SECRET-SCAN.md."
+
+  local prefix_test_root="$WORK_DIR/self-test-secret-scan-prefixes"
+  rm -rf "$prefix_test_root"
+  mkdir -p "$prefix_test_root"
+  # Same fragment-split technique as above: the filler body is a plain,
+  # non-secret-shaped array element on its own, and is only concatenated
+  # with a real credential prefix at runtime into a scratch file that is
+  # never committed -- so no prefix+full-token literal ever appears
+  # contiguously in this script's own tracked source.
+  local prefix_test_body="SELFTESTPREFIXCOVERAGENOTREALTOKEN1234567890"
+  local prefix idx=0 file
+  for prefix in "${SECRET_SCAN_KNOWN_TOKEN_PREFIXES[@]}"; do
+    idx=$((idx + 1))
+    file="$prefix_test_root/prefix-$idx.bin"
+    printf '\x00\x01\x02\x03binary-blob-marker\x00\x01\x02' > "$file"
+    printf '%s%s' "$prefix" "$prefix_test_body" >> "$file"
+    if [[ -z "$(_secret_scan_detect "$prefix_test_root")" ]]; then
+      die "secret-scan self-test failed: a synthetic non-allowlisted token using known credential prefix '$prefix' (from KNOWN_TOKEN_PREFIXES in src/forge/mod.rs) was NOT detected by any SECRET_SCAN_PATTERNS regex; the scanner has a real prefix-coverage gap. Update SECRET_SCAN_PATTERNS above so every prefix in SECRET_SCAN_KNOWN_TOKEN_PREFIXES is actually matched."
+    fi
+    rm -f "$file"
+  done
+  rm -rf "$prefix_test_root"
+  log "secret-scan prefix-coverage self-test passed: SECRET_SCAN_KNOWN_TOKEN_PREFIXES matches src/forge/mod.rs's KNOWN_TOKEN_PREFIXES (${#SECRET_SCAN_KNOWN_TOKEN_PREFIXES[@]} prefixes), and each one is independently detected"
 }
 
 run_secret_scan() {
@@ -903,7 +991,7 @@ manifest = {
                 "the narrow, exact-value SECRET_SCAN_ALLOWLIST. See "
                 "docs/offline-candidate/SECRET-SCAN.md."
             ),
-            "self_test": "passed (dummy binary with synthetic non-allowlisted token flagged; clean dummy binary not flagged)",
+            "self_test": "passed (dummy binary with synthetic non-allowlisted token flagged; clean dummy binary not flagged; SECRET_SCAN_KNOWN_TOKEN_PREFIXES verified in sync with src/forge/mod.rs's KNOWN_TOKEN_PREFIXES and every prefix independently detected)",
             "report_file": "manifest/SECRET-SCAN.md",
             "design_doc": "docs/offline-candidate/SECRET-SCAN.md",
         },

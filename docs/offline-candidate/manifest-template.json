@@ -47,7 +47,7 @@
     },
     "secret_scan": {
       "method": "Byte-aware (grep -a, never grep -I) explicit per-file scan of every regular file under the clean source checkout and each staged archive directory (including the compiled binary), run BEFORE tar packaging; fails packaging (die) on any match not in the narrow, exact-value SECRET_SCAN_ALLOWLIST. See docs/offline-candidate/SECRET-SCAN.md.",
-      "self_test": "passed (dummy binary with synthetic non-allowlisted token flagged; clean dummy binary not flagged)",
+      "self_test": "passed (dummy binary with synthetic non-allowlisted token flagged; clean dummy binary not flagged; SECRET_SCAN_KNOWN_TOKEN_PREFIXES verified in sync with src/forge/mod.rs's KNOWN_TOKEN_PREFIXES and every prefix independently detected)",
       "report_file": "manifest/SECRET-SCAN.md",
       "design_doc": "docs/offline-candidate/SECRET-SCAN.md"
     }
