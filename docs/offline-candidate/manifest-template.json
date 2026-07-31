@@ -1,0 +1,85 @@
+{
+  "$comment": "Template/example for the manifest.json produced by scripts/package-offline-candidate.sh. The script fills every @@PLACEHOLDER@@ and repeats the `artifacts` entry once per built platform. This file itself is never shipped inside an archive; it documents the manifest's shape for reviewers.",
+  "manifest_schema_version": 1,
+  "generated_at_utc": "@@PACKAGED_AT@@",
+  "release_readiness": "OFFLINE_VALIDATED_ONLY",
+  "not_release_ready_because": [
+    "no live provider (GitHub/GitLab/Azure DevOps/Gitea/Forgejo) write validation was performed producing this archive",
+    "no real Ubuntu-under-WSL validation was performed; the Linux artifact is a pinned-container build/smoke, not a WSL pass",
+    "no Git tag, push, or GitHub Release was created",
+    "Cargo.toml repository/crate/binary identity is still unmodified upstream (agavra/tuicr); the packaged binary's automatic startup update-check phones home to crates.io by default, and its `tuicr update`/package-manager upgrade targets still resolve to real upstream, so running them would silently self-replace this fork binary (see docs/offline-candidate/README.md and the bundled config.no-update-check.toml sample)"
+  ],
+  "source": {
+    "repository_remote": "@@REPO_REMOTE@@",
+    "branch": "@@SOURCE_BRANCH@@",
+    "commit_full": "@@SOURCE_SHA_FULL@@",
+    "commit_short": "@@SOURCE_SHA_SHORT@@",
+    "tree_dirty": false,
+    "upstream_crate_version": "@@VERSION@@",
+    "note": "The binary's own --version output is identical to unmodified upstream (Cargo.toml's version was not bumped for this fork). Fork identity is established by this manifest's commit_full, not by the binary."
+  },
+  "toolchain": {
+    "rustc_version": "@@RUSTC_VERSION@@",
+    "cargo_version": "@@CARGO_VERSION@@",
+    "host_triple_macos": "x86_64-apple-darwin",
+    "host_triple_linux_container": "x86_64-unknown-linux-gnu",
+    "linux_build_image": "rust:1.97-bookworm",
+    "linux_build_image_digest": "@@LINUX_IMAGE_DIGEST@@",
+    "linux_build_platform_flag": "linux/amd64"
+  },
+  "pre_build_checks": {
+    "fmt_check": "@@FMT_RESULT@@",
+    "clippy_all_targets_deny_warnings": "@@CLIPPY_RESULT@@",
+    "test_lib": {
+      "result": "@@TEST_RESULT@@",
+      "passed": "@@TEST_PASSED@@",
+      "failed": "@@TEST_FAILED@@",
+      "ignored": "@@TEST_IGNORED@@",
+      "known_pre_existing_failures": [
+        "vcs::git::libgit2::tests::should_discover_worktree_with_relativeworktrees_extension"
+      ]
+    }
+  },
+  "artifacts": [
+    {
+      "os": "macos",
+      "arch": "x86_64",
+      "filename": "@@ARCHIVE_FILENAME@@",
+      "sha256": "@@ARCHIVE_SHA256@@",
+      "size_bytes": "@@ARCHIVE_SIZE_BYTES@@",
+      "binary_sha256": "@@BINARY_SHA256@@",
+      "binary_size_bytes": "@@BINARY_SIZE_BYTES@@",
+      "build_command": "cargo build --release --locked",
+      "build_target_triple": "x86_64-apple-darwin",
+      "reported_version": "@@VERSION@@",
+      "extract_verified": "@@EXTRACT_VERIFIED@@",
+      "fixture_smoke_verified": "@@SMOKE_VERIFIED@@"
+    }
+  ],
+  "dependency_snapshot": {
+    "generated_by": "cargo metadata --locked --format-version 1",
+    "file": "cargo-metadata.json",
+    "license_summary_file": "THIRD-PARTY-LICENSES.md"
+  },
+  "excluded_from_packaging": [
+    "*.tpatch files",
+    "credentials, tokens, and provider API keys",
+    "user review-session data (~/.local/share/tuicr, ~/Library/Application Support/tuicr)",
+    "candidate/research data from sibling wayfinder worktrees",
+    "built artifacts, target/ directories, and this script's own working directory"
+  ],
+  "known_risks": [
+    {
+      "id": "unmodified-upstream-identity",
+      "severity": "high",
+      "summary": "Cargo.toml repository/crate/binary name are unmodified upstream (agavra/tuicr). The packaged binary auto-checks crates.io for a newer version on every startup (suppressible via --no-update-check or config.toml's no_update_check = true), and `tuicr update` / `brew upgrade agavra/tap/tuicr` / `cargo install tuicr --force` / `mise upgrade github:agavra/tuicr` all still resolve to real upstream, so running any of them silently self-replaces this fork binary with upstream, discarding the fork's durable-thread feature with no warning.",
+      "mitigation": "Do not run `tuicr update` or any package-manager upgrade command against this binary. Copy the bundled config.no-update-check.toml into the config directory to suppress the automatic startup check."
+    },
+    {
+      "id": "shared-data-directory-with-upstream",
+      "severity": "medium",
+      "summary": "Review-session data directory is resolved via ProjectDirs::from(\"\", \"\", \"tuicr\") -- an app identifier this fork does not change. A real upstream tuicr install on the same machine reads/writes the exact same reviews/ directory as this fork build; there is no fork-specific data directory.",
+      "mitigation": "See MIGRATION.md's 'shares its data directory with any real upstream tuicr install' section: override HOME/XDG_DATA_HOME for isolated testing, or back up reviews/ before switching installs."
+    }
+  ]
+}
