@@ -767,9 +767,16 @@ impl App {
         // A reply composed via `t` (`enter_thread_reply_mode`) appends
         // directly to the durable thread rather than falling through to
         // the legacy review/file/line comment branches below — see
-        // `App::reply_to_thread_at_cursor` in `threads.rs`.
-        if self.thread_reply_target.take().is_some() {
-            self.reply_to_thread_at_cursor(content);
+        // `App::reply_to_thread` in `threads.rs`. Commits against the
+        // `ThreadId` captured when reply mode was entered, never the
+        // cursor's current position: the cursor can move during the
+        // arbitrarily-long text-composition gap between entering reply
+        // mode and pressing save (scrolling, an autosave-triggered
+        // `rebuild_annotations` reordering rows, an external merge
+        // inserting/removing threads), so re-resolving from the cursor
+        // here could silently reply to the wrong thread.
+        if let Some(thread_id) = self.thread_reply_target.take() {
+            self.reply_to_thread(&thread_id, content);
             self.exit_comment_mode();
             return;
         }

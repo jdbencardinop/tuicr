@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::forge::context::ContextProvider;
-use crate::model::thread::{ThreadAuthor, ThreadComment, ThreadId, ThreadStatus};
+use crate::model::thread::{AuthorKind, ThreadAuthor, ThreadComment, ThreadId, ThreadStatus};
 
 impl App {
     /// Mint a canonical [`crate::model::thread::Thread`] mirroring every
@@ -278,12 +278,40 @@ impl App {
     /// whose legacy grouping is always "1 comment = 1 thread" (see
     /// `ReviewSession::migrate_legacy_comments_to_threads`) and therefore
     /// has no legacy-comment reply concept of its own.
+    ///
+    /// Resolves the target from the *current* cursor position — safe only
+    /// for callers that resolve and commit in the same call with no
+    /// intervening state (e.g. a direct test helper or a future
+    /// immediate, non-text-composing keybinding). `App::save_comment`'s
+    /// `t`-composed reply flow does **not** use this: it captures the
+    /// `ThreadId` up front in `enter_thread_reply_mode` and must commit
+    /// against that captured id via [`Self::reply_to_thread`] instead,
+    /// since the cursor can move (scrolling, an autosave-triggered
+    /// `rebuild_annotations`, an external merge reordering threads, etc.)
+    /// during the arbitrarily-long text-composition gap between entering
+    /// reply mode and pressing save.
     pub fn reply_to_thread_at_cursor(&mut self, body: String) -> bool {
         let Some(thread_id) = self.thread_id_at_cursor() else {
             self.set_message("Move cursor to a comment/thread to reply");
             return false;
         };
-        let Some(persisted) = self.session.find_thread_mut(&thread_id) else {
+        self.reply_to_thread(&thread_id, body)
+    }
+
+    /// Reply to the thread identified by the explicit `thread_id` — never
+    /// re-resolved from the cursor — with `body`, appended as a genuinely
+    /// thread-native reply (via `Thread::reply`, not a mirrored legacy
+    /// `Comment`). This is the target-safe primitive
+    /// [`Self::reply_to_thread_at_cursor`] and `App::save_comment`'s
+    /// `thread_reply_target`-driven reply both delegate to; the cursor is
+    /// never consulted here. If `thread_id` no longer resolves to a thread
+    /// (e.g. it was somehow removed between capture and save — not
+    /// currently possible via any TUI action, but never assumed), this
+    /// reports an explicit "Thread no longer exists" error and returns
+    /// `false` rather than silently falling back to whatever thread is
+    /// now under the cursor.
+    pub fn reply_to_thread(&mut self, thread_id: &ThreadId, body: String) -> bool {
+        let Some(persisted) = self.session.find_thread_mut(thread_id) else {
             self.set_message("Thread no longer exists");
             return false;
         };
@@ -363,23 +391,84 @@ impl App {
     /// `:submit`'s network call cannot see — since that path (see
     /// `App::spawn_pr_submit`) walks legacy `Comment`s only, req. 6's
     /// "local thread publication isn't yet wired" applies to two kinds of
-    /// content: a native-only reply (added via the thread-reply
-    /// keybinding, so it has no legacy `Comment` counterpart at all — see
-    /// `Thread::reply` and `is_legacy_comment_id`), and a `Resolved`/
-    /// `Dismissed` status (a purely local annotation; there is no remote
-    /// "resolve this thread" call in this todo). Used to render an honest
-    /// warning in the submit-confirmation modal rather than silently
-    /// publishing only the legacy subset.
+    /// content: a comment/reply with no legacy `Comment` counterpart
+    /// *and* not already authored by the provider itself (see
+    /// [`Self::thread_has_unpublished_comment`]), and a locally-driven
+    /// `Resolved`/`Dismissed` status that the provider does not already
+    /// independently reflect (see [`Self::thread_status_is_unpublished`]).
+    ///
+    /// Deliberately does **not** flag a remote-imported thread's own
+    /// root/replies (`AuthorKind::Remote`) or a `Resolved` status that
+    /// merely mirrors the provider's own `is_resolved` flag captured at
+    /// import time (`PersistedThread::provider_mappings`) — that content
+    /// already exists upstream verbatim; nothing about it is "unpublished
+    /// local activity" the user did in this TUI session. Only a genuine
+    /// local reply/resolve/dismiss (or a purely local, never-imported
+    /// thread) should surface the submit-modal warning.
     pub fn has_unpublished_thread_activity(&self) -> bool {
         self.session.threads.iter().any(|persisted| {
-            matches!(
-                persisted.thread.status(),
-                ThreadStatus::Resolved | ThreadStatus::Dismissed
-            ) || persisted
-                .thread
-                .comments()
-                .iter()
-                .any(|comment| !self.session.is_legacy_comment_id(comment.id().as_str()))
+            Self::thread_status_is_unpublished(persisted)
+                || self.thread_has_unpublished_comment(persisted)
+        })
+    }
+
+    /// Whether `persisted`'s current [`ThreadStatus`] represents a local
+    /// resolve/dismiss action not already reflected by any provider this
+    /// thread has been imported from/mapped to.
+    ///
+    /// - `Dismissed` has no provider-native equivalent at all (see
+    ///   `forge::dryrun::plan_thread`'s identical reasoning), so it is
+    ///   always "unpublished" while the thread carries that status.
+    /// - `Resolved` is compared against the baseline captured in
+    ///   `provider_mappings` (`thread_from_remote` stamps `"is_resolved"`
+    ///   there at import time, and re-imports keep it current — see
+    ///   `merge_remote_thread_into_existing`): if *any* mapped provider
+    ///   already reports `is_resolved: true`, this thread's `Resolved`
+    ///   status merely mirrors that remote truth (e.g. an untouched
+    ///   already-resolved imported thread) and is not local-only activity.
+    ///   A thread with no provider mapping at all (never imported/
+    ///   published) always counts as unpublished once resolved.
+    /// - `Open`/`Stale`/`Ambiguous` are never "unpublished thread
+    ///   activity": `Open` is the default, no-action state, and
+    ///   `Stale`/`Ambiguous` are anchor-relocation outcomes the user did
+    ///   not choose, not a resolve/dismiss action to publish.
+    fn thread_status_is_unpublished(
+        persisted: &crate::model::thread_store::PersistedThread,
+    ) -> bool {
+        match persisted.thread.status() {
+            ThreadStatus::Dismissed => true,
+            ThreadStatus::Resolved => !persisted
+                .provider_mappings
+                .values()
+                .any(|mapping| mapping.get("is_resolved").and_then(|v| v.as_bool()) == Some(true)),
+            ThreadStatus::Open | ThreadStatus::Stale | ThreadStatus::Ambiguous => false,
+        }
+    }
+
+    /// Whether `persisted` carries a comment/reply with no legacy
+    /// `Comment` mirror (see `ReviewSession::is_legacy_comment_id`) that
+    /// was also authored locally rather than fetched from a provider
+    /// (`author.kind != AuthorKind::Remote`, the same convention
+    /// `forge::dryrun::plan_thread`'s reply-planning loop and
+    /// `RemoteThreadOverlay::local_only_replies` both use to identify
+    /// "not already represented on the provider" content).
+    ///
+    /// Both conditions are required: a legacy-mirrored comment (added via
+    /// the ordinary comment-entry UI, human/agent-authored) already gets
+    /// submitted through the existing legacy `Comment` walk, so it is not
+    /// "thread-only" unpublished content; a remote-imported root/reply
+    /// (`AuthorKind::Remote`) has no legacy mirror either, but it already
+    /// exists on the provider verbatim, so it is not local activity to
+    /// warn about at all. Only a reply added natively via the TUI's
+    /// thread-reply keybinding — whether on a purely local thread or on
+    /// top of an already-imported one — satisfies both.
+    fn thread_has_unpublished_comment(
+        &self,
+        persisted: &crate::model::thread_store::PersistedThread,
+    ) -> bool {
+        persisted.thread.comments().iter().any(|comment| {
+            comment.author.kind != AuthorKind::Remote
+                && !self.session.is_legacy_comment_id(comment.id().as_str())
         })
     }
 }

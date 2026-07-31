@@ -750,4 +750,192 @@ mod tests {
             "resolved thread should trigger warning: {text}"
         );
     }
+
+    /// Bug 1 regression (false positive on untouched remote-imported
+    /// threads): a thread imported verbatim from a provider — root,
+    /// replies, and any `is_resolved`/`is_outdated` state it already had
+    /// upstream — must never trip the "local-only, not published"
+    /// warning on its own. Only genuinely local activity added *on top*
+    /// of an import (a native reply, or a local resolve/dismiss the
+    /// provider doesn't already reflect) should.
+    fn imported_thread(is_resolved: bool) -> crate::forge::remote_comments::RemoteReviewThread {
+        use crate::forge::remote_comments::{RemoteCommentSide, RemoteReviewComment};
+        crate::forge::remote_comments::RemoteReviewThread {
+            id: "gh-imported-1".to_string(),
+            path: "src/lib.rs".to_string(),
+            line: Some(11),
+            side: RemoteCommentSide::Right,
+            is_resolved,
+            is_outdated: false,
+            comments: vec![
+                RemoteReviewComment {
+                    id: "remote-root".to_string(),
+                    author: Some("octocat".to_string()),
+                    body: "please double check".to_string(),
+                    created_at: Some(chrono::DateTime::UNIX_EPOCH),
+                    in_reply_to: None,
+                    url: String::new(),
+                },
+                RemoteReviewComment {
+                    id: "remote-reply".to_string(),
+                    author: Some("reviewer2".to_string()),
+                    body: "agreed".to_string(),
+                    created_at: Some(chrono::DateTime::UNIX_EPOCH),
+                    in_reply_to: Some("remote-root".to_string()),
+                    url: String::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn confirm_omits_thread_only_warning_for_untouched_open_import() {
+        // given an imported thread (root + reply, both `AuthorKind::Remote`)
+        // that is still Open both locally and upstream
+        let mut app = make_pr_app();
+        let remote = imported_thread(false);
+        app.forge_review_threads = vec![remote.clone()];
+        app.session
+            .import_remote_review_threads("github", &app.forge_review_threads);
+        app.submit_state = Some(SubmitState {
+            event: SubmitEvent::Comment,
+            mappable: vec![inline(11)],
+            unmappable: Vec::new(),
+            resolver_choices: Vec::new(),
+            resolver_cursor: 0,
+            commit_id: "abcdef0123".to_string(),
+            skip_confirm: false,
+        });
+
+        // then the import alone must not surface the local-only warning.
+        let buffer = draw_confirm(&app);
+        let text = buffer_text(&buffer);
+        assert!(
+            !text.contains("local-only"),
+            "an untouched import's own root/reply must not warn: {text}"
+        );
+    }
+
+    #[test]
+    fn confirm_omits_thread_only_warning_for_import_already_resolved_upstream() {
+        // given a thread imported already-resolved on the remote (its
+        // local `ThreadStatus` mirrors `is_resolved: true` verbatim)
+        let mut app = make_pr_app();
+        let remote = imported_thread(true);
+        app.forge_review_threads = vec![remote.clone()];
+        app.session
+            .import_remote_review_threads("github", &app.forge_review_threads);
+        let persisted = app
+            .session
+            .find_thread_by_provider("github", "gh-imported-1")
+            .expect("thread imported");
+        assert_eq!(
+            persisted.thread.status(),
+            crate::model::thread::ThreadStatus::Resolved,
+            "import should mirror the remote's own resolved state"
+        );
+        app.submit_state = Some(SubmitState {
+            event: SubmitEvent::Comment,
+            mappable: vec![inline(11)],
+            unmappable: Vec::new(),
+            resolver_choices: Vec::new(),
+            resolver_cursor: 0,
+            commit_id: "abcdef0123".to_string(),
+            skip_confirm: false,
+        });
+
+        // then the warning must not fire: nothing local happened, the
+        // Resolved status merely mirrors the provider's own truth.
+        let buffer = draw_confirm(&app);
+        let text = buffer_text(&buffer);
+        assert!(
+            !text.contains("local-only"),
+            "resolved-on-import must not be mistaken for local resolve: {text}"
+        );
+    }
+
+    #[test]
+    fn confirm_warns_when_local_reply_added_on_top_of_an_import() {
+        use crate::model::thread::{ThreadAuthor, ThreadComment};
+        // given an otherwise-untouched import, plus one genuinely local
+        // (human-authored, no legacy mirror) reply added via the TUI
+        let mut app = make_pr_app();
+        let remote = imported_thread(false);
+        app.forge_review_threads = vec![remote.clone()];
+        app.session
+            .import_remote_review_threads("github", &app.forge_review_threads);
+        let thread_id = app
+            .session
+            .find_thread_by_provider("github", "gh-imported-1")
+            .expect("thread imported")
+            .id()
+            .clone();
+        app.session
+            .find_thread_mut(&thread_id)
+            .unwrap()
+            .thread
+            .reply(ThreadComment::new(
+                ThreadAuthor::human("me"),
+                "following up locally",
+            ));
+        app.submit_state = Some(SubmitState {
+            event: SubmitEvent::Comment,
+            mappable: vec![inline(11)],
+            unmappable: Vec::new(),
+            resolver_choices: Vec::new(),
+            resolver_cursor: 0,
+            commit_id: "abcdef0123".to_string(),
+            skip_confirm: false,
+        });
+
+        // then the warning fires: the local reply has no legacy mirror
+        // and is not remote-authored, so it is genuinely unpublished.
+        let buffer = draw_confirm(&app);
+        let text = buffer_text(&buffer);
+        assert!(
+            text.contains("local-only"),
+            "a native reply on top of an import must warn: {text}"
+        );
+    }
+
+    #[test]
+    fn confirm_warns_when_import_is_locally_resolved_but_not_yet_upstream() {
+        // given an import that is still Open upstream, then locally
+        // resolved in the TUI (the provider mapping's `is_resolved`
+        // baseline was never updated to reflect that)
+        let mut app = make_pr_app();
+        let remote = imported_thread(false);
+        app.forge_review_threads = vec![remote.clone()];
+        app.session
+            .import_remote_review_threads("github", &app.forge_review_threads);
+        let thread_id = app
+            .session
+            .find_thread_by_provider("github", "gh-imported-1")
+            .expect("thread imported")
+            .id()
+            .clone();
+        app.session
+            .find_thread_mut(&thread_id)
+            .unwrap()
+            .thread
+            .resolve();
+        app.submit_state = Some(SubmitState {
+            event: SubmitEvent::Comment,
+            mappable: vec![inline(11)],
+            unmappable: Vec::new(),
+            resolver_choices: Vec::new(),
+            resolver_cursor: 0,
+            commit_id: "abcdef0123".to_string(),
+            skip_confirm: false,
+        });
+
+        // then the warning fires: local status now diverges from the
+        // provider's still-open baseline.
+        let buffer = draw_confirm(&app);
+        let text = buffer_text(&buffer);
+        assert!(
+            text.contains("local-only"),
+            "a local resolve not yet reflected upstream must warn: {text}"
+        );
+    }
 }

@@ -225,3 +225,136 @@ fn should_show_honest_message_when_no_thread_is_at_cursor() {
             .unwrap_or(false)
     );
 }
+
+#[test]
+fn should_land_reply_on_captured_thread_even_if_cursor_moves_before_save() {
+    // given two distinct threads, A and B, each with their own review
+    // comment (and mirrored canonical Thread)
+    let mut app = build_app();
+    add_review_comment(&mut app, "comment A");
+    add_review_comment(&mut app, "comment B");
+    assert_eq!(app.session.threads.len(), 2);
+    let thread_a_id = app.session.threads[0].id().clone();
+    let thread_b_id = app.session.threads[1].id().clone();
+    assert_ne!(thread_a_id, thread_b_id);
+
+    // when the user enters reply mode with the cursor on thread A
+    // (capturing A into `thread_reply_target`)...
+    cursor_to_review_comment(&mut app, 0);
+    app.enter_thread_reply_mode();
+    assert_eq!(app.thread_reply_target, Some(thread_a_id.clone()));
+    app.comment_buffer = "reply meant for A".to_string();
+
+    // ...but the cursor drifts onto thread B before the reply is saved
+    // (e.g. an autosave-triggered `rebuild_annotations` reordering rows,
+    // or an external merge inserting content above) — simulated here by
+    // directly moving the cursor.
+    cursor_to_review_comment(&mut app, 1);
+    assert_eq!(app.thread_id_at_cursor(), Some(thread_b_id.clone()));
+
+    // then saving still commits the reply to the originally captured
+    // thread A, never to whatever thread now happens to be under the
+    // cursor.
+    app.save_comment();
+
+    let persisted_a = app
+        .session
+        .threads
+        .iter()
+        .find(|t| t.id() == &thread_a_id)
+        .unwrap();
+    let persisted_b = app
+        .session
+        .threads
+        .iter()
+        .find(|t| t.id() == &thread_b_id)
+        .unwrap();
+    assert_eq!(persisted_a.thread.comments().len(), 2);
+    assert_eq!(
+        persisted_a.thread.replies().next().unwrap().body,
+        "reply meant for A"
+    );
+    assert_eq!(
+        persisted_b.thread.comments().len(),
+        1,
+        "thread B must be untouched by a reply captured against A"
+    );
+}
+
+#[test]
+fn should_error_explicitly_when_captured_reply_thread_no_longer_exists() {
+    // given a captured `thread_reply_target` pointing at a thread id that
+    // does not (or no longer) exists in the session
+    let mut app = build_app();
+    add_review_comment(&mut app, "comment A");
+    assert_eq!(app.session.threads.len(), 1);
+    let real_thread_id = app.session.threads[0].id().clone();
+
+    let bogus_id = crate::model::thread::ThreadId::new();
+    app.input_mode = InputMode::Comment;
+    app.comment_buffer = "orphaned reply".to_string();
+    app.thread_reply_target = Some(bogus_id);
+
+    // when saving
+    app.save_comment();
+
+    // then the save reports an explicit error and does NOT silently fall
+    // back to whatever thread the cursor currently resolves to (here,
+    // the only real thread, A) — no thread gains a spurious reply.
+    assert_eq!(
+        app.message.as_ref().map(|m| m.content.as_str()),
+        Some("Thread no longer exists")
+    );
+    let persisted_a = app
+        .session
+        .threads
+        .iter()
+        .find(|t| t.id() == &real_thread_id)
+        .unwrap();
+    assert_eq!(
+        persisted_a.thread.comments().len(),
+        1,
+        "no fallback reply should land on any other thread"
+    );
+}
+
+/// Bug 3 audit regression: legacy comment *edit* (`enter_edit_mode`) is
+/// already immune to the same capture-vs-cursor race that Bug 2 fixed
+/// for thread replies, because it resolves its target via the captured
+/// `editing_comment_id` (a stable legacy `Comment::id`), never by
+/// re-reading the cursor at save time. This test pins that behavior down
+/// explicitly so a future refactor cannot regress it back toward
+/// cursor-based resolution.
+#[test]
+fn should_commit_edit_to_captured_comment_even_if_cursor_moves_before_save() {
+    // given two distinct review comments, A and B
+    let mut app = build_app();
+    add_review_comment(&mut app, "comment A");
+    add_review_comment(&mut app, "comment B");
+    assert_eq!(app.session.review_comments.len(), 2);
+
+    // when the user enters edit mode with the cursor on comment A
+    // (capturing A's id into `editing_comment_id`)...
+    cursor_to_review_comment(&mut app, 0);
+    assert!(app.enter_edit_mode(false));
+    let captured_id = app.editing_comment_id.clone();
+    assert_eq!(
+        captured_id.as_deref(),
+        Some(app.session.review_comments[0].id.as_str())
+    );
+    app.comment_buffer = "edited A".to_string();
+
+    // ...but the cursor drifts onto comment B before the edit is saved.
+    cursor_to_review_comment(&mut app, 1);
+
+    // then saving still commits the edit to the originally captured
+    // comment A, never to whatever comment now happens to be under the
+    // cursor.
+    app.save_comment();
+
+    assert_eq!(app.session.review_comments[0].content, "edited A");
+    assert_eq!(
+        app.session.review_comments[1].content, "comment B",
+        "comment B must be untouched by an edit captured against A"
+    );
+}
