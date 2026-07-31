@@ -26,7 +26,7 @@ use crate::forge::azure::test_support::{
     MockResponse, env_mutation_lock as azure_env_lock, start_mock_server as start_azure_mock_server,
 };
 use crate::forge::capabilities::{
-    ProviderCapabilities, azure_devops, forgejo_16, gitea_1_24, github, gitlab,
+    CreateThreadSupport, ProviderCapabilities, azure_devops, forgejo_16, gitea_1_24, github, gitlab,
 };
 use crate::forge::dryrun::{OperationOutcome, plan_publication};
 use crate::forge::giteafj::backend::GiteaForgejoBackend;
@@ -232,18 +232,24 @@ fn sample_pr_details(repository: ForgeRepository) -> crate::forge::traits::PullR
     }
 }
 
-/// The core regression test for this offline-integration pass: a brand
-/// new, single-line-anchored thread's create is planned as `Planned` on
-/// every profile that claims native reply support, and for each such
-/// profile, the corresponding `ForgeBackend` trait method (`create_thread`)
-/// is *not* left on the honest-but-contradictory `UnsupportedOperation`
-/// default — i.e. the dry-run plan and the real trait-level execution path
-/// agree. This is exactly the class of bug found in `azure::backend`
-/// (capability said `Native`, trait impl used the default), fixed by
-/// wiring its trait-level `create_thread`/`reply_to_thread`/
-/// `set_thread_resolution`.
+/// The core regression test for this offline-integration pass: on every
+/// profile, `plan_publication`'s `CreateThread` outcome for a brand-new,
+/// single-line-anchored thread agrees with what the real `ForgeBackend`
+/// trait-level `create_thread` will actually do — `Planned` if and only if
+/// the trait method is overridden with real transport, `Unsupported` if
+/// and only if the profile reports `CreateThreadSupport::Unsupported` and
+/// the trait is left on its honest default. This is exactly the class of
+/// bug found in `azure::backend` during this merge (capability said
+/// `Native`, trait impl used the default) — fixed by wiring its
+/// trait-level `create_thread`/`reply_to_thread`/`set_thread_resolution` —
+/// and the class of bug this same pass separately found and fixed for
+/// Gitea/Forgejo (capabilities' `file_comment`/`general_comment` are
+/// `true`, describing their *batched* `create_review` comment route, but
+/// neither ever verified a *standalone* create-thread endpoint, so
+/// `dryrun::plan_thread` now gates `CreateThread` on the dedicated
+/// `CreateThreadSupport` field instead of reusing those two flags).
 #[test]
-fn should_plan_new_thread_creation_as_planned_on_every_profile_and_match_real_trait_wiring() {
+fn should_plan_new_thread_creation_to_match_real_trait_wiring_on_every_profile() {
     use crate::forge::traits::NewThreadRequest;
 
     let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
@@ -262,18 +268,21 @@ fn should_plan_new_thread_creation_as_planned_on_every_profile_and_match_real_tr
             .iter()
             .find(|op| op.thread_id.as_deref() == Some(thread_id.as_str()))
             .expect("operation for thread");
+        let expect_native = matches!(caps.create_thread, CreateThreadSupport::Native);
         assert_eq!(
-            op.outcome,
-            OperationOutcome::Planned,
-            "a brand-new single-line thread must be plannable on every profile, caps={caps:?}"
+            matches!(op.outcome, OperationOutcome::Planned),
+            expect_native,
+            "CreateThread outcome must agree with CreateThreadSupport, caps={caps:?}, \
+             outcome={:?}",
+            op.outcome
         );
     }
 
     // GitHub, GitLab, and Azure DevOps override the trait-level
-    // `create_thread` default; Gitea/Forgejo intentionally do not (see
-    // `capabilities::gitea_1_24`'s `reply: ReplySupport::Unsupported`,
-    // confirmed consistent with the trait default above via those
-    // profiles' own outcome in this same test).
+    // `create_thread` default (`CreateThreadSupport::Native`, confirmed
+    // `Planned` above); Gitea/Forgejo intentionally do not
+    // (`CreateThreadSupport::Unsupported`, confirmed `Unsupported` above) —
+    // both sides verified to agree for every profile.
     with_mock_azure_pat(|| {
         let repo = ForgeRepository::azure_devops("http://127.0.0.1:1", "o", "r");
         let pr = sample_pr_details(repo);
@@ -305,6 +314,38 @@ fn should_plan_new_thread_creation_as_planned_on_every_profile_and_match_real_tr
              the default Unsupported implementation: got {err:?}"
         );
     });
+
+    // Gitea/Forgejo's trait-level `create_thread` must still be the
+    // honest default `UnsupportedOperation` — confirming the dry-run
+    // `Unsupported` outcome asserted above is not just honest in theory
+    // but actually matches the real (non-)transport a caller would hit.
+    for kind in [ForgeKind::Gitea, ForgeKind::Forgejo] {
+        let repo = match kind {
+            ForgeKind::Gitea => ForgeRepository::gitea("http://127.0.0.1:1", "o", "r"),
+            ForgeKind::Forgejo => ForgeRepository::forgejo("http://127.0.0.1:1", "o", "r"),
+            _ => unreachable!(),
+        };
+        let pr = sample_pr_details(repo);
+        let request = NewThreadRequest {
+            commit_id: &pr.head_sha,
+            body: "hello",
+            path: Some("src/a.rs"),
+            line: Some(10),
+            side: Some(AnchorSide::New),
+            range_start: None,
+        };
+        let backend = GiteaForgejoBackend::new(kind, None);
+        let dyn_backend: &dyn ForgeBackend = &backend;
+        let err = dyn_backend
+            .create_thread(&pr, request)
+            .expect_err("no live server was reached, so an `Ok` here would itself be a bug");
+        assert!(
+            matches!(err, crate::error::TuicrError::UnsupportedOperation(_)),
+            "{kind:?}'s trait-level create_thread must stay on the honest default \
+             UnsupportedOperation (never attempt a live call) to match its dry-run outcome: \
+             got {err:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------

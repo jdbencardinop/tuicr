@@ -1470,7 +1470,12 @@ mod tests {
         let operations = value["operations"].as_array().unwrap();
         assert_eq!(operations.len(), 1);
         assert_eq!(operations[0]["op"], "create_thread");
-        assert_eq!(operations[0]["outcome"], "planned");
+        // Gitea's stable pin has no verified standalone create-thread route
+        // (see `capabilities::CreateThreadSupport::Unsupported` /
+        // `dryrun::plan_thread`), so a brand-new thread's `CreateThread` op
+        // is honestly planned `unsupported` here, not `planned` — matching
+        // what `execute_plan` actually does (skip, never a live call).
+        assert_eq!(operations[0]["outcome"], "unsupported");
     }
 
     #[test]

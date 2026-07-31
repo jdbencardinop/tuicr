@@ -304,8 +304,14 @@ fn new_thread_request<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forge::azure::backend::AzureDevOpsBackend;
+    use crate::forge::azure::test_support::{
+        MockResponse, env_mutation_lock as azure_env_lock,
+        start_mock_server as start_azure_mock_server,
+    };
     use crate::forge::capabilities;
     use crate::forge::dryrun::plan_publication;
+    use crate::forge::giteafj::backend::GiteaForgejoBackend;
     use crate::forge::github::gh::{GhCommandError, GhCommandResult, GitHubGhBackend};
     use crate::forge::gitlab::glab::{GitLabGlabBackend, GlabCommandError, GlabCommandResult};
     use crate::forge::submit::SubmitEvent as Event;
@@ -315,6 +321,7 @@ mod tests {
         Anchor, AnchorSide, ProviderRemap, Thread, ThreadAuthor, ThreadComment,
     };
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     fn pr(kind: ForgeKind) -> PullRequestDetails {
@@ -1064,5 +1071,212 @@ mod tests {
             session.threads[0].provider_mapping("gitlab").unwrap()["id"],
             "disc-a"
         );
+    }
+
+    /// Run `body` with `$AZURE_DEVOPS_EXT_PAT` set to a mock value **and**
+    /// `$PATH` cleared, restoring both afterward — mirrors
+    /// `azure::contract_tests::with_mock_pat`'s pattern (private to its own
+    /// module, so this module needs its own copy), guarded by the same
+    /// crate-wide `azure_env_lock` so it never races that module's own
+    /// tests mutating the same process-wide env vars. Without clearing
+    /// `$PATH` this would risk shelling out to a real, locally-configured
+    /// `az` CLI — forbidden by this task's "no live external provider
+    /// writes/calls" constraint.
+    fn with_mock_azure_pat<T>(body: impl FnOnce() -> T) -> T {
+        let _guard = azure_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let previous_pat = std::env::var("AZURE_DEVOPS_EXT_PAT").ok();
+        let previous_path = std::env::var("PATH").ok();
+        // SAFETY: serialized by `azure_env_lock` above, so no other test
+        // thread observes a partial/torn value while this one mutates
+        // these process-wide env vars.
+        unsafe {
+            std::env::set_var("AZURE_DEVOPS_EXT_PAT", "mock-pat");
+            std::env::remove_var("PATH");
+        }
+        let result = body();
+        unsafe {
+            match previous_pat {
+                Some(v) => std::env::set_var("AZURE_DEVOPS_EXT_PAT", v),
+                None => std::env::remove_var("AZURE_DEVOPS_EXT_PAT"),
+            }
+            match previous_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        result
+    }
+
+    fn azure_pr(base_url: &str) -> PullRequestDetails {
+        PullRequestDetails {
+            repository: ForgeRepository::azure_devops(base_url, "contoso/widgets", "api"),
+            number: 7,
+            title: "t".to_string(),
+            url: "https://example.invalid/pr/7".to_string(),
+            state: "active".to_string(),
+            is_draft: false,
+            author: None,
+            head_ref_name: "feature".to_string(),
+            base_ref_name: "main".to_string(),
+            head_sha: "head_sha_1".to_string(),
+            base_sha: "base_sha_1".to_string(),
+            body: String::new(),
+            updated_at: None,
+            closed: false,
+            merged_at: None,
+            diff_start_sha: Some("start_sha_1".to_string()),
+        }
+    }
+
+    /// End-to-end proof (audit finding: "execute_plan mock tests for Azure
+    /// ... every Planned op either executes through the backend once or
+    /// profile marks Unsupported") that Azure's `CreateThread`/`Reply`/
+    /// `Resolve` — all three planned `Native`/`Planned` on
+    /// `capabilities::azure_devops()` — each execute through exactly one
+    /// real (mocked) transport call, mirroring the existing GitHub/GitLab
+    /// scenario tests above.
+    #[test]
+    fn should_create_thread_then_reply_then_resolve_on_azure_end_to_end() {
+        with_mock_azure_pat(|| {
+            let base = "/contoso/widgets/_apis/git/repositories/api/pullrequests/7";
+            let responses = HashMap::from([
+                (
+                    format!("POST {base}/threads?api-version=7.1"),
+                    MockResponse::json(
+                        200,
+                        r#"{"id":501,"status":"active","comments":[{"id":9001}]}"#,
+                    ),
+                ),
+                (
+                    format!("POST {base}/threads/501/comments?api-version=7.1"),
+                    MockResponse::json(200, r#"{"id":9002}"#),
+                ),
+                (
+                    format!("PATCH {base}/threads/501?api-version=7.1"),
+                    MockResponse::json(200, r#"{"id":501,"status":"fixed"}"#),
+                ),
+            ]);
+            let (base_url, requests) = start_azure_mock_server(responses);
+            let backend = AzureDevOpsBackend::new(None);
+            let pr = azure_pr(&base_url);
+
+            let mut thread = open_local_thread();
+            let reply_id = thread
+                .thread
+                .reply(ThreadComment::new(ThreadAuthor::human("bob"), "on it"));
+            thread.thread.resolve();
+            let mut session = session_with_thread(thread);
+
+            let plan = plan_publication(&session, &capabilities::azure_devops(), None);
+            let report = execute_plan(&backend, &pr, &mut session, &plan, "");
+            assert!(report.is_success(), "{report:?}");
+            assert_eq!(
+                report.completed().count(),
+                3,
+                "CreateThread + Reply + Resolve"
+            );
+
+            let persisted = &session.threads[0];
+            assert_eq!(
+                persisted.provider_mapping("azure-devops").unwrap()["id"],
+                "501"
+            );
+            assert_eq!(
+                persisted.provider_mapping("azure-devops").unwrap()["is_resolved"],
+                true
+            );
+            assert_eq!(
+                persisted.published_reply_id("azure-devops", reply_id.as_str()),
+                Some("9002")
+            );
+            assert_eq!(
+                requests.lock().expect("lock captured requests").len(),
+                3,
+                "exactly one real call per planned operation, no more, no fewer"
+            );
+        });
+    }
+
+    /// End-to-end proof (audit finding: "no planned->default Unsupported
+    /// mismatch") for the Gitea/Forgejo `CreateThread` honesty fix this
+    /// offline-integration pass made in `dryrun::plan_thread`: a brand-new
+    /// thread's `CreateThread` op is planned `Unsupported` (see
+    /// `capabilities::CreateThreadSupport`), and `execute_plan` correctly
+    /// `Skip`s it rather than attempting (and inevitably failing, or
+    /// worse, silently reaching for) a real HTTP call this backend never
+    /// implements — proving the dry-run preview and the real executor
+    /// agree with zero live requests made.
+    #[test]
+    fn should_skip_create_thread_as_unsupported_on_gitea_and_forgejo_end_to_end() {
+        let cases: [(
+            ForgeKind,
+            capabilities::ProviderCapabilities,
+            ForgeRepository,
+        ); 2] = [
+            (
+                ForgeKind::Gitea,
+                capabilities::gitea_1_24(),
+                ForgeRepository::gitea("http://127.0.0.1:1", "owner", "repo"),
+            ),
+            (
+                ForgeKind::Forgejo,
+                capabilities::forgejo_16(),
+                ForgeRepository::forgejo("http://127.0.0.1:1", "owner", "repo"),
+            ),
+        ];
+        for (kind, caps, repo) in cases {
+            // No mock server is even started: if `execute_plan` ever tried
+            // a real call here, it would fail to connect (nothing is
+            // listening on this address) rather than silently succeed,
+            // making any accidental live-call regression loud, not silent.
+            let backend = GiteaForgejoBackend::new(kind, None);
+            let pr = PullRequestDetails {
+                repository: repo,
+                number: 7,
+                title: "t".to_string(),
+                url: "https://example.invalid/pr/7".to_string(),
+                state: "open".to_string(),
+                is_draft: false,
+                author: None,
+                head_ref_name: "feature".to_string(),
+                base_ref_name: "main".to_string(),
+                head_sha: "head_sha_1".to_string(),
+                base_sha: "base_sha_1".to_string(),
+                body: String::new(),
+                updated_at: None,
+                closed: false,
+                merged_at: None,
+                diff_start_sha: Some("start_sha_1".to_string()),
+            };
+
+            let thread = open_local_thread();
+            let mut session = session_with_thread(thread);
+
+            let plan = plan_publication(&session, &caps, None);
+            assert_eq!(plan.operations.len(), 1, "kind={kind:?}, plan={plan:?}");
+            assert!(
+                matches!(
+                    plan.operations[0].outcome,
+                    OperationOutcome::Unsupported { .. }
+                ),
+                "kind={kind:?}, outcome={:?}",
+                plan.operations[0].outcome
+            );
+
+            let report = execute_plan(&backend, &pr, &mut session, &plan, "");
+            assert!(report.is_success(), "kind={kind:?}, {report:?}");
+            assert_eq!(report.completed().count(), 0, "kind={kind:?}");
+            assert!(
+                matches!(&report.results[0], ExecutedOperation::Skipped(_)),
+                "kind={kind:?}, results={:?}",
+                report.results
+            );
+            assert!(
+                session.threads[0]
+                    .provider_mapping(kind.provider_key())
+                    .is_none(),
+                "kind={kind:?}: a skipped CreateThread must never record a provider mapping"
+            );
+        }
     }
 }

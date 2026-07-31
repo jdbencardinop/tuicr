@@ -470,4 +470,50 @@ mod tests {
         // unknown defaults to RIGHT (head side) — safer for display
         assert_eq!(RemoteCommentSide::parse(""), RemoteCommentSide::Right);
     }
+
+    /// Regression test (audit finding: "Add rest_id ... serialization
+    /// regression tests") covering both `rest_id` states: `Some` (GitHub's
+    /// `databaseId`-backed REST identifier, distinct from the GraphQL node
+    /// `id`) and `None` (every other provider, whose bare `id` already is
+    /// REST-compatible). A prior regression accidentally dropped this
+    /// field's build-time initializer (`RemoteReviewComment.rest_id` not
+    /// set) in one of the 5 `ForgeBackend::list_review_threads`
+    /// implementations after the Azure merge, so this test pins both the
+    /// exact JSON key name and that `None` serializes/deserializes losslessly
+    /// rather than silently defaulting to a stale/wrong value on omission.
+    #[test]
+    fn should_round_trip_rest_id_via_serde_for_both_some_and_none() {
+        // given
+        let with_rest_id = RemoteReviewComment {
+            id: "PRRC_kwABC".to_string(),
+            author: Some("alice".to_string()),
+            body: "Root body".to_string(),
+            created_at: None,
+            in_reply_to: None,
+            url: "https://github.com/o/r/pull/1#discussion_r1".to_string(),
+            rest_id: Some("123456789".to_string()),
+        };
+        let without_rest_id = RemoteReviewComment {
+            rest_id: None,
+            ..with_rest_id.clone()
+        };
+
+        // when
+        let with_json = serde_json::to_value(&with_rest_id).unwrap();
+        let without_json = serde_json::to_value(&without_rest_id).unwrap();
+
+        // then: the field is always present (no `skip_serializing_if`), so
+        // a stored session artifact is unambiguous about which case it is,
+        // and both round-trip back to an equal value.
+        assert_eq!(with_json["rest_id"], serde_json::json!("123456789"));
+        assert_eq!(without_json["rest_id"], serde_json::Value::Null);
+        assert_eq!(
+            serde_json::from_value::<RemoteReviewComment>(with_json).unwrap(),
+            with_rest_id
+        );
+        assert_eq!(
+            serde_json::from_value::<RemoteReviewComment>(without_json).unwrap(),
+            without_rest_id
+        );
+    }
 }

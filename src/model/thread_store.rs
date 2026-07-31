@@ -854,4 +854,138 @@ mod tests {
 
         assert_eq!(persisted.root_comment_id("github"), Some("PRRC_1"));
     }
+
+    fn remote_thread_with_rest_id(rest_id: Option<&str>) -> RemoteReviewThread {
+        RemoteReviewThread {
+            id: "PRRT_1".to_string(),
+            path: "src/lib.rs".to_string(),
+            line: Some(10),
+            side: RemoteCommentSide::Right,
+            is_resolved: false,
+            is_outdated: false,
+            comments: vec![crate::forge::remote_comments::RemoteReviewComment {
+                id: "PRRC_kwABC".to_string(),
+                author: Some("alice".to_string()),
+                body: "root".to_string(),
+                created_at: None,
+                in_reply_to: None,
+                url: "https://github.com/o/r/pull/1#discussion_r1".to_string(),
+                rest_id: rest_id.map(str::to_string),
+            }],
+        }
+    }
+
+    /// Regression test (audit finding: "Add rest_id ... regression tests")
+    /// for `thread_from_remote`'s `rest_id` handling: when the remote root
+    /// comment carries a `rest_id` (GitHub's case — its GraphQL node `id`
+    /// is not what the REST `in_reply_to` field needs), the namespaced
+    /// root-comment ledger must be seeded from it so a later reply can find
+    /// a REST-compatible ID; when `rest_id` is `None` (every other
+    /// provider, or GitHub without a database id), the ledger must stay
+    /// empty rather than being seeded with the wrong (GraphQL) id.
+    #[test]
+    fn should_seed_root_comment_ledger_from_rest_id_only_when_present() {
+        let with_rest_id = thread_from_remote("github", &remote_thread_with_rest_id(Some("999")));
+        assert_eq!(
+            with_rest_id.root_comment_id("github"),
+            Some("999"),
+            "rest_id present: ledger must be seeded with the REST-compatible id, not the node id"
+        );
+
+        let without_rest_id = thread_from_remote("github", &remote_thread_with_rest_id(None));
+        assert_eq!(
+            without_rest_id.root_comment_id("github"),
+            None,
+            "rest_id absent: must not fabricate a ledger entry from the (REST-incompatible) node id"
+        );
+        // The bare mapping's own `id` field still carries the node id
+        // (unaffected by rest_id), so display/lookup-by-native-id logic is
+        // unchanged either way.
+        assert!(without_rest_id.has_provider_id("github", "PRRT_1"));
+    }
+
+    /// Regression test (audit finding: "cross-provider mapping
+    /// serialization regression tests") pinning that each provider's
+    /// distinctively-shaped `provider_mappings` JSON payload (GitHub's
+    /// `root_comment_id`, GitLab's discussion `id`, Azure's nested
+    /// `threadContext`, Gitea/Forgejo's plain numeric-string `id`) survives
+    /// a full `PersistedThread` JSON round-trip byte-for-byte, and that no
+    /// provider's payload bleeds into another's key — guarding against a
+    /// merge regression silently dropping or cross-contaminating one
+    /// provider's mapping while wiring up a sibling provider.
+    #[test]
+    fn should_round_trip_distinct_provider_mapping_shapes_without_cross_contamination() {
+        let comment = legacy_comment(DEFAULT_AUTHOR, "note");
+        let mut persisted = thread_from_legacy_comment(Anchor::review(), &comment);
+
+        persisted.upsert_provider_mapping(
+            "github",
+            serde_json::json!({"id": "PRRT_1", "root_comment_id": "999"}),
+        );
+        persisted.upsert_provider_mapping("gitlab", serde_json::json!({"id": "note-42"}));
+        persisted.upsert_provider_mapping(
+            "azure-devops",
+            serde_json::json!({
+                "id": "501",
+                "is_resolved": false,
+                "threadContext": {"filePath": "/src/lib.rs", "rightFileStart": {"line": 10}},
+            }),
+        );
+        persisted.upsert_provider_mapping("gitea", serde_json::json!({"id": "77"}));
+        persisted.upsert_provider_mapping("forgejo", serde_json::json!({"id": "78"}));
+
+        let json = serde_json::to_value(&persisted).unwrap();
+        let restored: PersistedThread = serde_json::from_value(json).unwrap();
+
+        assert_eq!(restored, persisted, "full round-trip must be lossless");
+        assert_eq!(restored.provider_mappings.len(), 5);
+        assert_eq!(
+            restored.provider_mapping("github").unwrap()["root_comment_id"],
+            serde_json::json!("999")
+        );
+        assert_eq!(
+            restored.provider_mapping("gitlab").unwrap()["id"],
+            serde_json::json!("note-42")
+        );
+        assert_eq!(
+            restored.provider_mapping("azure-devops").unwrap()["threadContext"]["filePath"],
+            serde_json::json!("/src/lib.rs")
+        );
+        assert_eq!(
+            restored.provider_mapping("gitea").unwrap()["id"],
+            serde_json::json!("77")
+        );
+        assert_eq!(
+            restored.provider_mapping("forgejo").unwrap()["id"],
+            serde_json::json!("78")
+        );
+        // Cross-contamination guard: gitlab's payload never picked up
+        // azure's `threadContext` key or github's `root_comment_id`, etc.
+        assert!(
+            restored
+                .provider_mapping("gitlab")
+                .unwrap()
+                .get("threadContext")
+                .is_none()
+        );
+        assert!(
+            restored
+                .provider_mapping("gitea")
+                .unwrap()
+                .get("root_comment_id")
+                .is_none()
+        );
+        // No credential-shaped keys ever appear in a provider mapping —
+        // only opaque forge-native ids/anchors, never tokens/secrets.
+        for provider in ["github", "gitlab", "azure-devops", "gitea", "forgejo"] {
+            let mapping = restored.provider_mapping(provider).unwrap().to_string();
+            let lower = mapping.to_ascii_lowercase();
+            assert!(
+                !lower.contains("token")
+                    && !lower.contains("secret")
+                    && !lower.contains("password"),
+                "provider={provider} mapping must never carry credential-shaped fields: {mapping}"
+            );
+        }
+    }
 }

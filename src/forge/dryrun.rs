@@ -46,7 +46,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::forge::capabilities::{
-    ProviderCapabilities, RangeSupport, ReplySupport, RequestChangesSupport, ThreadResolutionLevel,
+    CreateThreadSupport, ProviderCapabilities, RangeSupport, ReplySupport, RequestChangesSupport,
+    ThreadResolutionLevel,
 };
 use crate::forge::submit::SubmitEvent;
 use crate::forge::traits::ForgeKind;
@@ -249,10 +250,37 @@ fn plan_thread(
     );
 
     if !already_published {
+        // Structural anchor problems (the anchor itself has no unique/any
+        // valid placement in the current diff) always take priority, same
+        // as everywhere else in this planner — they are a property of the
+        // session data, not of the provider. Only once the anchor itself
+        // is fine does whether this provider has any verified standalone
+        // create-thread endpoint at all become the deciding factor: a
+        // profile with `CreateThreadSupport::Unsupported` (currently
+        // Gitea/Forgejo — see that variant's doc comment) can never plan
+        // `CreateThread` as `Planned`/`Emulated`, no matter how the anchor
+        // itself would otherwise be handled, since `ForgeBackend::
+        // create_thread`'s honest default (`UnsupportedOperation`) is
+        // never overridden for such a profile.
+        let create_outcome = match &anchor_outcome {
+            OperationOutcome::Stale { .. }
+            | OperationOutcome::Conflict { .. }
+            | OperationOutcome::Invalid { .. } => anchor_outcome.clone(),
+            _ if matches!(capabilities.create_thread, CreateThreadSupport::Unsupported) => {
+                OperationOutcome::Unsupported {
+                    reason: format!(
+                        "{} has no verified standalone create-thread endpoint on this \
+                         profile (only a batched pending-review comment route is evidenced)",
+                        capabilities.kind.provider_key()
+                    ),
+                }
+            }
+            _ => anchor_outcome.clone(),
+        };
         operations.push(PlannedOperation {
             thread_id: Some(thread_id.clone()),
             op: OperationKind::CreateThread,
-            outcome: anchor_outcome.clone(),
+            outcome: create_outcome,
         });
     }
 
@@ -500,43 +528,81 @@ mod tests {
     }
 
     #[test]
-    fn should_plan_line_comment_thread_as_planned_on_every_profile() {
+    fn should_plan_line_comment_thread_as_planned_where_create_thread_is_natively_supported() {
         let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
         let thread = open_thread(anchor);
         let thread_id = thread.id().as_str().to_string();
         let session = session_with_threads(vec![thread]);
 
-        for caps in [
-            github(),
-            gitlab(),
-            azure_devops(),
-            gitea_1_24(),
-            forgejo_16(),
-        ] {
+        // GitHub, GitLab, and Azure DevOps each verified a dedicated
+        // standalone create-thread endpoint (`CreateThreadSupport::Native`).
+        for caps in [github(), gitlab(), azure_devops()] {
             let plan = plan_publication(&session, &caps, None);
             let op = find_op(&plan, &thread_id);
             assert_eq!(op.outcome, OperationOutcome::Planned, "caps={caps:?}");
         }
     }
 
+    /// Regression test for the offline-integration merge audit's "no
+    /// planned->default Unsupported mismatch" requirement: Gitea/Forgejo
+    /// only verified a *batched* pending-review comment route
+    /// (`create_review`), never a standalone single-comment endpoint, so
+    /// `ForgeBackend::create_thread`'s honest default
+    /// (`UnsupportedOperation`) is never overridden for either — meaning
+    /// `plan_publication` must plan `CreateThread` as `Unsupported` for
+    /// both, never `Planned`/`Emulated`, even though their `file_comment`/
+    /// `general_comment` flags are `true` (those describe the batched
+    /// route, a separate axis — see `CreateThreadSupport`'s doc comment).
     #[test]
-    fn should_emulate_range_comment_as_single_line_on_gitea_but_plan_on_forgejo() {
-        let anchor = Anchor::range("src/a.rs", AnchorSide::New, 10, 12).unwrap();
+    fn should_plan_create_thread_as_unsupported_on_gitea_and_forgejo_stable() {
+        let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
         let thread = open_thread(anchor);
         let thread_id = thread.id().as_str().to_string();
         let session = session_with_threads(vec![thread]);
 
-        let gitea_plan = plan_publication(&session, &gitea_1_24(), None);
-        match &find_op(&gitea_plan, &thread_id).outcome {
+        for caps in [gitea_1_24(), forgejo_16()] {
+            let plan = plan_publication(&session, &caps, None);
+            let op = find_op(&plan, &thread_id);
+            match &op.outcome {
+                OperationOutcome::Unsupported { reason } => {
+                    assert!(
+                        reason.contains("create-thread"),
+                        "reason should name the missing capability, got {reason:?}"
+                    );
+                }
+                other => panic!("expected Unsupported on {caps:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Gitea and Forgejo diverge on range-anchor handling (Gitea silently
+    /// drops `extra_lines_count`, so it must be modeled as an `Emulated`
+    /// single-line substitute; Forgejo natively accepts it) — a real,
+    /// evidenced difference between the two stable pins that is
+    /// independent of, and unaffected by, `CreateThreadSupport` (which
+    /// currently gates *both* to `Unsupported` before this distinction is
+    /// ever reached for `CreateThread` specifically; it remains directly
+    /// tested here, at the `anchor_outcome` level, so it stays proven
+    /// correct for whenever a future ticket adds a verified Gitea/Forgejo
+    /// create-thread route and lifts that gate).
+    #[test]
+    fn should_emulate_range_comment_as_single_line_on_gitea_but_plan_on_forgejo() {
+        let target = AnchorTarget::Range {
+            path: "src/a.rs".to_string(),
+            side: AnchorSide::New,
+            start: 10,
+            end: 12,
+        };
+
+        match anchor_outcome(&target, AnchorState::Current, &gitea_1_24()) {
             OperationOutcome::Emulated { substitute } => {
                 assert!(substitute.contains("single-line"));
             }
             other => panic!("expected Emulated on gitea, got {other:?}"),
         }
 
-        let forgejo_plan = plan_publication(&session, &forgejo_16(), None);
         assert_eq!(
-            find_op(&forgejo_plan, &thread_id).outcome,
+            anchor_outcome(&target, AnchorState::Current, &forgejo_16()),
             OperationOutcome::Planned,
             "forgejo 16 live-accepts extra_lines_count range comments"
         );

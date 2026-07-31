@@ -149,6 +149,33 @@ pub enum RequestChangesSupport {
     Unsupported,
 }
 
+/// Whether a standalone durable thread (a single root comment posted
+/// immediately, outside any pending/batch review — `ForgeBackend::
+/// create_thread`/`dryrun::OperationKind::CreateThread`) can be created at
+/// all. This is deliberately a *separate* axis from `file_comment`/
+/// `general_comment` (which describe whether an anchored/general comment
+/// is possible *in some form*, including inside a batched
+/// `create_review`): GitHub/GitLab/Azure DevOps verified a dedicated
+/// single-comment endpoint and so are `Native` here; Gitea/Forgejo only
+/// verified the batched pending-review comment route (`create_review`) —
+/// no dedicated immediate-post endpoint is evidenced for either stable
+/// pin — so both report `Unsupported` here even though their
+/// `file_comment`/`general_comment` are `true` for the batched path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CreateThreadSupport {
+    /// A dedicated, verified endpoint posts a single root comment
+    /// immediately, outside any review object.
+    Native,
+    /// No verified standalone endpoint; only a batched review-comment route
+    /// (`create_review`) is evidenced. `dryrun::plan_publication` must
+    /// therefore plan `CreateThread` as `Unsupported` rather than `Planned`
+    /// — `ForgeBackend::create_thread`'s honest default
+    /// (`UnsupportedOperation`) is never overridden for a profile that
+    /// reports this variant.
+    Unsupported,
+}
+
 /// How replying to an existing comment/thread works.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -301,6 +328,7 @@ pub struct ProviderCapabilities {
     pub range: RangeSupport,
     pub file_comment: bool,
     pub general_comment: bool,
+    pub create_thread: CreateThreadSupport,
     pub pending_review: PendingReviewSupport,
     pub request_changes: RequestChangesSupport,
     pub reply: ReplySupport,
@@ -328,6 +356,7 @@ pub fn github() -> ProviderCapabilities {
         range: RangeSupport::SameSide,
         file_comment: true,
         general_comment: true,
+        create_thread: CreateThreadSupport::Native,
         pending_review: PendingReviewSupport::incremental(),
         request_changes: RequestChangesSupport::Native,
         reply: ReplySupport::Native,
@@ -361,6 +390,7 @@ pub fn gitlab() -> ProviderCapabilities {
         range: RangeSupport::SameSide,
         file_comment: true,
         general_comment: true,
+        create_thread: CreateThreadSupport::Native,
         // "Not verified as public REST object" per provider-semantics.md.
         pending_review: PendingReviewSupport::unsupported(),
         request_changes: RequestChangesSupport::Emulated {
@@ -395,6 +425,7 @@ pub fn azure_devops() -> ProviderCapabilities {
         range: RangeSupport::DualSideOffsets,
         file_comment: true,
         general_comment: true,
+        create_thread: CreateThreadSupport::Native,
         pending_review: PendingReviewSupport::unsupported(),
         request_changes: RequestChangesSupport::Vote,
         reply: ReplySupport::Native,
@@ -415,10 +446,12 @@ pub fn azure_devops() -> ProviderCapabilities {
 /// shot only (no incremental add-comment route), silently drops
 /// `extra_lines_count` range data rather than rejecting it (modeled as
 /// `RangeSupport::None`, not a lossy `SameSide`), native request-changes,
-/// no verified reply/resolve route on this stable pin, explicit
-/// review-level stale flag, general comments only via a separate issue
-/// comment (not the review anchor itself — still modeled `true` since the
-/// mechanism exists, just outside the review object).
+/// no verified reply/resolve *or* standalone create-thread route on this
+/// stable pin (only the batched pending-review comment route is
+/// evidenced — see `CreateThreadSupport::Unsupported`'s doc comment),
+/// explicit review-level stale flag, general comments only via a separate
+/// issue comment (not the review anchor itself — still modeled `true`
+/// since the mechanism exists, just outside the review object).
 pub fn gitea_1_24() -> ProviderCapabilities {
     ProviderCapabilities {
         kind: ForgeKind::Gitea,
@@ -428,6 +461,7 @@ pub fn gitea_1_24() -> ProviderCapabilities {
         range: RangeSupport::None,
         file_comment: true,
         general_comment: true,
+        create_thread: CreateThreadSupport::Unsupported,
         pending_review: PendingReviewSupport::single_shot(),
         request_changes: RequestChangesSupport::Native,
         reply: ReplySupport::Unsupported,
