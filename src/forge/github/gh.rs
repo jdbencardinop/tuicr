@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, TuicrError};
 use crate::forge::remote_comments::{RemoteReviewSummary, RemoteReviewThread};
 use crate::forge::traits::{
-    ForgeBackend, ForgeFileLinesRequest, ForgeKind, ForgeRepository, GhCreateReviewResponse,
-    PagedPullRequests, PullRequestCommit, PullRequestDetails, PullRequestListQuery,
-    PullRequestListScope, PullRequestTarget,
+    CreateThreadResponse, ForgeBackend, ForgeFileLinesRequest, ForgeKind, ForgeRepository,
+    GhCreateReviewResponse, NewThreadRequest, PagedPullRequests, PullRequestCommit,
+    PullRequestDetails, PullRequestListQuery, PullRequestListScope, PullRequestTarget,
+    ReplyResponse,
 };
 use crate::model::DiffLine;
 use crate::process::{
@@ -494,6 +495,79 @@ where
 
         parse_create_review_response(&output)
     }
+
+    fn create_thread(
+        &self,
+        pr: &PullRequestDetails,
+        request: NewThreadRequest<'_>,
+    ) -> Result<CreateThreadResponse> {
+        let (args, payload_json, is_general) =
+            super::mutations::build_create_thread_request(pr, &request)?;
+        let output = self
+            .runner
+            .run_with_stdin(&args, &payload_json)
+            .map_err(|err| map_create_review_error(err, &pr.repository.host))?;
+        let (comment_id, comment_node_id) =
+            super::mutations::parse_create_comment_response(&output)?;
+
+        let thread = if is_general {
+            None
+        } else {
+            let lookup_args = super::mutations::build_thread_lookup_args(pr, &comment_node_id);
+            let lookup_output = self
+                .run_gh(lookup_args, &pr.repository.host)
+                .unwrap_or_default();
+            super::mutations::parse_thread_lookup_response(&lookup_output).unwrap_or(None)
+        };
+
+        Ok(super::mutations::build_create_thread_response(
+            comment_id,
+            &comment_node_id,
+            thread,
+        ))
+    }
+
+    fn reply_to_thread(
+        &self,
+        pr: &PullRequestDetails,
+        provider_mapping: &serde_json::Value,
+        body: &str,
+    ) -> Result<ReplyResponse> {
+        let root_comment_id = provider_mapping
+            .get("root_comment_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                TuicrError::Forge(
+                    "provider mapping is missing `root_comment_id`; cannot reply".to_string(),
+                )
+            })?;
+        let (args, payload_json) =
+            super::mutations::build_reply_request(pr, root_comment_id, body)?;
+        let output = self
+            .runner
+            .run_with_stdin(&args, &payload_json)
+            .map_err(|err| map_create_review_error(err, &pr.repository.host))?;
+        super::mutations::parse_reply_response(&output)
+    }
+
+    fn set_thread_resolution(
+        &self,
+        pr: &PullRequestDetails,
+        provider_mapping: &serde_json::Value,
+        resolved: bool,
+    ) -> Result<serde_json::Value> {
+        let args = super::mutations::build_resolution_request(pr, provider_mapping, resolved)?;
+        let mutation_name = if resolved {
+            "resolveReviewThread"
+        } else {
+            "unresolveReviewThread"
+        };
+        let output = self.run_gh(args, &pr.repository.host)?;
+        let is_resolved = super::mutations::parse_resolution_response(&output, mutation_name)?;
+        let mut updated = provider_mapping.clone();
+        updated["is_resolved"] = serde_json::Value::Bool(is_resolved);
+        Ok(updated)
+    }
 }
 
 impl<R> GitHubGhBackend<R>
@@ -869,6 +943,9 @@ fn looks_like_auth_failure(stderr: &str) -> bool {
         || lower.contains("not logged into")
         || lower.contains("authentication failed")
         || lower.contains("requires authentication")
+        || lower.contains("bad credentials")
+        || lower.contains("http 401")
+        || lower.contains("(401)")
 }
 
 fn looks_like_permission_failure(stderr: &str) -> bool {
@@ -1041,6 +1118,12 @@ index 1111111..2222222 100644
         /// When set, `run_with_stdin` returns this body as the success output.
         /// Defaults to `CREATE_REVIEW_RESPONSE_JSON` when None.
         stdin_response: RefCell<Option<String>>,
+        /// When set, a plain `run` call for the resolve/unresolve GraphQL
+        /// mutation (`resolveReviewThread`/`unresolveReviewThread`) returns
+        /// this error instead of a stub success response. Lets tests
+        /// exercise `set_thread_resolution`'s error mapping, which goes
+        /// through `run_gh`/`run` rather than `run_with_stdin`.
+        resolution_error: RefCell<Option<GhCommandError>>,
     }
 
     impl GhCommandRunner for FakeGhRunner {
@@ -1066,7 +1149,14 @@ index 1111111..2222222 100644
                         .find(|a| a.starts_with("query="))
                         .map(String::as_str)
                         .unwrap_or("");
-                    if query.contains("reviewThreads(") {
+                    if query.contains("resolveReviewThread")
+                        || query.contains("unresolveReviewThread")
+                    {
+                        if let Some(err) = self.resolution_error.borrow().clone() {
+                            return Err(err);
+                        }
+                        Ok(r#"{"data": {"resolveReviewThread": {"thread": {"id": "PRRT_1", "isResolved": true}}}}"#.to_string())
+                    } else if query.contains("reviewThreads(") {
                         Ok(REVIEW_THREADS_JSON.to_string())
                     } else if query.contains("viewer { login }") && query.contains("commit { oid }")
                     {
@@ -1080,6 +1170,7 @@ index 1111111..2222222 100644
                         })
                     }
                 }
+
                 // gh api repos/.../pulls/<n>/commits (commit list).
                 Some("api")
                     if args
@@ -2194,5 +2285,203 @@ Match host github-work
             "expected unknown-commit hint, got: {msg:?}"
         );
         assert!(msg.contains(":e"), "got: {msg:?}");
+    }
+
+    fn thread_request(body: &'static str) -> NewThreadRequest<'static> {
+        NewThreadRequest {
+            commit_id: "abcdef1234567890",
+            body,
+            path: Some("src/a.rs"),
+            line: Some(10),
+            side: Some(crate::model::thread::AnchorSide::New),
+            range_start: None,
+        }
+    }
+
+    #[test]
+    fn should_map_401_bad_credentials_during_create_thread() {
+        // gh CLI's own message for an expired/invalid token.
+        let runner = FakeGhRunner::default();
+        *runner.stdin_error.borrow_mut() = Some(GhCommandError::Failed {
+            status: Some(1),
+            stderr: "gh: Bad credentials (HTTP 401)".to_string(),
+        });
+        let backend = GitHubGhBackend::with_runner(Some(repo()), runner);
+        let details = backend
+            .get_pull_request(parse_pull_request_target("125").unwrap())
+            .unwrap();
+        let err = backend
+            .create_thread(&details, thread_request("please fix"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("GitHub authentication failed"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn should_map_403_forbidden_during_reply_to_thread() {
+        let runner = FakeGhRunner::default();
+        *runner.stdin_error.borrow_mut() = Some(GhCommandError::Failed {
+            status: Some(1),
+            stderr: "HTTP 403: Resource not accessible by integration".to_string(),
+        });
+        let backend = GitHubGhBackend::with_runner(Some(repo()), runner);
+        let details = backend
+            .get_pull_request(parse_pull_request_target("125").unwrap())
+            .unwrap();
+        let mapping = serde_json::json!({"id": "PRRT_1", "root_comment_id": "111"});
+        let err = backend
+            .reply_to_thread(&details, &mapping, "on it")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("pull request write permission"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn should_preserve_409_conflict_detail_during_create_thread() {
+        let runner = FakeGhRunner::default();
+        *runner.stdin_error.borrow_mut() = Some(GhCommandError::Failed {
+            status: Some(1),
+            stderr: "gh: HTTP 409: Conflict — comment already exists".to_string(),
+        });
+        let backend = GitHubGhBackend::with_runner(Some(repo()), runner);
+        let details = backend
+            .get_pull_request(parse_pull_request_target("125").unwrap())
+            .unwrap();
+        let err = backend
+            .create_thread(&details, thread_request("please fix"))
+            .unwrap_err();
+        // No dedicated 409 message exists (unlike 403/422); the generic
+        // fallback must still preserve the original detail rather than
+        // swallowing it.
+        assert!(
+            err.to_string().contains("409") && err.to_string().contains("Conflict"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn should_preserve_429_rate_limit_detail_during_reply_to_thread() {
+        let runner = FakeGhRunner::default();
+        *runner.stdin_error.borrow_mut() = Some(GhCommandError::Failed {
+            status: Some(1),
+            stderr: "gh: API rate limit exceeded (HTTP 429)".to_string(),
+        });
+        let backend = GitHubGhBackend::with_runner(Some(repo()), runner);
+        let details = backend
+            .get_pull_request(parse_pull_request_target("125").unwrap())
+            .unwrap();
+        let mapping = serde_json::json!({"id": "PRRT_1", "root_comment_id": "111"});
+        let err = backend
+            .reply_to_thread(&details, &mapping, "on it")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("429")
+                && err.to_string().to_lowercase().contains("rate limit"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn should_preserve_5xx_server_error_detail_during_set_thread_resolution() {
+        let runner = FakeGhRunner::default();
+        *runner.resolution_error.borrow_mut() = Some(GhCommandError::Failed {
+            status: Some(1),
+            stderr: "gh: Internal Server Error (HTTP 500)".to_string(),
+        });
+        let backend = GitHubGhBackend::with_runner(Some(repo()), runner);
+        let details = backend
+            .get_pull_request(parse_pull_request_target("125").unwrap())
+            .unwrap();
+        let mapping = serde_json::json!({"id": "PRRT_1", "root_comment_id": "111"});
+        let err = backend
+            .set_thread_resolution(&details, &mapping, true)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("500") && err.to_string().contains("Internal Server Error"),
+            "got: {}",
+            err
+        );
+    }
+
+    /// Guards `GH_TOKEN`/`GITHUB_TOKEN` mutation for the duration of `body`,
+    /// restoring the previous value (or absence) afterward, and serializing
+    /// against other threads via a process-wide lock — mirrors the
+    /// `with_gitea_token` convention in
+    /// `src/forge/giteafj/backend.rs` for safely exercising env-derived
+    /// behavior under `cargo test`'s parallel execution.
+    fn with_env_tokens<T>(value: &str, body: impl FnOnce() -> T) -> T {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _guard = LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous_gh = std::env::var("GH_TOKEN").ok();
+        let previous_github = std::env::var("GITHUB_TOKEN").ok();
+        // SAFETY: serialized by `LOCK` above, so no other thread observes a
+        // torn/concurrent mutation of these process-wide vars.
+        unsafe {
+            std::env::set_var("GH_TOKEN", value);
+            std::env::set_var("GITHUB_TOKEN", value);
+        }
+        let result = body();
+        unsafe {
+            match &previous_gh {
+                Some(v) => std::env::set_var("GH_TOKEN", v),
+                None => std::env::remove_var("GH_TOKEN"),
+            }
+            match &previous_github {
+                Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+                None => std::env::remove_var("GITHUB_TOKEN"),
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn should_never_leak_environment_token_into_constructed_mutation_calls() {
+        // `gh` resolves credentials from its own auth state, never from our
+        // constructed args/stdin — this is a structural regression guard:
+        // even with a token-shaped value sitting in the environment, none
+        // of the three new durable-thread mutation paths may ever embed it
+        // into the command line or JSON payload they hand to the runner.
+        const SENTINEL: &str = "ghp_SENTINEL0123456789abcdefABCDEF01234567";
+        with_env_tokens(SENTINEL, || {
+            let runner = FakeGhRunner::default();
+            let backend = GitHubGhBackend::with_runner(Some(repo()), runner);
+            let details = backend
+                .get_pull_request(parse_pull_request_target("125").unwrap())
+                .unwrap();
+
+            let _ = backend.create_thread(&details, thread_request("please fix"));
+            let mapping = serde_json::json!({"id": "PRRT_1", "root_comment_id": "111"});
+            let _ = backend.reply_to_thread(&details, &mapping, "on it");
+            let _ = backend.set_thread_resolution(&details, &mapping, true);
+
+            for call in backend.runner.calls.borrow().iter() {
+                for arg in call {
+                    assert!(!arg.contains(SENTINEL), "token leaked into args: {arg}");
+                }
+            }
+            for (args, stdin) in backend.runner.stdin_calls.borrow().iter() {
+                for arg in args {
+                    assert!(
+                        !arg.contains(SENTINEL),
+                        "token leaked into stdin args: {arg}"
+                    );
+                }
+                assert!(
+                    !stdin.contains(SENTINEL),
+                    "token leaked into stdin body: {stdin}"
+                );
+            }
+        });
     }
 }

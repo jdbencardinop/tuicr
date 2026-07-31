@@ -263,6 +263,21 @@ fn plan_thread(
         if reply.author.kind == AuthorKind::Remote {
             continue;
         }
+        // A locally authored reply that was already published in a prior
+        // `execute_plan` run is recorded in the `"{provider}:replies"`
+        // ledger (see `PersistedThread::record_published_reply`), which is
+        // namespaced separately from the bare provider mapping so it
+        // survives `merge_remote_thread_into_existing`'s wholesale
+        // replacement of that key on the next remote re-import. Without
+        // this check, re-running the planner after a successful publish
+        // (but before any remote re-fetch marks the reply `Remote`) would
+        // plan — and `execute_plan` would resend — the same reply again.
+        if persisted
+            .published_reply_id(capabilities.kind.provider_key(), reply.id().as_str())
+            .is_some()
+        {
+            continue;
+        }
         let outcome = if !matches!(anchor_outcome, OperationOutcome::Planned) {
             // A reply to a comment that can't itself be placed inherits the
             // same placement problem — never silently claim a reply would
@@ -331,6 +346,19 @@ fn plan_thread(
                 op: OperationKind::Resolve,
                 outcome: resolution_outcome(),
             }),
+        // The local thread has been reopened (or was never resolved
+        // locally) but the provider's last-known snapshot still shows it
+        // resolved — plan a `Reopen` so the two sides converge. Without
+        // this arm `Reopen` was defined but never constructed, silently
+        // leaving already-resolved-upstream threads that get locally
+        // reopened stuck out of sync.
+        crate::model::thread::ThreadStatus::Open if already_resolved_upstream => {
+            operations.push(PlannedOperation {
+                thread_id: Some(thread_id.clone()),
+                op: OperationKind::Reopen,
+                outcome: resolution_outcome(),
+            })
+        }
         crate::model::thread::ThreadStatus::Dismissed => operations.push(PlannedOperation {
             thread_id: Some(thread_id),
             op: OperationKind::Dismiss,
@@ -912,6 +940,66 @@ mod tests {
     }
 
     #[test]
+    fn should_not_plan_reopen_when_thread_is_open_and_provider_never_reported_resolved() {
+        // Sanity check: a plain open thread with no prior provider mapping
+        // (or a mapping that never reported `is_resolved: true`) must not
+        // get a stray `Reopen` planned alongside the `CreateThread`.
+        let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
+        let thread = open_thread(anchor);
+        let session = session_with_threads(vec![thread]);
+
+        let plan = plan_publication(&session, &github(), None);
+        assert!(
+            !plan
+                .operations
+                .iter()
+                .any(|op| matches!(op.op, OperationKind::Reopen))
+        );
+    }
+
+    #[test]
+    fn should_plan_reopen_when_locally_reopened_thread_was_resolved_upstream() {
+        // The provider's last-known snapshot (captured at import/publish
+        // time in the bare provider mapping's `is_resolved` flag) says the
+        // thread is resolved, but the local thread has since been reopened
+        // (`ThreadStatus::Open`). The two sides have diverged, so a
+        // `Reopen` must be planned to converge them — this exercises the
+        // previously-dead `OperationKind::Reopen` arm.
+        let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
+        let mut thread = open_thread(anchor);
+        thread.thread.resolve();
+        thread.upsert_provider_mapping(
+            "github",
+            serde_json::json!({"id": "PRRT_1", "is_resolved": true}),
+        );
+        thread.thread.reopen();
+        assert_eq!(
+            thread.thread.status(),
+            crate::model::thread::ThreadStatus::Open
+        );
+        let thread_id = thread.id().as_str().to_string();
+        let session = session_with_threads(vec![thread]);
+
+        let plan = plan_publication(&session, &github(), None);
+        let reopen_op = plan
+            .operations
+            .iter()
+            .find(|op| {
+                op.thread_id.as_deref() == Some(thread_id.as_str())
+                    && matches!(op.op, OperationKind::Reopen)
+            })
+            .expect("reopen op present");
+        assert_eq!(reopen_op.outcome, OperationOutcome::Planned);
+        assert!(
+            !plan.operations.iter().any(|op| {
+                op.thread_id.as_deref() == Some(thread_id.as_str())
+                    && matches!(op.op, OperationKind::Resolve)
+            }),
+            "must not also plan Resolve for the same reopened thread"
+        );
+    }
+
+    #[test]
     fn should_reject_corrupted_range_anchor_as_invalid_not_silently_planned() {
         // Bypass the validating `Anchor::range` constructor entirely via a
         // raw JSON round-trip, the same technique `thread_store.rs` uses
@@ -1080,6 +1168,37 @@ mod tests {
             "only the locally-authored reply should be planned, got {reply_ops:?}"
         );
         assert_eq!(reply_ops[0].outcome, OperationOutcome::Planned);
+    }
+
+    #[test]
+    fn should_not_replan_a_locally_authored_reply_already_recorded_in_the_publish_ledger() {
+        // A reply authored locally (`Human`/`Agent`) and successfully
+        // published by a prior `execute_plan` run is recorded in the
+        // `"{provider}:replies"` ledger via `record_published_reply`
+        // (independent of whether the thread has since been re-imported/
+        // re-fetched and thus never gets `AuthorKind::Remote` retroactively
+        // applied to it). Re-planning must recognise the ledger entry and
+        // skip it — otherwise every dry-run/execute cycle after the first
+        // successful publish would resend the same reply.
+        let anchor = Anchor::line("src/a.rs", AnchorSide::New, 10);
+        let mut thread = open_thread(anchor);
+        thread.upsert_provider_mapping("github", serde_json::json!({"id": "PRRT_1"}));
+        let reply_id = thread.thread.reply(ThreadComment::new(
+            ThreadAuthor::human("alice"),
+            "already published in a prior run",
+        ));
+        thread.record_published_reply("github", reply_id.as_str(), "PRRC_999");
+        let thread_id = thread.id().as_str().to_string();
+        let session = session_with_threads(vec![thread]);
+
+        let plan = plan_publication(&session, &github(), None);
+        assert!(
+            !plan.operations.iter().any(|op| {
+                op.thread_id.as_deref() == Some(thread_id.as_str())
+                    && matches!(op.op, OperationKind::Reply { .. })
+            }),
+            "must not replan a reply already recorded in the publish ledger"
+        );
     }
 
     #[test]

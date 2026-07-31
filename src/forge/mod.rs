@@ -13,6 +13,7 @@ pub mod giteafj;
 pub mod github;
 pub mod gitlab;
 pub mod pr_open;
+pub mod publish;
 pub mod registry;
 pub mod remote_comments;
 pub mod selector;

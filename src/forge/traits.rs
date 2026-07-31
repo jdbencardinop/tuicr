@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::error::Result;
+use crate::error::{Result, TuicrError};
 use crate::forge::remote_comments::RemoteReviewThread;
 use crate::forge::submit::SubmitEvent;
 use crate::model::{DiffLine, FileStatus};
@@ -448,6 +448,60 @@ pub struct CreateReviewRequest<'a> {
     pub comments: &'a [crate::forge::submit::InlineComment],
 }
 
+/// Request to create a single durable thread — one root comment, posted
+/// immediately (not batched into a pending/draft review; see
+/// [`ForgeBackend::create_review`] for that path). Mirrors
+/// [`crate::model::thread::AnchorTarget`] without depending on the whole
+/// [`crate::model::thread::Thread`] type, so backends only need to reason
+/// about "what am I anchoring to", not durable-thread bookkeeping.
+#[derive(Debug, Clone)]
+pub struct NewThreadRequest<'a> {
+    /// SHA the comment anchors against. For GitHub this is the PR's current
+    /// head commit; for GitLab it feeds the discussion `position`'s
+    /// `head_sha` (paired with `base_sha`/`start_sha` already on
+    /// [`PullRequestDetails`]).
+    pub commit_id: &'a str,
+    pub body: &'a str,
+    /// `None` for a review-level general comment (no anchor at all).
+    pub path: Option<&'a str>,
+    /// `None` for a whole-file comment (a path with no line).
+    pub line: Option<u32>,
+    pub side: Option<crate::model::thread::AnchorSide>,
+    /// Present only for a multi-line range anchor; `line`/`side` above then
+    /// describe the range's end.
+    pub range_start: Option<u32>,
+}
+
+/// Response returned after successfully creating a single durable thread.
+/// `mapping` is the exact opaque JSON payload the caller should persist via
+/// [`crate::model::thread_store::PersistedThread::upsert_provider_mapping`]
+/// — every backend is expected to include at least an `"id"` string
+/// (matching [`crate::model::thread_store::PersistedThread::has_provider_id`]'s
+/// convention) and an `"is_resolved"` boolean (matching
+/// [`crate::model::thread_store::thread_from_remote`]'s import shape), so a
+/// thread created locally and one imported from the provider always carry
+/// the same mapping shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateThreadResponse {
+    pub mapping: serde_json::Value,
+    /// Provider-native ID of the root comment/note itself, distinct from
+    /// the thread/discussion ID in `mapping["id"]` — GitHub's REST review
+    /// -comment ID and its owning GraphQL thread ID are different objects;
+    /// GitLab's discussion ID and its root note ID are likewise different.
+    /// Used as the reply-target for [`ForgeBackend::reply_to_thread`] on
+    /// providers (GitHub) whose reply call addresses a comment, not the
+    /// thread.
+    pub root_comment_id: String,
+}
+
+/// Response returned after successfully posting a reply to an existing
+/// thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyResponse {
+    /// Provider-native ID of the newly created reply comment/note.
+    pub comment_id: String,
+}
+
 /// A single commit on a pull request, as returned by the forge.
 ///
 /// Fields mirror what the inline commit selector needs to render a row.
@@ -546,6 +600,66 @@ pub trait ForgeBackend {
         pr: &PullRequestDetails,
         request: CreateReviewRequest<'_>,
     ) -> Result<GhCreateReviewResponse>;
+
+    /// Create one durable thread (a single root comment posted immediately,
+    /// outside any pending/batch review). This is the write side of
+    /// [`Self::list_review_threads`]/durable-thread publication —
+    /// `crate::forge::dryrun::plan_publication`'s `CreateThread` operation
+    /// executes through this method.
+    ///
+    /// Default returns [`TuicrError::UnsupportedOperation`]; only backends
+    /// with a verified single-comment-thread endpoint (GitHub, GitLab)
+    /// override it. Placeholder kinds (Azure DevOps, Gitea, Forgejo) are
+    /// left on this default until their own tickets add real transports.
+    fn create_thread(
+        &self,
+        _pr: &PullRequestDetails,
+        _request: NewThreadRequest<'_>,
+    ) -> Result<CreateThreadResponse> {
+        Err(TuicrError::UnsupportedOperation(
+            "this backend has no create_thread implementation".to_string(),
+        ))
+    }
+
+    /// Reply to an existing thread. `provider_mapping` is the exact JSON
+    /// value previously stored via
+    /// `PersistedThread::upsert_provider_mapping` — either from
+    /// [`Self::create_thread`]'s `mapping`/`root_comment_id`, or from
+    /// importing the thread via [`Self::list_review_threads`]. Backends read
+    /// whatever keys they need from it (never body/path heuristics) —
+    /// GitHub reads `root_comment_id`; GitLab reads `id` (the discussion
+    /// ID).
+    ///
+    /// Default returns [`TuicrError::UnsupportedOperation`].
+    fn reply_to_thread(
+        &self,
+        _pr: &PullRequestDetails,
+        _provider_mapping: &serde_json::Value,
+        _body: &str,
+    ) -> Result<ReplyResponse> {
+        Err(TuicrError::UnsupportedOperation(
+            "this backend has no reply_to_thread implementation".to_string(),
+        ))
+    }
+
+    /// Set a thread's resolved/unresolved state natively (`resolved: true`
+    /// for resolve, `false` for reopen). `provider_mapping` is the same
+    /// opaque payload described on [`Self::reply_to_thread`]. Returns the
+    /// updated mapping the caller should persist (normally the same value
+    /// with `"is_resolved"` flipped) so a subsequent dry-run/execute pass
+    /// sees the new state without a separate re-fetch.
+    ///
+    /// Default returns [`TuicrError::UnsupportedOperation`].
+    fn set_thread_resolution(
+        &self,
+        _pr: &PullRequestDetails,
+        _provider_mapping: &serde_json::Value,
+        _resolved: bool,
+    ) -> Result<serde_json::Value> {
+        Err(TuicrError::UnsupportedOperation(
+            "this backend has no thread-resolution implementation".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]

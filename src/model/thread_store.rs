@@ -79,6 +79,75 @@ impl PersistedThread {
             == Some(id)
     }
 
+    /// Record that this thread's root comment was published to `provider`
+    /// as `provider_comment_id`. Stored under a namespaced key (see
+    /// [`root_comment_mapping_key`]) distinct from the thread's own bare
+    /// `provider` mapping, so it survives a subsequent remote re-import
+    /// (see that function's doc comment for why). Idempotent: recording
+    /// again for the same provider overwrites rather than duplicates.
+    pub fn record_root_comment_id(
+        &mut self,
+        provider: &str,
+        provider_comment_id: impl Into<String>,
+    ) {
+        self.upsert_provider_mapping(
+            root_comment_mapping_key(provider),
+            serde_json::Value::String(provider_comment_id.into()),
+        );
+    }
+
+    /// Look up this thread's previously recorded provider-native root
+    /// -comment ID for `provider`, from the namespaced ledger written by
+    /// [`Self::record_root_comment_id`]. Falls back to the bare mapping's
+    /// own `"root_comment_id"` field (present right after `create_thread`,
+    /// before any re-import could have wiped it) so callers get a value
+    /// even before the ledger entry has been written.
+    pub fn root_comment_id(&self, provider: &str) -> Option<&str> {
+        self.provider_mapping(&root_comment_mapping_key(provider))
+            .and_then(|value| value.as_str())
+            .or_else(|| {
+                self.provider_mapping(provider)
+                    .and_then(|value| value.get("root_comment_id"))
+                    .and_then(|value| value.as_str())
+            })
+    }
+
+    /// Look up a previously recorded provider-native reply/note ID for the
+    /// local `comment_id`, stored under [`replies_mapping_key`]. Returns
+    /// `None` when the reply has never been published to `provider` (or the
+    /// thread has no reply ledger yet at all).
+    pub fn published_reply_id(&self, provider: &str, comment_id: &str) -> Option<&str> {
+        self.provider_mapping(&replies_mapping_key(provider))
+            .and_then(|value| value.get(comment_id))
+            .and_then(|value| value.as_str())
+    }
+
+    /// Record that the local reply `comment_id` was successfully published
+    /// to `provider` as `provider_comment_id`. Stored under a namespaced key
+    /// (see [`replies_mapping_key`]) distinct from the thread's own
+    /// `provider` mapping, so a subsequent remote re-import/merge (which
+    /// wholesale-replaces the bare `provider` entry via
+    /// [`merge_remote_thread_into_existing`]) never clobbers this ledger.
+    /// Idempotent: publishing the same `comment_id` again overwrites rather
+    /// than duplicates the entry.
+    pub fn record_published_reply(
+        &mut self,
+        provider: &str,
+        comment_id: impl Into<String>,
+        provider_comment_id: impl Into<String>,
+    ) {
+        let key = replies_mapping_key(provider);
+        let mut replies = self
+            .provider_mapping(&key)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !replies.is_object() {
+            replies = serde_json::json!({});
+        }
+        replies[comment_id.into()] = serde_json::Value::String(provider_comment_id.into());
+        self.upsert_provider_mapping(key, replies);
+    }
+
     /// Re-evaluate this thread's anchor against updated file content,
     /// letting an exact provider remap win over unique context relocation.
     /// Thin pass-through to [`Thread::refresh_anchor_with_remap`] kept here
@@ -314,6 +383,31 @@ fn anchor_side_for_remote(side: RemoteCommentSide) -> AnchorSide {
 /// after its anchor relocates.
 pub fn remote_thread_id_for(provider: &str, remote_id: &str) -> ThreadId {
     thread_id_from_raw(&format!("remote-thread:{provider}:{remote_id}"))
+}
+
+/// The `provider_mappings` key used to track published-reply IDs for
+/// `provider`, namespaced away from `provider`'s own bare key (see
+/// [`PersistedThread::record_published_reply`]/
+/// [`PersistedThread::published_reply_id`]).
+pub fn replies_mapping_key(provider: &str) -> String {
+    format!("{provider}:replies")
+}
+
+/// The `provider_mappings` key used to durably track a thread's own
+/// root-comment ID for `provider` (see
+/// [`PersistedThread::record_root_comment_id`]/
+/// [`PersistedThread::root_comment_id`]), namespaced away from the bare
+/// `provider` key for the same reason as [`replies_mapping_key`]: some
+/// backends (GitHub) embed `root_comment_id` inside the bare mapping too
+/// (as a convenience for readers that already have it in hand right after
+/// `create_thread`), but that copy does not survive
+/// [`merge_remote_thread_into_existing`]'s wholesale replacement of the
+/// bare key on the next remote re-import/sync. This namespaced copy does,
+/// so [`crate::forge::traits::ForgeBackend::reply_to_thread`] callers can
+/// still find the root comment to reply to after a thread has been
+/// re-imported since it was created.
+pub fn root_comment_mapping_key(provider: &str) -> String {
+    format!("{provider}:root")
 }
 
 /// Convert a fetched [`RemoteReviewThread`] into a [`PersistedThread`],
@@ -616,5 +710,137 @@ mod tests {
         assert_eq!(anchor_side_for_legacy(Some(LineSide::Old)), AnchorSide::Old);
         assert_eq!(anchor_side_for_legacy(Some(LineSide::New)), AnchorSide::New);
         assert_eq!(anchor_side_for_legacy(None), AnchorSide::New);
+    }
+
+    #[test]
+    fn should_record_and_look_up_published_reply_ids_idempotently() {
+        let comment = legacy_comment(DEFAULT_AUTHOR, "note");
+        let mut persisted = thread_from_legacy_comment(Anchor::review(), &comment);
+
+        assert_eq!(persisted.published_reply_id("github", "local-1"), None);
+
+        persisted.record_published_reply("github", "local-1", "PRRC_1");
+        persisted.record_published_reply("github", "local-1", "PRRC_1");
+
+        assert_eq!(
+            persisted.published_reply_id("github", "local-1"),
+            Some("PRRC_1")
+        );
+        // A second, distinct reply gets its own entry without disturbing the
+        // first.
+        persisted.record_published_reply("github", "local-2", "PRRC_2");
+        assert_eq!(
+            persisted.published_reply_id("github", "local-1"),
+            Some("PRRC_1")
+        );
+        assert_eq!(
+            persisted.published_reply_id("github", "local-2"),
+            Some("PRRC_2")
+        );
+        // The reply ledger lives under a namespaced key, distinct from the
+        // provider's own bare mapping.
+        assert!(persisted.provider_mapping("github").is_none());
+        assert!(
+            persisted
+                .provider_mapping(&replies_mapping_key("github"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn should_keep_reply_ledgers_isolated_per_provider() {
+        let comment = legacy_comment(DEFAULT_AUTHOR, "note");
+        let mut persisted = thread_from_legacy_comment(Anchor::review(), &comment);
+
+        persisted.record_published_reply("github", "local-1", "PRRC_1");
+        persisted.record_published_reply("gitlab", "local-1", "note-9");
+
+        assert_eq!(
+            persisted.published_reply_id("github", "local-1"),
+            Some("PRRC_1")
+        );
+        assert_eq!(
+            persisted.published_reply_id("gitlab", "local-1"),
+            Some("note-9")
+        );
+    }
+
+    #[test]
+    fn should_survive_remote_merge_overwriting_the_bare_provider_mapping() {
+        // A reply ledger recorded under the namespaced key must not be
+        // clobbered when a subsequent remote re-import replaces the bare
+        // `provider` mapping wholesale (see `merge_remote_thread_into_existing`).
+        let comment = legacy_comment(DEFAULT_AUTHOR, "note");
+        let mut persisted = thread_from_legacy_comment(Anchor::review(), &comment);
+        persisted.record_published_reply("github", "local-1", "PRRC_1");
+        persisted.upsert_provider_mapping("github", serde_json::json!({"id": "PRRT_1"}));
+
+        // Simulate the bare-key replacement `merge_remote_thread_into_existing`
+        // performs on every re-fetch.
+        persisted.upsert_provider_mapping(
+            "github",
+            serde_json::json!({"id": "PRRT_1", "is_resolved": true}),
+        );
+
+        assert_eq!(
+            persisted.published_reply_id("github", "local-1"),
+            Some("PRRC_1")
+        );
+    }
+
+    #[test]
+    fn should_record_and_look_up_root_comment_id_idempotently() {
+        let comment = legacy_comment(DEFAULT_AUTHOR, "note");
+        let mut persisted = thread_from_legacy_comment(Anchor::review(), &comment);
+
+        assert_eq!(persisted.root_comment_id("github"), None);
+
+        persisted.record_root_comment_id("github", "PRRC_1");
+        persisted.record_root_comment_id("github", "PRRC_1");
+        assert_eq!(persisted.root_comment_id("github"), Some("PRRC_1"));
+
+        // Recording again overwrites rather than duplicating/erroring.
+        persisted.record_root_comment_id("github", "PRRC_2");
+        assert_eq!(persisted.root_comment_id("github"), Some("PRRC_2"));
+    }
+
+    #[test]
+    fn should_survive_remote_merge_overwriting_the_bare_provider_mapping_for_root_comment_id() {
+        // Mirrors the reply-ledger survival test above: the root-comment-id
+        // ledger must not be clobbered when a remote re-import replaces the
+        // bare `provider` mapping wholesale.
+        let comment = legacy_comment(DEFAULT_AUTHOR, "note");
+        let mut persisted = thread_from_legacy_comment(Anchor::review(), &comment);
+        persisted.record_root_comment_id("github", "PRRC_1");
+        persisted.upsert_provider_mapping(
+            "github",
+            serde_json::json!({"id": "PRRT_1", "root_comment_id": "PRRC_1"}),
+        );
+
+        // Simulate the bare-key replacement `merge_remote_thread_into_existing`
+        // performs on every re-fetch — the bare mapping's own
+        // `root_comment_id` copy is gone, but the namespaced ledger survives.
+        persisted.upsert_provider_mapping(
+            "github",
+            serde_json::json!({"id": "PRRT_1", "is_resolved": true}),
+        );
+
+        assert_eq!(persisted.root_comment_id("github"), Some("PRRC_1"));
+    }
+
+    #[test]
+    fn should_fall_back_to_the_bare_mapping_root_comment_id_before_the_ledger_is_written() {
+        // Right after `create_thread` succeeds but before the caller has
+        // called `record_root_comment_id`, the bare mapping's own
+        // `root_comment_id` field (written by `build_create_thread_response`)
+        // must still resolve.
+        let comment = legacy_comment(DEFAULT_AUTHOR, "note");
+        let mut persisted = thread_from_legacy_comment(Anchor::review(), &comment);
+        persisted.upsert_provider_mapping(
+            "github",
+            serde_json::json!({"id": "PRRT_1", "root_comment_id": "PRRC_1"}),
+        );
+
+        assert_eq!(persisted.root_comment_id("github"), Some("PRRC_1"));
     }
 }

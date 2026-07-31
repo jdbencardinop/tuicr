@@ -8,9 +8,10 @@ use sha1::{Digest, Sha1};
 use crate::error::{Result, TuicrError};
 use crate::forge::remote_comments::RemoteReviewThread;
 use crate::forge::traits::{
-    ForgeBackend, ForgeFileLinesRequest, ForgeRepository, GhCreateReviewResponse,
-    PagedPullRequests, PullRequestCommit, PullRequestDetails, PullRequestListQuery,
-    PullRequestListScope, PullRequestReviewMetadata, PullRequestReviewRecord, PullRequestTarget,
+    CreateThreadResponse, ForgeBackend, ForgeFileLinesRequest, ForgeRepository,
+    GhCreateReviewResponse, NewThreadRequest, PagedPullRequests, PullRequestCommit,
+    PullRequestDetails, PullRequestListQuery, PullRequestListScope, PullRequestReviewMetadata,
+    PullRequestReviewRecord, PullRequestTarget, ReplyResponse,
 };
 use crate::model::DiffLine;
 use crate::process::{
@@ -22,10 +23,11 @@ use super::models::{
     GlabApprovalState, GlabCommit, GlabDiscussion, GlabMrDetails, GlabMrSummary, GlabMrVersion,
     GlabUser,
 };
+use super::mutations;
 use crate::forge::submit::{GhSide, SubmitEvent};
 use crate::forge::traits::CreateReviewRequest;
 
-const DEFAULT_GITLAB_HOST: &str = "gitlab.com";
+pub(super) const DEFAULT_GITLAB_HOST: &str = "gitlab.com";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GlabCommandError {
@@ -125,8 +127,20 @@ fn local_range_diff(repo_root: &Path, start_sha: &str, end_sha: &str) -> Option<
 }
 
 /// Percent-encode `owner/repo` as `owner%2Frepo` for GitLab project API paths.
-fn gl_project_path(owner: &str, name: &str) -> String {
+pub(super) fn gl_project_path(owner: &str, name: &str) -> String {
     format!("{}/{}", owner, name).replace('/', "%2F")
+}
+
+/// Extra args to select a specific GitLab instance for `glab api` calls.
+/// Only `glab api` (and `glab auth`) accept `--hostname`; shared by
+/// [`GitLabGlabBackend::api_hostname_args`] and `super::mutations`'s
+/// durable-thread write payload builders.
+pub(super) fn gl_api_hostname_args(repo: &ForgeRepository) -> Vec<String> {
+    if repo.host != DEFAULT_GITLAB_HOST {
+        vec!["--hostname".to_string(), repo.host.clone()]
+    } else {
+        vec![]
+    }
 }
 
 /// Percent-encode a file path for use in GitLab repository file API endpoints.
@@ -229,11 +243,7 @@ where
     /// Only `glab api` (and `glab auth`) accept `--hostname`; the `mr`
     /// subcommands don't, so use `repo_arg` for those.
     fn api_hostname_args(repo: &ForgeRepository) -> Vec<String> {
-        if repo.host != DEFAULT_GITLAB_HOST {
-            vec!["--hostname".to_string(), repo.host.clone()]
-        } else {
-            vec![]
-        }
+        gl_api_hostname_args(repo)
     }
 
     fn run_api(&self, repo: &ForgeRepository, endpoint: String) -> Result<String> {
@@ -786,6 +796,59 @@ where
             state: state.to_string(),
         })
     }
+
+    fn create_thread(
+        &self,
+        pr: &PullRequestDetails,
+        request: NewThreadRequest<'_>,
+    ) -> Result<CreateThreadResponse> {
+        let (args, body) = mutations::build_create_thread_request(pr, &request)?;
+        let output = self
+            .runner
+            .run_with_stdin(&args, &body)
+            .map_err(|err| map_create_notes_error(err, &pr.repository.host))?;
+        let (discussion_id, root_note_id) = mutations::parse_create_discussion_response(&output)?;
+        Ok(mutations::build_create_thread_response(
+            discussion_id,
+            root_note_id,
+        ))
+    }
+
+    fn reply_to_thread(
+        &self,
+        pr: &PullRequestDetails,
+        provider_mapping: &serde_json::Value,
+        body: &str,
+    ) -> Result<ReplyResponse> {
+        let discussion_id = provider_mapping
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                TuicrError::Forge(
+                    "provider mapping is missing the GitLab discussion `id`".to_string(),
+                )
+            })?;
+        let (args, payload) = mutations::build_reply_request(pr, discussion_id, body)?;
+        let output = self
+            .runner
+            .run_with_stdin(&args, &payload)
+            .map_err(|err| map_create_notes_error(err, &pr.repository.host))?;
+        mutations::parse_reply_response(&output)
+    }
+
+    fn set_thread_resolution(
+        &self,
+        pr: &PullRequestDetails,
+        provider_mapping: &serde_json::Value,
+        resolved: bool,
+    ) -> Result<serde_json::Value> {
+        let args = mutations::build_resolution_request(pr, provider_mapping, resolved)?;
+        let output = self.run_glab(args, &pr.repository.host)?;
+        let is_resolved = mutations::parse_resolution_response(&output)?;
+        let mut mapping = provider_mapping.clone();
+        mapping["is_resolved"] = serde_json::Value::Bool(is_resolved);
+        Ok(mapping)
+    }
 }
 
 impl<R> GitLabGlabBackend<R>
@@ -1098,7 +1161,7 @@ fn resolve_ssh_hostname_from_config(alias: &str, config: &str) -> String {
     alias.to_string()
 }
 
-fn map_glab_error(error: GlabCommandError, host: &str) -> TuicrError {
+pub(super) fn map_glab_error(error: GlabCommandError, host: &str) -> TuicrError {
     match error {
         GlabCommandError::MissingGlab => TuicrError::Forge(
             "GitLab integration requires `glab`.\nInstall GitLab CLI and run `glab auth login`."
@@ -1127,7 +1190,7 @@ fn map_glab_error(error: GlabCommandError, host: &str) -> TuicrError {
 /// Format: `{SHA1(file_path)}_{old_line}_{new_line}`
 /// For a new-side (right) comment: old_line = 0.
 /// For an old-side (left) comment: new_line = 0.
-fn gl_line_code(file_path: &str, old_line: u32, new_line: u32) -> String {
+pub(super) fn gl_line_code(file_path: &str, old_line: u32, new_line: u32) -> String {
     let hash = format!("{:x}", Sha1::digest(file_path.as_bytes()));
     format!("{hash}_{old_line}_{new_line}")
 }
@@ -1137,7 +1200,7 @@ fn gl_line_code(file_path: &str, old_line: u32, new_line: u32) -> String {
 /// GitLab expects each endpoint to carry the `type` ("new" / "old"), the
 /// integer line number on that side, and the `line_code` so the server can
 /// anchor the range without re-walking the diff.
-fn gl_range_endpoint(new_path: &str, side: GhSide, line: u32) -> serde_json::Value {
+pub(super) fn gl_range_endpoint(new_path: &str, side: GhSide, line: u32) -> serde_json::Value {
     match side {
         GhSide::Right => serde_json::json!({
             "type": "new",
@@ -1200,7 +1263,7 @@ fn check_graphql_errors(output: &str, mutation: &str) -> Result<()> {
     }
 }
 
-fn map_create_notes_error(error: GlabCommandError, host: &str) -> TuicrError {
+pub(super) fn map_create_notes_error(error: GlabCommandError, host: &str) -> TuicrError {
     if let GlabCommandError::Failed { ref stderr, .. } = error
         && looks_like_permission_failure(stderr)
     {
@@ -2143,5 +2206,219 @@ mod tests {
     fn should_reject_empty_target() {
         assert!(parse_pull_request_target_gitlab("").is_err());
         assert!(parse_pull_request_target_gitlab("  ").is_err());
+    }
+
+    /// A scriptable runner for error-mapping tests: unlike `RecordingRunner`
+    /// (which always succeeds), this returns a queued error exactly once
+    /// per hook (`stdin_error` for `run_with_stdin`, `run_error` for plain
+    /// `run`), then falls back to a stub success response.
+    #[derive(Default)]
+    struct ErrorRunner {
+        calls: RefCell<Vec<Vec<String>>>,
+        stdin_calls: RefCell<Vec<(Vec<String>, String)>>,
+        stdin_error: RefCell<Option<GlabCommandError>>,
+        stdin_response: RefCell<Option<String>>,
+        run_error: RefCell<Option<GlabCommandError>>,
+        run_response: RefCell<Option<String>>,
+    }
+
+    impl GlabCommandRunner for ErrorRunner {
+        fn run(&self, args: &[String]) -> GlabCommandResult<String> {
+            self.calls.borrow_mut().push(args.to_vec());
+            if let Some(err) = self.run_error.borrow().clone() {
+                return Err(err);
+            }
+            Ok(self.run_response.borrow().clone().unwrap_or_default())
+        }
+
+        fn run_with_stdin(&self, args: &[String], stdin: &str) -> GlabCommandResult<String> {
+            self.calls.borrow_mut().push(args.to_vec());
+            self.stdin_calls
+                .borrow_mut()
+                .push((args.to_vec(), stdin.to_string()));
+            if let Some(err) = self.stdin_error.borrow().clone() {
+                return Err(err);
+            }
+            Ok(self.stdin_response.borrow().clone().unwrap_or_else(|| {
+                r#"{"id": "123", "individual_note": false, "notes": [{"id": 111}]}"#.to_string()
+            }))
+        }
+    }
+
+    fn gitlab_thread_request(body: &'static str) -> NewThreadRequest<'static> {
+        NewThreadRequest {
+            commit_id: "abcdef1234567890",
+            body,
+            path: Some("src/a.rs"),
+            line: Some(10),
+            side: Some(crate::model::thread::AnchorSide::New),
+            range_start: None,
+        }
+    }
+
+    fn gitlab_pr() -> PullRequestDetails {
+        make_pr_details(ForgeRepository::gitlab("gitlab.com", "owner", "repo"))
+    }
+
+    #[test]
+    fn should_map_401_unauthorized_during_create_thread() {
+        let runner = ErrorRunner::default();
+        *runner.stdin_error.borrow_mut() = Some(GlabCommandError::Failed {
+            status: Some(1),
+            stderr: "glab: 401 Unauthorized".to_string(),
+        });
+        let backend = GitLabGlabBackend::with_runner(None, runner);
+        let pr = gitlab_pr();
+        let err = backend
+            .create_thread(&pr, gitlab_thread_request("please fix"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("GitLab authentication failed"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn should_map_403_forbidden_during_reply_to_thread() {
+        let runner = ErrorRunner::default();
+        *runner.stdin_error.borrow_mut() = Some(GlabCommandError::Failed {
+            status: Some(1),
+            stderr: "glab: 403 Forbidden".to_string(),
+        });
+        let backend = GitLabGlabBackend::with_runner(None, runner);
+        let pr = gitlab_pr();
+        let mapping = serde_json::json!({"id": "123"});
+        let err = backend.reply_to_thread(&pr, &mapping, "on it").unwrap_err();
+        assert!(
+            err.to_string().contains("merge request write permission"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn should_preserve_409_conflict_detail_during_create_thread() {
+        let runner = ErrorRunner::default();
+        *runner.stdin_error.borrow_mut() = Some(GlabCommandError::Failed {
+            status: Some(1),
+            stderr: "glab: 409 Conflict — discussion already exists".to_string(),
+        });
+        let backend = GitLabGlabBackend::with_runner(None, runner);
+        let pr = gitlab_pr();
+        let err = backend
+            .create_thread(&pr, gitlab_thread_request("please fix"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("409") && err.to_string().contains("Conflict"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn should_preserve_429_rate_limit_detail_during_reply_to_thread() {
+        let runner = ErrorRunner::default();
+        *runner.stdin_error.borrow_mut() = Some(GlabCommandError::Failed {
+            status: Some(1),
+            stderr: "glab: 429 Too Many Requests — retry later".to_string(),
+        });
+        let backend = GitLabGlabBackend::with_runner(None, runner);
+        let pr = gitlab_pr();
+        let mapping = serde_json::json!({"id": "123"});
+        let err = backend.reply_to_thread(&pr, &mapping, "on it").unwrap_err();
+        assert!(
+            err.to_string().contains("429") && err.to_string().contains("Too Many Requests"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn should_preserve_5xx_server_error_detail_during_set_thread_resolution() {
+        let runner = ErrorRunner::default();
+        *runner.run_error.borrow_mut() = Some(GlabCommandError::Failed {
+            status: Some(1),
+            stderr: "glab: 503 Service Unavailable".to_string(),
+        });
+        let backend = GitLabGlabBackend::with_runner(None, runner);
+        let pr = gitlab_pr();
+        let mapping = serde_json::json!({"id": "123"});
+        let err = backend
+            .set_thread_resolution(&pr, &mapping, true)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("503") && err.to_string().contains("Service Unavailable"),
+            "got: {}",
+            err
+        );
+    }
+
+    /// Guards `GITLAB_TOKEN`/`GL_TOKEN` mutation for the duration of `body`,
+    /// mirroring `with_env_tokens` in `src/forge/github/gh.rs` and
+    /// `with_gitea_token` in `src/forge/giteafj/backend.rs`.
+    fn with_env_tokens<T>(value: &str, body: impl FnOnce() -> T) -> T {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _guard = LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous_gitlab = std::env::var("GITLAB_TOKEN").ok();
+        let previous_gl = std::env::var("GL_TOKEN").ok();
+        // SAFETY: serialized by `LOCK` above, so no other thread observes a
+        // torn/concurrent mutation of these process-wide vars.
+        unsafe {
+            std::env::set_var("GITLAB_TOKEN", value);
+            std::env::set_var("GL_TOKEN", value);
+        }
+        let result = body();
+        unsafe {
+            match &previous_gitlab {
+                Some(v) => std::env::set_var("GITLAB_TOKEN", v),
+                None => std::env::remove_var("GITLAB_TOKEN"),
+            }
+            match &previous_gl {
+                Some(v) => std::env::set_var("GL_TOKEN", v),
+                None => std::env::remove_var("GL_TOKEN"),
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn should_never_leak_environment_token_into_constructed_mutation_calls() {
+        // `glab` resolves credentials from its own auth state, never from
+        // our constructed args/stdin — structural regression guard for the
+        // three new durable-thread mutation paths, mirroring the GitHub
+        // equivalent in `src/forge/github/gh.rs`.
+        const SENTINEL: &str = "glpat-SENTINEL0123456789abcdefABCDEF";
+        with_env_tokens(SENTINEL, || {
+            let runner = ErrorRunner::default();
+            let backend = GitLabGlabBackend::with_runner(None, runner);
+            let pr = gitlab_pr();
+
+            let _ = backend.create_thread(&pr, gitlab_thread_request("please fix"));
+            let mapping = serde_json::json!({"id": "123"});
+            let _ = backend.reply_to_thread(&pr, &mapping, "on it");
+            let _ = backend.set_thread_resolution(&pr, &mapping, true);
+
+            for call in backend.runner.calls.borrow().iter() {
+                for arg in call {
+                    assert!(!arg.contains(SENTINEL), "token leaked into args: {arg}");
+                }
+            }
+            for (args, stdin) in backend.runner.stdin_calls.borrow().iter() {
+                for arg in args {
+                    assert!(
+                        !arg.contains(SENTINEL),
+                        "token leaked into stdin args: {arg}"
+                    );
+                }
+                assert!(
+                    !stdin.contains(SENTINEL),
+                    "token leaked into stdin body: {stdin}"
+                );
+            }
+        });
     }
 }
