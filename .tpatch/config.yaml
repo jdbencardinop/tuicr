@@ -1,0 +1,34 @@
+# Tessera Patch configuration
+#
+# provider.base_url/model are intentionally left blank: `tpatch init`
+# auto-detects a local provider (e.g. a localhost copilot-api proxy) on the
+# machine that runs init, but that endpoint is per-developer and must not be
+# committed as a shared default. Run `tpatch provider set --repo ...` (or set
+# it globally) on each machine that runs LLM-driven phases.
+provider:
+  type: openai-compatible
+  base_url: ""
+  model: ""
+  auth_env: ""
+
+# Merge strategy for applying patches: "3way" (default) or "rebase"
+merge_strategy: 3way
+
+# Max LLM validation retries when output fails to parse (0 disables retry)
+max_retries: 2
+
+# Max output tokens for the implement phase (default 16384). Bump higher
+# for features that emit many large file bodies inline.
+max_tokens_implement: 16384
+
+# Shell command run by `tpatch test <slug>` (e.g. "go test ./...", "bun test")
+test_command: ""
+
+# Feature dependency DAG (ADR-011). Default false until v0.6.0.
+features_dependencies: true
+
+# Path restructure detector thresholds (WP-003 PRD 9).
+# Defaults: prefix-split >=3 files across >=2 prefixes; prefix-move >=5 files.
+prefix_split_min_files: 3
+prefix_split_min_prefixes: 2
+prefix_move_min_files: 5
