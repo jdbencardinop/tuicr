@@ -21,8 +21,8 @@ git log --format='%H %s%n%(trailers:key=Tpatch-Feature)'
 ```
 
 The authoritative index of that historical work is
-[`docs/fork/PATCHES.md`](../docs/fork/PATCHES.md) in the coordinating
-research repository, plus the commit trailers themselves. **Do not invent a
+[`docs/fork/PATCHES.md`](../docs/fork/PATCHES.md) in this fork repository,
+plus the commit trailers themselves. **Do not invent a
 historical `.tpatch/features/<slug>/` directory** for that work — no such
 tracked feature artifacts (request/plan/exploration/recipe) were produced at
 the time, and fabricating them now would misrepresent what was actually
@@ -66,11 +66,15 @@ binary in use either:
   captures, not live HEAD), or
 - has the equivalent locally-fixed committed-range verifier behavior applied.
 
-The binary installed at `~/go/bin/tpatch` (v0.11.3, built 2026-07-29) predates
-`d8e3e15` (authored 2026-07-30) and will double-apply the target's own commits
-when verifying a committed-range capture, causing spurious `git apply --check`
-failures. Rebuild or update `tpatch` before recording any committed-range
-capture; working-tree (`tpatch record` without a range) capture is unaffected.
+A `tpatch` binary built from v0.11.3 (release commit `84a2f88`) predates
+`d8e3e15` (authored 2026-07-30, one commit later) and will double-apply the
+target's own commits when verifying a committed-range capture, causing
+spurious `git apply --check` failures. Rebuild or update `tpatch` before
+recording any committed-range capture; working-tree (`tpatch record` without
+a range) capture is unaffected. See
+[`../docs/fork/TPATCH.md`](../docs/fork/TPATCH.md) for a vendored patch and
+build instructions to apply this fix locally until an upstream `tpatch`
+release contains it.
 
 ## Provider configuration is per-machine
 
@@ -78,7 +82,14 @@ capture; working-tree (`tpatch record` without a range) capture is unaffected.
 blank. `tpatch init` auto-detects a local provider (e.g. a localhost
 `copilot-api` proxy) on the machine that runs it, but that endpoint is
 developer-local and must not be committed as a shared default — configure it
-per machine with `tpatch provider set` (globally or `--repo`).
+on each machine with `tpatch provider set --preset <preset> --base-url
+<url> --model <model>`. By default this writes the **global** config (outside
+this repo); add `--repo` to instead write to this repo's
+`.tpatch/config.yaml` (not recommended, since it would reintroduce a
+machine-local endpoint into tracked config). Use the separate global
+`--path <dir>` flag only to point any `tpatch` command at a different
+repository/worktree than the current directory — it does not control
+where provider config is stored.
 
 ## Generated skill assets and what is tracked
 

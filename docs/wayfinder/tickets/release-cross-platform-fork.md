@@ -46,8 +46,7 @@ No Git tag has been created and nothing has been pushed or published.
 
 Both listed tickets close, then arm64/signing/distribution work is scoped and
 done, then a real tagged/pushed release replaces the current offline
-candidate. See `retrospectives/offline-release-acceptance.md` in the research
-workspace for the exact accepted-vs-not-accepted scope of the current
-candidate, and the research workspace's
-`docs/follow-on-map/tickets/20-release-cross-platform-fork.md` for the full
-history.
+candidate. `docs/offline-candidate/README.md` and
+`docs/offline-candidate/SECRET-SCAN.md` document the exact accepted scope,
+checksums, and secret-scan contract of the current candidate to carry forward
+into that release.

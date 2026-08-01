@@ -3,8 +3,12 @@
 # provider.base_url/model are intentionally left blank: `tpatch init`
 # auto-detects a local provider (e.g. a localhost copilot-api proxy) on the
 # machine that runs init, but that endpoint is per-developer and must not be
-# committed as a shared default. Run `tpatch provider set --repo ...` (or set
-# it globally) on each machine that runs LLM-driven phases.
+# committed as a shared default. On each machine that runs LLM-driven phases,
+# run `tpatch provider set --preset <preset> --base-url <url> --model
+# <model>` (writes the global config by default; add --repo to write here
+# instead). See .tpatch/README.md's "Provider configuration is per-machine"
+# section for the distinction between --repo (config storage scope) and the
+# separate global --path flag (which repo tpatch targets).
 provider:
   type: openai-compatible
   base_url: ""

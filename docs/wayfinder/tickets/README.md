@@ -16,8 +16,7 @@ Detailed resolutions live in the ticket. `docs/wayfinder/map.md` contains only
 linked gists.
 
 This directory intentionally holds only the tickets that are still
-open/blocking the fork's release/upstream frontier. Closed research tickets
+open/blocking the fork's release/upstream frontier. Closed research history
 (candidate verification, provider semantics, macOS pilots, the recommendation
-itself, etc.) are not copied here — see the read-only research workspace's
-`docs/wayfinder/tickets/` and `docs/follow-on-map/tickets/` for the full,
-closed history behind each accepted decision in `docs/fork/DECISIONS.md`.
+itself, etc.) is not copied here — `docs/fork/DECISIONS.md` already contains
+enough rationale for every accepted decision that history led to.

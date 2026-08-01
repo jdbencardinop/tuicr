@@ -45,8 +45,6 @@ Both halves are **offline/mock-complete, live-blocked**:
 ## Unblock condition
 
 `provision-provider-sandboxes` must close first. Then run the existing
-offline-proven operations against the real, approved targets and record
-results in the research workspace's
-`docs/follow-on-map/tickets/14-validate-github-gitlab-mutations.md` and
-`docs/follow-on-map/tickets/12-implement-azure-adapter.md` (Live-validation
-blocker section).
+offline-proven operations against the real, approved targets and record the
+pass/fail results and any behavioral deltas directly in this ticket's
+Resolution section.

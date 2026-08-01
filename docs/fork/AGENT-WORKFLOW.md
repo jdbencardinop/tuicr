@@ -16,10 +16,15 @@ implicit model calls, no source upload.
 
 ## Current branch purpose
 
-This branch integrates docs-only fork guidance (agent workflow, decision
-index, tpatch bootstrap) onto the offline candidate at `ca319dc` before a
-`fork-ready-integration` merge pushes a development branch to
-`jdbencardinop/tuicr`. It does not change `src/`.
+`ca319dc` is the implementation/package base: the offline-validated,
+five-provider candidate with fork identity, disabled self-update, and an
+isolated data directory (see `docs/fork/DECISIONS.md#current-offline-only-status`).
+This `fork-ready-integration`/`tessera/offline-candidate` branch's tip adds
+docs-only bootstrap metadata on top of that base — the agent workflow guide,
+decision/patch index, Wayfinder map/tickets, handoff doc, and the tracked
+`.tpatch/` workspace — so it is a superset: portable fork-development
+metadata plus the same implementation as `ca319dc`. It does not change
+`src/`.
 
 ## Provider rules (no silent loss)
 
@@ -64,8 +69,11 @@ fork customizations as reviewable, replayable features:
    and recording the result, over relying on an auto-detected local
    provider — this avoids incidental model calls on a customization task.
 4. `implement` — generate a deterministic apply recipe; `apply` executes it.
-5. `tpatch record <name> --commit-range <base>..<head>` — capture the actual
-   tracked + untracked diff.
+5. `tpatch record <name> --commit-range <base>..<head>` — capture the
+   **committed, tracked-only** diff between those two commits (untracked
+   files are never included in a committed-range capture). Running
+   `tpatch record <name>` with no range instead captures the current
+   working tree, tracked **and** untracked.
 6. `tpatch test` — run the configured test command and record the result.
 7. `tpatch verify` — check recipe/patch replay and dependency freshness.
 8. `tpatch reconcile` — re-check a feature against a moved upstream base.
@@ -79,19 +87,20 @@ removable and reconcilable against upstream.
 ## Historical `Tpatch-Feature` trailers vs. new `.tpatch/` features
 
 Commits made before this fork's `.tpatch/` workspace existed (the offline
-integration and offline-candidate history, e.g. `ca319dc` and its ancestors)
-already carry `Tpatch-Feature: <name>` trailers from feature work done in a
-separate disposable research worktree. Those are historical record only —
-there is no corresponding `.tpatch/features/<name>/` directory in *this*
-repo for them. Once `.tpatch/` is bootstrapped here, only run the full
-lifecycle above for *new* customizations, and expect their recipes to live
-under `.tpatch/features/<name>/` in this repo.
+integration and offline-candidate history through `ca319dc`, plus the
+docs-only integration commits that bootstrapped this guide, the decision
+index, and `.tpatch/` itself) carry `Tpatch-Feature: <name>` trailers as a
+naming convention only — there is no corresponding
+`.tpatch/features/<name>/` directory in this repo for them, and none should
+be fabricated. See `docs/fork/PATCHES.md` for the full commit-range index.
+Only run the full lifecycle above for *new* customizations from here
+forward; expect their recipes to live under `.tpatch/features/<name>/` in
+this repo.
 
 ## Wayfinder map/ticket/frontier conventions
 
-If a `docs/fork/wayfinder/` map and tickets directory is present (added by
-the decision-index work), it follows the same shape as the research
-workspace: one question or prerequisite per ticket file, frontmatter
+`docs/wayfinder/map.md` and `docs/wayfinder/tickets/` hold one question or
+prerequisite per ticket file, with frontmatter
 `id`/`title`/`type`/`mode`/`status`/`owner`/`blocked_by`. The **frontier** is
 the set of `open`, unclaimed tickets whose `blocked_by` entries are all
 `closed`. Detailed resolutions live in the ticket's own `## Resolution`
@@ -100,11 +109,12 @@ never copy a resolution's full content into the map.
 
 ## Decisions and handoff docs
 
-Durable fork decisions and a patch/commit index live under
-`docs/fork/decisions/` (or equivalent — see gap note below), and the current
-state of in-flight fork work is tracked in `docs/handoff/CURRENT.md`. These
-are minimal, fork-scoped summaries, not a copy of the full research
-workspace at `/Users/jbencardino/Documents/Proyectos/diffreviewtui`.
+Durable fork decisions live in `docs/fork/DECISIONS.md` (one decision per
+section, with enough rationale to stand on its own), the patch/commit index
+is `docs/fork/PATCHES.md`, and the current state of in-flight fork work is
+tracked in `docs/handoff/CURRENT.md`. These are self-contained fork-scoped
+records: link to files inside this repo or public upstream URLs only, never
+to a local research workspace or machine-specific path.
 
 ## WSL/provider release gates
 
@@ -117,9 +127,10 @@ is `OFFLINE_VALIDATED_ONLY`, not a release.
 
 ## Commit and safety rules
 
-- Trailers: every commit needs `Co-authored-by: Copilot
-  <223556219+Copilot@users.noreply.github.com>`; commits produced through
-  `tpatch land` also carry `Tpatch-Feature: <name>`.
+- Trailers: every commit needs **both** `Co-authored-by: Copilot
+  <223556219+Copilot@users.noreply.github.com>` and a `Copilot-Session:
+  <session-id>` trailer; commits produced through `tpatch land` also carry
+  `Tpatch-Feature: <name>`.
 - Never `git commit --amend`, `git push`, or `git tag` unless the user
   explicitly asks for that specific action.
 - Never post remote review comments/data without an approved sandbox target
@@ -127,8 +138,9 @@ is `OFFLINE_VALIDATED_ONLY`, not a release.
 
 ## Evidence gap note
 
-If any referenced path above (`docs/fork/decisions/`, `docs/fork/wayfinder/`,
-`.tpatch/`) is missing, it means that part of the fork bootstrap has not
-merged into your branch yet (e.g. mid cherry-pick/rebase) — treat it as
+`docs/fork/DECISIONS.md`, `docs/fork/PATCHES.md`, `docs/wayfinder/`,
+`docs/handoff/CURRENT.md`, and `.tpatch/` are all present in this repo as of
+the `fork-ready-integration` branch. If any of them is missing on a branch
+you are working from, that branch predates this integration — treat it as
 not-yet-landed, not a broken link, and keep working from this file plus
 `AGENTS.md`.

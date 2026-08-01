@@ -19,14 +19,19 @@ Full decision text: `docs/fork/DECISIONS.md`.
 
 - Upstream fork branch point: `f92502bfbbd172ceb3c16c3dfd1348b52e142be5`
   (rebase to current upstream before further implementation).
-- Integrated offline source: `offline-integration`, commit `d8b1f63`.
-- Offline candidate (current tip): `offline-release-candidate`, commit
-  `ca319dc`.
+- Integrated offline source: commit `d8b1f63`.
+- Offline candidate / implementation-package base: commit `ca319dc` — the
+  five-provider offline-validated candidate with fork identity, disabled
+  self-update, and an isolated data dir.
+- This development branch's tip adds docs-only bootstrap metadata on top of
+  `ca319dc` (this handoff doc, `docs/fork/DECISIONS.md`/`PATCHES.md`,
+  `docs/wayfinder/`, `docs/fork/AGENT-WORKFLOW.md`, and the tracked
+  `.tpatch/` workspace) — no `src/` changes beyond `ca319dc`.
 - Reported version: `tuicr 0.19.1-offline-candidate.1+ca319dc`.
 - Platforms packaged: macOS x86_64 and Linux x86_64 only.
 - Artifact readiness: `OFFLINE_VALIDATED_ONLY` — not a release. See
-  `retrospectives/offline-release-acceptance.md` in the research workspace
-  for the full accepted/non-accepted scope and artifact checksums.
+  `docs/offline-candidate/README.md` and `docs/offline-candidate/SECRET-SCAN.md`
+  for the accepted scope and artifact/checksum contract.
 
 Per-feature commit ranges and validation state:
 `docs/fork/PATCHES.md`.
@@ -48,26 +53,19 @@ In dependency order:
 5. Post the one ready upstream patch (comment-author JSON) once approved, and
    reconcile the rest after the release interface stabilizes —
    `docs/wayfinder/tickets/upstream-and-reconcile.md`.
-6. Update the teaching package only after a real release interface is fixed
-   (research workspace `docs/follow-on-map/tickets/22-update-teaching-package.md`;
-   not tracked as its own ticket here since it strictly follows step 4).
+6. Update the teaching package only after a real release interface is fixed —
+   depends on step 4; not tracked as its own ticket here since it strictly
+   follows that release.
 
-## Research and evidence pointers
+## Evidence pointers in this repo
 
-Kept in the read-only research workspace, not copied into this fork
-worktree:
-
-- `docs/decisions/` — accepted decisions and full rationale.
-- `docs/follow-on-map/` — full implementation-frontier ticket history.
-- `docs/findings/` — candidate/provider/benchmark evidence.
-- `docs/evaluation/` — evaluation contract and checklists.
-- `fixtures/` — the common review fixture and provider fixtures.
-- `retrospectives/` — tool retrospectives and the offline-release acceptance
-  record.
-
-This fork worktree's own `docs/offline-candidate/` documents the packaged
-candidate itself (install, migration, provider capabilities, secret-scan
-contract) and is not duplicated here.
+- `docs/fork/DECISIONS.md` — accepted decisions with inline rationale.
+- `docs/fork/PATCHES.md` — per-feature commit-range and validation index.
+- `docs/wayfinder/` — the open/blocking tickets that gate a real release.
+- `docs/offline-candidate/` — the packaged candidate itself (install,
+  migration, provider capabilities, secret-scan contract).
+- `docs/fork/TPATCH.md` — the local tpatch committed-range verifier fix and
+  when to apply it.
 
 ## Remaining evidence gaps
 

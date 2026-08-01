@@ -1,0 +1,692 @@
+From d8e3e15aeefda8de67d5b336ca0591e60dbc9971 Mon Sep 17 00:00:00 2001
+From: jdbencardinop <jdbencardinop@unal.edu.co>
+Date: Thu, 30 Jul 2026 16:13:23 -0500
+Subject: [PATCH] fix(verify): root V7/V8 shadow at recorded base for
+ committed-range captures
+
+runClosureReplay always rooted the shared V7/V8 shadow at live HEAD. For a
+committed-range capture (--auto/--from+--to/--commit-range), the target's
+own commits land between the recorded status.apply.base_commit and HEAD,
+so a HEAD-rooted shadow already contains the feature's change and both
+replaying the recipe (V7) and running "git apply --check" against the
+canonical patch (V8) double-apply it. V8 fails because the patch's context
+no longer matches a tree that already has the change (GH #3).
+
+Root cause: shadow-root selection never consulted capture provenance.
+
+Fix:
+- resolveClosureShadowRoot roots the shadow at the recorded base_commit
+  whenever the feature's latest patch-generations.json generation has
+  upper.kind "commit"/"range" (the committed-range family), and fails
+  verify explicitly (never a silent HEAD fallback) when that base_commit
+  is empty, unresolvable, or not reachable from HEAD.
+- Working-tree/staged/unstaged captures, and any feature predating
+  patch-generations.json, are unaffected and keep replaying against live
+  HEAD exactly as before -- this is the existing, correct drift-detection
+  behavior for those capture modes.
+- parentAlreadyInShadowBaseline extends the same provenance-trust rule to
+  hard parents: a parent's recipe is skipped (not double-replayed) when
+  the parent's own recorded committed-range landing commit is already
+  reachable from the chosen shadow root, mirroring the existing
+  upstream_merged skip.
+
+Tests: new internal/workflow/verify_committed_range_test.go covers the
+GH #3 reproduction (committed-range, no parents, V8 now passes against
+the recorded base instead of double-applying against HEAD), an invalid
+canonical patch still failing V8 against the recorded base (no
+weakening of V8 into a skip/success-shaped fallback), an unreachable/
+invalid recorded base_commit failing verify explicitly, and a hard
+parent already represented in the recorded base being skipped instead
+of double-replayed. All four new tests were confirmed to fail without
+the fix (git stash of verify.go) and pass with it. Every pre-existing
+V0-V9/closure-replay/CLI/integration test still passes unchanged.
+
+Verified against the real reproduction: built bin/tpatch fresh from
+this worktree and ran "tpatch verify editable-provider-neutral-threads
+--path .../worktrees/thread-store". Verdict flipped from failed
+(post_apply_patch_replay_clean only) to passed/exit 0, with no changes
+to Tuicr source (src/) -- only the feature's status.json verify overlay
+and the auto-generated FEATURES.md dashboard were touched, both normal
+"tpatch verify" side effects.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ CHANGELOG.md                                  |  25 ++
+ internal/workflow/verify.go                   | 160 ++++++-
+ .../workflow/verify_committed_range_test.go   | 396 ++++++++++++++++++
+ 3 files changed, 579 insertions(+), 2 deletions(-)
+ create mode 100644 internal/workflow/verify_committed_range_test.go
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b74d693..854cdd7 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,31 @@
+ 
+ All notable changes to tpatch are recorded here.
+ 
++## Unreleased — verify V7/V8 committed-range double-apply fix
++
++- Fixed `tpatch verify` V8 (`post_apply_patch_replay_clean`) failing for a
++  feature recorded from a committed range (`--auto`/`--from`+`--to`/
++  `--commit-range`) once its commits land on the branch. `runClosureReplay`
++  always rooted the shared V7/V8 shadow at live HEAD; for a committed-range
++  capture the target's own commits sit between the recorded
++  `status.apply.base_commit` and HEAD, so a HEAD-rooted shadow already
++  contains the feature's change and both replaying the recipe (V7) and
++  `git apply --check`-ing the canonical patch (V8) double-apply it. V8 fails
++  because the patch's context no longer matches a tree that already has the
++  change (GH #3).
++- `resolveClosureShadowRoot` now roots the shadow at the recorded
++  `base_commit` whenever the feature's latest `patch-generations.json`
++  generation has `upper.kind` `commit`/`range` (the committed-range family),
++  and fails verify explicitly — never a silent fallback to HEAD — when that
++  base_commit is empty, unresolvable, or not reachable from HEAD.
++  Working-tree/staged/unstaged captures (and any feature predating
++  `patch-generations.json`) are unaffected and keep replaying against live
++  HEAD exactly as before.
++- `parentAlreadyInShadowBaseline` extends the same provenance-trust rule to
++  hard parents: a parent's recipe is skipped (not double-replayed) when the
++  parent's own recorded committed-range landing commit is already reachable
++  from the chosen shadow root, mirroring the existing `upstream_merged` skip.
++
+ ## v0.11.3 — 2026-07-29 — verify V8 double-apply fix
+ 
+ - Fixed `tpatch verify` V8 (`post_apply_patch_replay_clean`) failing for
+diff --git a/internal/workflow/verify.go b/internal/workflow/verify.go
+index 801219f..7ed64f2 100644
+--- a/internal/workflow/verify.go
++++ b/internal/workflow/verify.go
+@@ -864,7 +864,11 @@ func runClosureReplay(s *store.Store, slug string, status store.FeatureStatus, r
+ 		}
+ 	}
+ 
+-	// 3. Allocate ONE shadow for the run, defer prune.
++	// 3. Allocate ONE shadow for the run, defer prune. The shadow root
++	// commit is normally live HEAD, but a committed-range capture (see
++	// resolveClosureShadowRoot) must root the shadow at the recorded
++	// pre-feature base_commit instead — otherwise HEAD already contains
++	// the target's own committed changes and V7/V8 double-apply them.
+ 	head, err := gitutil.HeadCommit(s.Root)
+ 	if err != nil {
+ 		return closureReplayResult{
+@@ -877,7 +881,19 @@ func runClosureReplay(s *store.Store, slug string, status store.FeatureStatus, r
+ 			v8: skipV8Because("V7 (recipe_replay_clean) failed: HEAD unresolved"),
+ 		}
+ 	}
+-	shadowPath, err := gitutil.CreateShadow(s.Root, slug, head)
++	shadowRoot, err := resolveClosureShadowRoot(s, slug, status, head)
++	if err != nil {
++		return closureReplayResult{
++			v7: store.VerifyCheckResult{
++				ID:          CheckRecipeReplayClean,
++				Severity:    SeverityBlock,
++				Passed:      false,
++				Remediation: fmt.Sprintf("cannot resolve committed-range verify baseline: %v; investigate or re-run tpatch record %s", err, slug),
++			},
++			v8: skipV8Because("V7 (recipe_replay_clean) failed: committed-range baseline"),
++		}
++	}
++	shadowPath, err := gitutil.CreateShadow(s.Root, slug, shadowRoot)
+ 	if err != nil {
+ 		return closureReplayResult{
+ 			v7: store.VerifyCheckResult{
+@@ -919,6 +935,27 @@ func runClosureReplay(s *store.Store, slug string, status store.FeatureStatus, r
+ 			// Skip — parent's changes are already on the baseline.
+ 			continue
+ 		case store.StateApplied:
++			// A hard parent that was itself captured as a committed
++			// range (or --commit-range/--auto) may already be baked
++			// into shadowRoot's history — e.g. the parent landed
++			// before the target's base_commit was recorded. Replaying
++			// its recipe again would double-apply it in the shadow,
++			// the same class of bug this fix addresses for the
++			// target. Skip only when the parent's own recorded
++			// landing commit is reachable from shadowRoot; otherwise
++			// fall through to the existing replay behavior.
++			already, baselineErr := parentAlreadyInShadowBaseline(s, parent, shadowRoot)
++			if baselineErr != nil {
++				return closureReplayResult{
++					v7:         parentReplayFail(parent, baselineErr),
++					v8:         skipV8Because("skipped: parent-replay aborted before V8"),
++					failedAt:   "parent-replay",
++					parentSlug: parent,
++				}
++			}
++			if already {
++				continue
++			}
+ 			pr, prerr := loadParentRecipe(s, parent)
+ 			if prerr != nil {
+ 				return closureReplayResult{
+@@ -1030,6 +1067,125 @@ func runClosureReplay(s *store.Store, slug string, status store.FeatureStatus, r
+ 	}
+ }
+ 
++// committedRangeUpperKinds are the `patch-generations.json` generation
++// `upper.kind` values written by `tpatch record` for the git-range
++// capture family (--auto, --from/--to, --commit-range — see
++// recordGenerationUpper in internal/cli/cobra.go). Any other kind
++// ("working-tree", "index") means the feature's canonical patch was
++// captured from an uncommitted working tree / index, never from a
++// committed commit range.
++func isCommittedRangeUpperKind(kind string) bool {
++	return kind == "commit" || kind == "range"
++}
++
++// resolveClosureShadowRoot picks the commit V7/V8's shared shadow
++// worktree should be rooted at (GH #3 — verify double-applies
++// committed-range captures).
++//
++// Baseline selection rules:
++//
++//   - No `patch-generations.json`, no generations, or the load itself
++//     is untrustworthy (malformed manifest) → use live HEAD, exactly
++//     the pre-fix behavior. Legacy features predating ADR-024 have no
++//     generation manifest at all and must keep replaying against HEAD.
++//   - Latest generation's `upper.kind` is NOT `commit`/`range` (i.e.
++//     working-tree, staged, or unstaged capture) → use live HEAD. These
++//     capture modes only ever produce an uncommitted apply-recipe /
++//     post-apply.patch pair; the feature's own changes are never part
++//     of repo history, so HEAD is exactly the right replay target and
++//     legitimately fails V7/V8 when upstream has drifted underneath.
++//   - Latest generation's `upper.kind` IS `commit`/`range` (committed-
++//     range family: --auto/--from+--to/--commit-range) → the target's
++//     own commits are already part of HEAD's history once landed, so
++//     replaying/checking against live HEAD double-applies them (the
++//     reproduction this fix targets). Use the recorded
++//     `status.apply.base_commit` instead — the record-time comment in
++//     internal/cli/cobra.go documents that for range mode this field IS
++//     the resolved pre-feature lower bound, not HEAD, so the canonical
++//     post-apply.patch is authored against exactly that commit.
++//   - The recorded base_commit is empty, fails to resolve, or is not an
++//     ancestor of (or equal to) live HEAD → fail explicitly. A missing
++//     or unreachable recorded base for a committed-range feature is a
++//     real correctness problem (rewritten history, corrupted status,
++//     etc.); silently falling back to HEAD would just reintroduce the
++//     double-apply bug or mask a genuinely broken feature record.
++func resolveClosureShadowRoot(s *store.Store, slug string, status store.FeatureStatus, head string) (string, error) {
++	manifest, err := store.LoadPatchGenerations(s, slug)
++	if err != nil || len(manifest.Generations) == 0 {
++		return head, nil
++	}
++	latest := manifest.Generations[len(manifest.Generations)-1]
++	if !isCommittedRangeUpperKind(latest.Upper.Kind) {
++		return head, nil
++	}
++
++	base := strings.TrimSpace(status.Apply.BaseCommit)
++	if base == "" {
++		base = strings.TrimSpace(latest.BaseCommit)
++	}
++	if base == "" {
++		return "", fmt.Errorf("committed-range capture (generation %d, upper.kind=%q) has no base_commit in status.apply or patch-generations.json", latest.Generation, latest.Upper.Kind)
++	}
++	resolved, rerr := gitutil.ResolveRef(s.Root, base)
++	if rerr != nil || resolved == "" {
++		return "", fmt.Errorf("recorded base_commit %q does not resolve in this repository: %v", base, rerr)
++	}
++	if resolved == head {
++		return resolved, nil
++	}
++	ok, aerr := gitutil.IsAncestor(s.Root, resolved, head)
++	if aerr != nil {
++		return "", fmt.Errorf("cannot verify recorded base_commit %q is reachable from HEAD %q: %v", base, head, aerr)
++	}
++	if !ok {
++		return "", fmt.Errorf("recorded base_commit %q is not reachable from current HEAD %q (history rewritten or status.json stale)", base, head)
++	}
++	return resolved, nil
++}
++
++// parentAlreadyInShadowBaseline reports whether a hard parent's own
++// committed-range landing commit is already part of shadowRoot's
++// history. When true, replaying the parent's recipe into the shadow
++// would double-apply changes that are already baked into shadowRoot
++// (the same class of bug resolveClosureShadowRoot fixes for the
++// target feature itself) — the caller should skip the parent replay,
++// mirroring the existing `upstream_merged` skip.
++//
++// Parents captured as working-tree/staged/unstaged, or with no
++// resolvable landing commit, always return false (never skipped) —
++// unchanged from pre-fix behavior; only an explicit committed-range
++// landing commit that is reachable from shadowRoot is trusted.
++func parentAlreadyInShadowBaseline(s *store.Store, parentSlug, shadowRoot string) (bool, error) {
++	manifest, err := store.LoadPatchGenerations(s, parentSlug)
++	if err != nil || len(manifest.Generations) == 0 {
++		return false, nil
++	}
++	latest := manifest.Generations[len(manifest.Generations)-1]
++	if !isCommittedRangeUpperKind(latest.Upper.Kind) {
++		return false, nil
++	}
++	landedAt := strings.TrimSpace(latest.Upper.Commit)
++	if landedAt == "" {
++		return false, nil
++	}
++	resolvedLanded, rerr := gitutil.ResolveRef(s.Root, landedAt)
++	if rerr != nil || resolvedLanded == "" {
++		// Parent's own recorded landing commit doesn't resolve — do
++		// not claim it's already baked in; fall through to the
++		// existing replay path, which will surface a clearer error
++		// if the parent recipe itself is broken.
++		return false, nil
++	}
++	resolvedRoot, rerr := gitutil.ResolveRef(s.Root, shadowRoot)
++	if rerr != nil || resolvedRoot == "" {
++		return false, fmt.Errorf("cannot resolve shadow root %q while checking parent %q baseline: %v", shadowRoot, parentSlug, rerr)
++	}
++	if resolvedLanded == resolvedRoot {
++		return true, nil
++	}
++	return gitutil.IsAncestor(s.Root, resolvedLanded, resolvedRoot)
++}
++
+ // parentReplayFail formats the V7 result for a parent-replay failure
+ // per PRD §3.1.2 (parent-replay variant).
+ func parentReplayFail(parentSlug string, err error) store.VerifyCheckResult {
+diff --git a/internal/workflow/verify_committed_range_test.go b/internal/workflow/verify_committed_range_test.go
+new file mode 100644
+index 0000000..ee88ab2
+--- /dev/null
++++ b/internal/workflow/verify_committed_range_test.go
+@@ -0,0 +1,396 @@
++package workflow
++
++// Regression tests for GH #3: `tpatch verify` V8 (post_apply_patch_replay_clean)
++// double-applying committed-range captures.
++//
++// Root cause: runClosureReplay always rooted the shared V7/V8 shadow at live
++// HEAD. For a *committed-range* capture (--auto/--from+--to/--commit-range),
++// the target's own commits land on top of the recorded status.apply.base_commit
++// and become part of HEAD's history — so a shadow rooted at HEAD already
++// contains the target's changes, and both replaying the recipe (V7) and
++// `git apply --check`-ing the canonical patch (V8) against that shadow
++// double-apply them. V8 fails because the patch's context lines no longer
++// match a tree that already has the change; V7 tends to stay green only
++// because "write-file" recipe ops are idempotent overwrites.
++//
++// Fix: resolveClosureShadowRoot roots the shadow at the recorded
++// status.apply.base_commit instead of HEAD whenever the feature's latest
++// patch-generations.json generation has upper.kind "commit" or "range"
++// (the committed-range family) — see verify.go for the full baseline
++// selection rules. parentAlreadyInShadowBaseline extends the same
++// provenance-trust rule to hard parents: a parent's recipe is skipped
++// (not double-replayed) when the parent's own recorded landing commit is
++// already reachable from the chosen shadow root.
++//
++// Working-tree/staged/unstaged captures (the vast majority of existing
++// fixtures — see verify_closure_replay_test.go and verify_slice_c_test.go)
++// have no patch-generations.json generation with a "commit"/"range"
++// upper.kind, so resolveClosureShadowRoot falls back to live HEAD exactly
++// as before this fix; those tests are unchanged (see
++// TestRunVerify_ClosureReplay_3DeepDAG_Happy et al., which continue to pass).
++
++import (
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/tesseracode/tesserapatch/internal/store"
++)
++
++// gitCommitPaths stages exactly the given repo-relative paths (never
++// `-A`, so unrelated .tpatch/ bookkeeping files never leak into the
++// commit or the resulting diff) and commits them, returning the new
++// commit SHA.
++func gitCommitPaths(t *testing.T, dir, msg string, paths ...string) string {
++	t.Helper()
++	args := append([]string{"add", "--"}, paths...)
++	c := exec.Command("git", args...)
++	c.Dir = dir
++	if out, err := c.CombinedOutput(); err != nil {
++		t.Fatalf("git add %v: %v: %s", paths, err, out)
++	}
++	c = exec.Command("git", "commit", "-q", "-m", msg)
++	c.Dir = dir
++	if out, err := c.CombinedOutput(); err != nil {
++		t.Fatalf("git commit -m %q: %v: %s", msg, err, out)
++	}
++	c = exec.Command("git", "rev-parse", "HEAD")
++	c.Dir = dir
++	out, err := c.Output()
++	if err != nil {
++		t.Fatalf("rev-parse HEAD: %v", err)
++	}
++	return strings.TrimSpace(string(out))
++}
++
++// gitDiffBetween returns `git diff from to` output for dir.
++func gitDiffBetween(t *testing.T, dir, from, to string) string {
++	t.Helper()
++	c := exec.Command("git", "diff", from, to)
++	c.Dir = dir
++	out, err := c.Output()
++	if err != nil {
++		t.Fatalf("git diff %s %s: %v", from, to, err)
++	}
++	if len(out) == 0 {
++		t.Fatalf("git diff %s %s produced no output", from, to)
++	}
++	return string(out)
++}
++
++func mustWriteFile(t *testing.T, root, relPath, content string) {
++	t.Helper()
++	abs := filepath.Join(root, filepath.FromSlash(relPath))
++	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
++		t.Fatalf("mkdir %s: %v", filepath.Dir(abs), err)
++	}
++	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
++		t.Fatalf("write %s: %v", abs, err)
++	}
++}
++
++// writeCommittedRangeGeneration writes a minimal, schema-valid
++// patch-generations.json for slug recording a single "record" generation
++// captured as a committed range from baseCommit to upperCommit — the
++// machine-readable provenance resolveClosureShadowRoot trusts.
++func writeCommittedRangeGeneration(t *testing.T, s *store.Store, slug, baseCommit, upperCommit string) {
++	t.Helper()
++	m := store.PatchGenerationsManifest{
++		Version:     store.PatchGenerationsManifestVersion,
++		Feature:     slug,
++		Generations: []store.PatchGeneration{},
++	}
++	g := store.PatchGeneration{
++		Kind:                "record",
++		PatchSHA256:         strings.Repeat("a", 64),
++		GitPatchID:          strings.Repeat("b", 40),
++		GitPatchIDAlgorithm: store.PatchIDAlgorithmStable,
++		RecipeSHA256:        strings.Repeat("c", 64),
++		BaseCommit:          baseCommit,
++		Upper:               store.GenerationUpper{Kind: "commit", Ref: "HEAD", Commit: upperCommit},
++		Capture:             store.GenerationCapture{Mode: "committed-range"},
++		TouchedPaths:        []string{},
++		Dependencies:        []store.GenerationDependency{},
++	}
++	if _, err := store.AppendPatchGeneration(&m, g); err != nil {
++		t.Fatalf("append generation for %s: %v", slug, err)
++	}
++	if err := store.SavePatchGenerations(s, m); err != nil {
++		t.Fatalf("save patch-generations for %s: %v", slug, err)
++	}
++}
++
++// setApplyBaseCommit records status.apply.base_commit exactly as
++// `tpatch record --auto/--from/--commit-range` does for range mode (see
++// the "PRD §3.3" comment in internal/cli/cobra.go): the resolved lower
++// bound, not HEAD.
++func setApplyBaseCommit(t *testing.T, s *store.Store, slug, baseCommit string) {
++	t.Helper()
++	st, err := s.LoadFeatureStatus(slug)
++	if err != nil {
++		t.Fatalf("load status %s: %v", slug, err)
++	}
++	st.Apply.BaseCommit = baseCommit
++	st.Apply.HasPatch = true
++	if err := s.SaveFeatureStatus(st); err != nil {
++		t.Fatalf("save status %s: %v", slug, err)
++	}
++}
++
++// TestRunVerify_CommittedRange_NoParents_V8PassesAgainstRecordedBase is
++// the GH #3 reproduction: a committed-range feature (no hard parents)
++// whose own commits already landed on the branch by the time verify
++// runs. Live HEAD already contains the feature's change, so V8 must
++// check the canonical patch against the recorded base_commit instead —
++// not live HEAD — or it double-applies and fails.
++func TestRunVerify_CommittedRange_NoParents_V8PassesAgainstRecordedBase(t *testing.T) {
++	s := setupVerifyFeature(t, "scratch")
++	slug := "cr-feat"
++
++	baseSHA, err := headSHA(t, s.Root)
++	if err != nil {
++		t.Fatalf("head: %v", err)
++	}
++
++	mustWriteFile(t, s.Root, "src/feature.txt", "feature\n")
++	afterSHA := gitCommitPaths(t, s.Root, "land cr-feat", "src/feature.txt")
++	patch := gitDiffBetween(t, s.Root, baseSHA, afterSHA)
++
++	if _, err := s.AddFeature(store.AddFeatureInput{Title: slug, Slug: slug, Request: "x"}); err != nil {
++		t.Fatalf("AddFeature: %v", err)
++	}
++	if err := s.MarkFeatureState(slug, store.StateApplied, "apply", ""); err != nil {
++		t.Fatalf("MarkFeatureState: %v", err)
++	}
++	writeIntent(t, s, slug)
++	writeVerifyRecipe(t, s, slug, ApplyRecipe{Feature: slug, Operations: []RecipeOperation{
++		{Type: "write-file", Path: "src/feature.txt", Content: "feature\n"},
++	}})
++	if err := s.WriteArtifact(slug, "post-apply.patch", patch); err != nil {
++		t.Fatalf("write patch: %v", err)
++	}
++	setApplyBaseCommit(t, s, slug, baseSHA)
++	writeCommittedRangeGeneration(t, s, slug, baseSHA, afterSHA)
++
++	report, err := RunVerify(s, slug, VerifyOptions{NoWrite: true})
++	if err != nil {
++		t.Fatalf("RunVerify: %v", err)
++	}
++
++	v7 := findCheck(t, report, CheckRecipeReplayClean)
++	if !v7.Passed || v7.Skipped {
++		t.Errorf("V7 should pass replaying against the recorded base; got %+v", v7)
++	}
++	v8 := findCheck(t, report, CheckPostApplyPatchReplayClean)
++	if !v8.Passed || v8.Skipped {
++		t.Errorf("V8 should pass checking the canonical patch against the recorded base_commit (not live HEAD, which already contains the feature); got %+v", v8)
++	}
++	if report.FailedAt != "" {
++		t.Errorf("expected no FailedAt on the happy committed-range path; got %q", report.FailedAt)
++	}
++}
++
++// TestRunVerify_CommittedRange_InvalidPatchStillFails guards against
++// over-correcting: a genuinely broken canonical patch for a
++// committed-range feature must still fail V8 even after it is checked
++// against the recorded base_commit instead of HEAD. The fix must not
++// weaken V8 into a skip or success-shaped fallback.
++func TestRunVerify_CommittedRange_InvalidPatchStillFails(t *testing.T) {
++	s := setupVerifyFeature(t, "scratch")
++	slug := "cr-feat-bad-patch"
++
++	baseSHA, err := headSHA(t, s.Root)
++	if err != nil {
++		t.Fatalf("head: %v", err)
++	}
++	mustWriteFile(t, s.Root, "src/feature.txt", "feature\n")
++	afterSHA := gitCommitPaths(t, s.Root, "land cr-feat-bad-patch", "src/feature.txt")
++
++	if _, err := s.AddFeature(store.AddFeatureInput{Title: slug, Slug: slug, Request: "x"}); err != nil {
++		t.Fatalf("AddFeature: %v", err)
++	}
++	if err := s.MarkFeatureState(slug, store.StateApplied, "apply", ""); err != nil {
++		t.Fatalf("MarkFeatureState: %v", err)
++	}
++	writeIntent(t, s, slug)
++	writeVerifyRecipe(t, s, slug, ApplyRecipe{Feature: slug, Operations: []RecipeOperation{
++		{Type: "write-file", Path: "src/feature.txt", Content: "feature\n"},
++	}})
++	// Deliberately bogus patch: it does not describe any real change in
++	// this repository, so `git apply --check` must fail against the
++	// recorded base_commit exactly as it would have against HEAD.
++	badPatch := "diff --git a/src/does-not-exist.txt b/src/does-not-exist.txt\n" +
++		"index 0000000..1111111 100644\n" +
++		"--- a/src/does-not-exist.txt\n" +
++		"+++ b/src/does-not-exist.txt\n" +
++		"@@ -1,1 +1,1 @@\n" +
++		"-old content that is not present\n" +
++		"+new content\n"
++	if err := s.WriteArtifact(slug, "post-apply.patch", badPatch); err != nil {
++		t.Fatalf("write patch: %v", err)
++	}
++	setApplyBaseCommit(t, s, slug, baseSHA)
++	writeCommittedRangeGeneration(t, s, slug, baseSHA, afterSHA)
++
++	report, err := RunVerify(s, slug, VerifyOptions{NoWrite: true})
++	if err != nil {
++		t.Fatalf("RunVerify: %v", err)
++	}
++	v8 := findCheck(t, report, CheckPostApplyPatchReplayClean)
++	if v8.Passed || v8.Skipped {
++		t.Errorf("V8 must fail (not pass/skip) for a patch that does not apply to the recorded base; got %+v", v8)
++	}
++}
++
++// TestRunVerify_CommittedRange_UnreachableBaseCommit_FailsExplicitly
++// covers the invalid/missing recorded base rule: resolveClosureShadowRoot
++// must fail loudly rather than silently falling back to HEAD (which
++// would just reintroduce the double-apply bug or mask a genuinely
++// corrupted feature record).
++func TestRunVerify_CommittedRange_UnreachableBaseCommit_FailsExplicitly(t *testing.T) {
++	s := setupVerifyFeature(t, "scratch")
++	slug := "cr-feat-bad-base"
++
++	baseSHA, err := headSHA(t, s.Root)
++	if err != nil {
++		t.Fatalf("head: %v", err)
++	}
++	mustWriteFile(t, s.Root, "src/feature.txt", "feature\n")
++	afterSHA := gitCommitPaths(t, s.Root, "land cr-feat-bad-base", "src/feature.txt")
++	patch := gitDiffBetween(t, s.Root, baseSHA, afterSHA)
++
++	if _, err := s.AddFeature(store.AddFeatureInput{Title: slug, Slug: slug, Request: "x"}); err != nil {
++		t.Fatalf("AddFeature: %v", err)
++	}
++	if err := s.MarkFeatureState(slug, store.StateApplied, "apply", ""); err != nil {
++		t.Fatalf("MarkFeatureState: %v", err)
++	}
++	writeIntent(t, s, slug)
++	writeVerifyRecipe(t, s, slug, ApplyRecipe{Feature: slug, Operations: []RecipeOperation{
++		{Type: "write-file", Path: "src/feature.txt", Content: "feature\n"},
++	}})
++	if err := s.WriteArtifact(slug, "post-apply.patch", patch); err != nil {
++		t.Fatalf("write patch: %v", err)
++	}
++	// A SHA-shaped ref that does not exist in this repository.
++	bogusBase := strings.Repeat("f", 40)
++	setApplyBaseCommit(t, s, slug, bogusBase)
++	writeCommittedRangeGeneration(t, s, slug, bogusBase, afterSHA)
++
++	report, err := RunVerify(s, slug, VerifyOptions{NoWrite: true})
++	if err != nil {
++		t.Fatalf("RunVerify: %v", err)
++	}
++	v7 := findCheck(t, report, CheckRecipeReplayClean)
++	if v7.Passed {
++		t.Errorf("V7 must fail explicitly when the recorded committed-range base_commit is unreachable; got %+v", v7)
++	}
++	if !strings.Contains(v7.Remediation, "committed-range") {
++		t.Errorf("V7 remediation should explain the committed-range baseline failure; got %q", v7.Remediation)
++	}
++	// V8 must be explicitly skipped (fail-fast before it runs), never
++	// silently "passed" as if nothing were wrong.
++	v8 := findCheck(t, report, CheckPostApplyPatchReplayClean)
++	if !v8.Skipped {
++		t.Errorf("V8 should be skipped when V7 cannot resolve the committed-range baseline; got %+v", v8)
++	}
++	// Note: FailedAt/ParentSlug are reserved for the parent-replay
++	// variant (see parentReplayFail) — a baseline-resolution failure
++	// on the target itself does not set them, consistent with the
++	// pre-existing topology/HEAD-unresolved/shadow-allocation failure
++	// paths in runClosureReplay.
++	if report.Verdict != "failed" {
++		t.Errorf("expected overall verdict failed when the committed-range base is unreachable; got %q", report.Verdict)
++	}
++}
++
++// TestRunVerify_CommittedRange_HardParentAlreadyInBase_SkipsReplay covers
++// the "committed-range feature with hard parents already represented in
++// the recorded base" rule. The parent's own committed-range landing
++// commit is exactly the target's recorded base_commit, so replaying the
++// parent's recipe again in the shadow would double-apply it. The parent
++// recipe here uses `replace-in-file`, which errors (not silently
++// no-ops) on a second application — proving the parent replay was
++// actually skipped, not merely idempotent.
++func TestRunVerify_CommittedRange_HardParentAlreadyInBase_SkipsReplay(t *testing.T) {
++	s := setupVerifyFeature(t, "scratch")
++	parent := "root-cr"
++	target := "leaf-cr"
++
++	rootBaseSHA, err := headSHA(t, s.Root)
++	if err != nil {
++		t.Fatalf("head: %v", err)
++	}
++	mustWriteFile(t, s.Root, "src/shared.txt", "OLD_VALUE\n")
++	parentBaseSHA := gitCommitPaths(t, s.Root, "add shared.txt", "src/shared.txt")
++
++	mustWriteFile(t, s.Root, "src/shared.txt", "NEW_VALUE\n")
++	parentUpperSHA := gitCommitPaths(t, s.Root, "land root-cr", "src/shared.txt")
++
++	mustWriteFile(t, s.Root, "src/child.txt", "child\n")
++	targetUpperSHA := gitCommitPaths(t, s.Root, "land leaf-cr", "src/child.txt")
++	targetPatch := gitDiffBetween(t, s.Root, parentUpperSHA, targetUpperSHA)
++
++	// Parent: committed-range, landed at parentUpperSHA.
++	if _, err := s.AddFeature(store.AddFeatureInput{Title: parent, Slug: parent, Request: "x"}); err != nil {
++		t.Fatalf("AddFeature parent: %v", err)
++	}
++	if err := s.MarkFeatureState(parent, store.StateApplied, "apply", ""); err != nil {
++		t.Fatalf("MarkFeatureState parent: %v", err)
++	}
++	writeVerifyRecipe(t, s, parent, ApplyRecipe{Feature: parent, Operations: []RecipeOperation{
++		{Type: "replace-in-file", Path: "src/shared.txt", Search: "OLD_VALUE", Replace: "NEW_VALUE"},
++	}})
++	setApplyBaseCommit(t, s, parent, parentBaseSHA)
++	writeCommittedRangeGeneration(t, s, parent, parentBaseSHA, parentUpperSHA)
++
++	// Target: committed-range, based exactly at the parent's landing
++	// commit, depends on parent (hard).
++	if _, err := s.AddFeature(store.AddFeatureInput{Title: target, Slug: target, Request: "x"}); err != nil {
++		t.Fatalf("AddFeature target: %v", err)
++	}
++	if err := s.MarkFeatureState(target, store.StateApplied, "apply", ""); err != nil {
++		t.Fatalf("MarkFeatureState target: %v", err)
++	}
++	writeIntent(t, s, target)
++	writeVerifyRecipe(t, s, target, ApplyRecipe{Feature: target, Operations: []RecipeOperation{
++		{Type: "write-file", Path: "src/child.txt", Content: "child\n"},
++	}})
++	if err := s.WriteArtifact(target, "post-apply.patch", targetPatch); err != nil {
++		t.Fatalf("write target patch: %v", err)
++	}
++	setApplyBaseCommit(t, s, target, parentUpperSHA)
++	writeCommittedRangeGeneration(t, s, target, parentUpperSHA, targetUpperSHA)
++	setHardDeps(t, s, target, []string{parent})
++
++	_ = rootBaseSHA
++
++	report, err := RunVerify(s, target, VerifyOptions{NoWrite: true})
++	if err != nil {
++		t.Fatalf("RunVerify: %v", err)
++	}
++	v7 := findCheck(t, report, CheckRecipeReplayClean)
++	if !v7.Passed || v7.Skipped {
++		t.Errorf("V7 should pass: parent's committed-range change is already baked into the target's recorded base and must be skipped, not double-replayed; got %+v", v7)
++	}
++	v8 := findCheck(t, report, CheckPostApplyPatchReplayClean)
++	if !v8.Passed || v8.Skipped {
++		t.Errorf("V8 should pass against the closure-replayed baseline; got %+v", v8)
++	}
++	if report.FailedAt != "" {
++		t.Errorf("expected no FailedAt when the hard parent is already represented in the recorded base; got %q", report.FailedAt)
++	}
++}
++
++func headSHA(t *testing.T, root string) (string, error) {
++	t.Helper()
++	c := exec.Command("git", "rev-parse", "HEAD")
++	c.Dir = root
++	out, err := c.Output()
++	if err != nil {
++		return "", err
++	}
++	return strings.TrimSpace(string(out)), nil
++}
+-- 
+2.55.0
+

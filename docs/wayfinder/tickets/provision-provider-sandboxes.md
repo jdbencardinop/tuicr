@@ -22,9 +22,8 @@ source, and explicit permission for automated comment/review writes.
 ## Status
 
 - **Done:** local, version-pinned **Gitea 1.24** and **Forgejo 16** —
-  reproducible, disposable Docker fixtures with automatic credential/token
-  generation and teardown, in `fixtures/providers/` (verified 2026-07-30; see
-  `fixtures/providers/README.md`).
+  verified 2026-07-30 against reproducible, disposable Docker fixtures with
+  automatic credential/token generation and teardown.
 - **Open/HITL-blocked:** disposable **GitHub**, **GitLab**, and **Azure
   DevOps** sandboxes. No approval has been given for any of the three; no
   external target has been created or contacted.
@@ -39,6 +38,5 @@ This single gap is what keeps the following blocked, downstream:
 ## Unblock condition
 
 Explicit approval plus minimum-scope, teardown-documented disposable GitHub,
-GitLab, and Azure DevOps targets. Record exact scopes, teardown steps, and
-approval in the research workspace's
-`docs/follow-on-map/tickets/04-provision-provider-sandboxes.md` when granted.
+GitLab, and Azure DevOps targets. Record the exact scopes, teardown steps,
+and approval directly in this ticket's Resolution section when granted.

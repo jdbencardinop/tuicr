@@ -27,10 +27,7 @@ approval to post:
 - `expose-review-comment-authors` — local upstream-ready source commit
   `6ea2048`, targeted formatting/test evidence and a PR draft are complete,
   but posting requires explicit approval and an upstream-contribution
-  decision. See `docs/fork/PATCHES.md` for the commit and
-  `docs/wayfinder/tickets/README.md` for why the fuller narrative stays in
-  the research workspace's
-  `docs/follow-on-map/tickets/01-upstream-author-json.md`.
+  decision. See `docs/fork/PATCHES.md` for the commit.
 
 Every other `tpatch` feature (`editable-provider-neutral-threads`,
 `provider-capabilities`, `gitea-forgejo-adapter`,
