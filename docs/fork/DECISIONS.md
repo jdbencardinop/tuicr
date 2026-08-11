@@ -99,15 +99,25 @@ Tuicr install. See this repo's `docs/offline-candidate/README.md`,
 
 ## Current offline-only status
 
-The fork is **offline-implementation-complete; release is blocked.** Current
-tip: `ca319dc` (implementation/package base), reported version
-`tuicr 0.19.1-offline-candidate.1+ca319dc`, macOS x86_64 and Linux x86_64
-packages only, readiness explicitly `OFFLINE_VALIDATED_ONLY` — not a release.
+The fork is **offline-implementation-complete; release is blocked.** The
+implementation/package base remains `ca319dc`, reported by its archived
+packages as `tuicr 0.19.1-offline-candidate.1+ca319dc`. Those macOS x86_64 and
+Linux x86_64 packages remain explicitly `OFFLINE_VALIDATED_ONLY` — not a
+release.
 
-Explicitly **not yet done**: real Ubuntu-under-WSL run; live GitHub/GitLab
-mutation validation; live Azure DevOps sandbox validation; arm64/universal
-builds; signing/notarization; package-manager distribution; any Git tag,
-push, or hosted release; upstream PR submission/reconciliation.
+Follow-up validation exercised source revision `c2a7554` on real Ubuntu 24.04
+under WSL2 and live-tested the GitLab transport against an approved disposable
+self-hosted GitLab 19.2.1 target. Validation-record commit `ecae453` imported
+those results without changing `src/`. WSL passed with explicit
+anchor/clipboard caveats; GitLab legacy publication and direct durable adapter
+operations passed, while durable TUI publication and stale-range
+classification remain open.
+
+Explicitly **not yet done**: live GitHub mutation validation; live Azure DevOps
+mutation validation; GitLab durable TUI publication/stale-range fixes and
+retest; disposition of the WSL local-anchor and TUI-clipboard caveats;
+arm64/universal builds; signing/notarization; package-manager distribution; any
+Git tag or hosted release; upstream PR submission/reconciliation.
 
 See `docs/handoff/CURRENT.md` for the exact frontier and
 `docs/wayfinder/tickets/` for the open/blocking tickets that gate a real

@@ -5,7 +5,7 @@ type: prototype
 mode: HITL
 status: blocked
 owner: copilot
-blocked_by: [provision-provider-sandboxes]
+blocked_by: [provision-provider-sandboxes, classify-gitlab-range-anchors, wire-gitlab-durable-publication]
 ---
 
 ## Question
@@ -88,6 +88,7 @@ Observed gaps:
 
 ## Unblock condition
 
-Provision and validate the approved GitHub/Azure DevOps targets, then wire and
-re-run GitLab durable publication plus stale/range classification. Record each
-remaining pass/fail delta directly in this ticket's Resolution section.
+Close `classify-gitlab-range-anchors` and
+`wire-gitlab-durable-publication`, provision and validate the approved
+GitHub/Azure DevOps targets, then re-run the GitLab durable lifecycle. Record
+each remaining pass/fail delta directly in this ticket's Resolution section.

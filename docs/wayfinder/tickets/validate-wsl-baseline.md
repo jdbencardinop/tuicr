@@ -45,7 +45,7 @@ verified before execution.
 | Launch | TUI editor handoff passed; Windows VS Code and PowerShell browser launch returned success. |
 | Credentials | Authenticated `gh` API/PR reads passed. Azure CLI auth, Azure DevOps token acquisition/defaults/project read, 60 adapter tests, and an eight-operation local dry-run passed. GitLab is out of scope for this WSL baseline and deferred to the self-hosted target in `provision-provider-sandboxes.md`. |
 
-Four caveats are now observed facts:
+Five caveats are now observed facts:
 
 - After inserting five lines, a comment anchored to line 42 stayed at numeric
   line 42 and rendered on `policy_rule_037`; neither build followed

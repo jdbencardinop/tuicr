@@ -19,12 +19,12 @@ implicit model calls, no source upload.
 `ca319dc` is the implementation/package base: the offline-validated,
 five-provider candidate with fork identity, disabled self-update, and an
 isolated data directory (see `docs/fork/DECISIONS.md#current-offline-only-status`).
-This `fork-ready-integration`/`tessera/offline-candidate` branch's tip adds
-docs-only bootstrap metadata on top of that base — the agent workflow guide,
-decision/patch index, Wayfinder map/tickets, handoff doc, and the tracked
-`.tpatch/` workspace — so it is a superset: portable fork-development
-metadata plus the same implementation as `ca319dc`. It does not change
-`src/`.
+This `tessera/offline-candidate` branch adds portable fork-development
+metadata on top of that base: the agent workflow guide, decision/patch index,
+Wayfinder map/tickets, handoff doc, tracked `.tpatch/` workspace, and the
+Ubuntu/WSL plus live-GitLab validation record. Commit `ecae453` imported that
+docs-only validation record; `c2a7554` is the exact source revision exercised
+by it. Neither commit changes `src/` beyond `ca319dc`.
 
 ## Provider rules (no silent loss)
 

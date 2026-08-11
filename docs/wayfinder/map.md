@@ -1,7 +1,7 @@
 # Continue the Tuicr Review Fork
 
-**Status:** Offline implementation complete; release and upstream work
-blocked on external access.
+**Status:** Offline implementation and WSL/GitLab validation complete; release
+and upstream work remain blocked.
 
 ## Destination
 
@@ -46,6 +46,9 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
   — core build/startup/navigation/persistence/stdout/editor and read-only
   provider checks passed; anchor relocation and Windows clipboard remain
   explicit caveats.
+- [Validate live GitLab transport](tickets/validate-live-provider-parity.md)
+  — legacy TUI publication and direct durable adapter operations passed
+  against GitLab 19.2.1; durable TUI wiring and range staleness remain open.
 
 Historical patch/commit index (which `tpatch` feature produced which commits,
 and what each still needs before it can go upstream):
@@ -56,11 +59,22 @@ and what each still needs before it can go upstream):
 - Whether upstream Tuicr will accept the durable-thread/provider-adapter
   changes, and in what split — gated on
   [upstream-and-reconcile](tickets/upstream-and-reconcile.md).
-- Live GitHub/GitLab/Azure DevOps mutation behavior against real targets —
+- Safe local and GitLab range behavior after a head shift — gated on
+  [classify-local-anchor-shifts](tickets/classify-local-anchor-shifts.md) and
+  [classify-gitlab-range-anchors](tickets/classify-gitlab-range-anchors.md).
+- GitLab durable TUI publication — gated on
+  [wire-gitlab-durable-publication](tickets/wire-gitlab-durable-publication.md).
+- Live GitHub/Azure DevOps mutation behavior against real targets —
   gated on
   [provision-provider-sandboxes](tickets/provision-provider-sandboxes.md)
   and
   [validate-live-provider-parity](tickets/validate-live-provider-parity.md).
+- Whether WSL TUI clipboard support is required for release or the verified
+  stdout/`clip.exe` workaround is accepted — gated on
+  [decide-wsl-clipboard-boundary](tickets/decide-wsl-clipboard-boundary.md).
+- Native self-hosted GitLab custom-port URLs without the documented portless
+  logical-host workaround — tracked by
+  [support-gitlab-custom-ports](tickets/support-gitlab-custom-ports.md).
 - arm64 builds, signing/notarization, package-manager distribution, and the
   actual tagged/pushed release — gated on
   [release-cross-platform-fork](tickets/release-cross-platform-fork.md).

@@ -25,13 +25,17 @@ Full decision text: `docs/fork/DECISIONS.md`.
 - Offline candidate / implementation-package base: commit `ca319dc` — the
   five-provider offline-validated candidate with fork identity, disabled
   self-update, and an isolated data dir.
+- Validation-record commit: `ecae453` — docs-only WSL/GitLab findings; no
+  `src/` changes.
 - This development branch's tip adds docs-only bootstrap metadata on top of
   `ca319dc` (this handoff doc, `docs/fork/DECISIONS.md`/`PATCHES.md`,
   `docs/wayfinder/`, `docs/fork/AGENT-WORKFLOW.md`, and the tracked
   `.tpatch/` workspace) — no `src/` changes beyond `ca319dc`.
-- Current tip build reports:
-  `tuicr 0.19.1-offline-candidate.1+c2a7554`. The archived implementation
-  package at `ca319dc` reports the corresponding `+ca319dc` identity.
+- Latest build exercised on WSL reports
+  `tuicr 0.19.1-offline-candidate.1+c2a7554`; later validation/tracker commits
+  only change documentation and have not been rebuilt separately. The
+  archived implementation package at `ca319dc` reports the corresponding
+  `+ca319dc` identity.
 - Platforms packaged: macOS x86_64 and Linux x86_64 only.
 - Artifact readiness: `OFFLINE_VALIDATED_ONLY` — not a release. See
   `docs/offline-candidate/README.md` and `docs/offline-candidate/SECRET-SCAN.md`
@@ -51,21 +55,25 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Approve/provision disposable GitHub and Azure DevOps sandboxes (GitLab
-   19.2.1, Gitea 1.24, and Forgejo 16 are already done) —
-   `docs/wayfinder/tickets/provision-provider-sandboxes.md`.
-2. Execute remaining GitHub/Azure parity and wire/retest GitLab durable
-   publication — `docs/wayfinder/tickets/validate-live-provider-parity.md`.
-3. Explicitly accept or fix the WSL semantic-anchor and Windows-clipboard
-   caveats before declaring the release interface ready.
-4. Add arm64, signing/notarization, package-manager distribution, and cut an
-   actual tagged/pushed release — depends on 1–3;
+1. Fix and retest unsafe anchor handling for local comments and GitLab durable
+   ranges — `docs/wayfinder/tickets/classify-local-anchor-shifts.md` and
+   `docs/wayfinder/tickets/classify-gitlab-range-anchors.md`.
+2. Wire and retest GitLab durable TUI publication —
+   `docs/wayfinder/tickets/wire-gitlab-durable-publication.md`.
+3. Approve/provision disposable GitHub and Azure DevOps sandboxes, then
+   execute their remaining live parity —
+   `docs/wayfinder/tickets/provision-provider-sandboxes.md` and
+   `docs/wayfinder/tickets/validate-live-provider-parity.md`.
+4. Explicitly accept or fix the WSL TUI-clipboard boundary —
+   `docs/wayfinder/tickets/decide-wsl-clipboard-boundary.md`.
+5. Add arm64, signing/notarization, package-manager distribution, and cut an
+   actual tagged/pushed release — depends on 1–4;
    `docs/wayfinder/tickets/release-cross-platform-fork.md`.
-5. Post the one ready upstream patch (comment-author JSON) once approved, and
+6. Post the one ready upstream patch (comment-author JSON) once approved, and
    reconcile the rest after the release interface stabilizes —
    `docs/wayfinder/tickets/upstream-and-reconcile.md`.
-6. Update the teaching package only after a real release interface is fixed —
-   depends on step 4; not tracked as its own ticket here since it strictly
+7. Update the teaching package only after a real release interface is fixed —
+   depends on step 5; not tracked as its own ticket here since it strictly
    follows that release.
 
 ## Evidence pointers in this repo
@@ -94,6 +102,10 @@ self-hosted provider run is complete with the gaps noted above.
 
 - approved GitHub/Azure DevOps mutation sandboxes;
 - GitLab TUI durable-publication and range-staleness behavior;
+- durable sanitized WSL/GitLab run artifacts in shared Git history;
 - multi-review daily-use observation.
 
-No external issues or review comments have been submitted.
+The approved disposable GitLab target was mutated and fully torn down. Three
+private continuation issues were opened and are mirrored by the fork tickets
+above. No GitHub/Azure review mutation or upstream Tuicr issue/PR was
+submitted.
