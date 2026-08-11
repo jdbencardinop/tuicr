@@ -42,6 +42,10 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
   — distinguishable version string, disabled self-update, isolated data dir.
 - [Current status is offline-only, not a release](../fork/DECISIONS.md#current-offline-only-status)
   — tip `ca319dc`, `OFFLINE_VALIDATED_ONLY`.
+- [Validate upstream and fork on Ubuntu under WSL](tickets/validate-wsl-baseline.md)
+  — core build/startup/navigation/persistence/stdout/editor and read-only
+  provider checks passed; anchor relocation and Windows clipboard remain
+  explicit caveats.
 
 Historical patch/commit index (which `tpatch` feature produced which commits,
 and what each still needs before it can go upstream):
@@ -52,9 +56,6 @@ and what each still needs before it can go upstream):
 - Whether upstream Tuicr will accept the durable-thread/provider-adapter
   changes, and in what split — gated on
   [upstream-and-reconcile](tickets/upstream-and-reconcile.md).
-- Real Ubuntu-under-WSL install/startup/persistence/credential behavior —
-  gated on
-  [validate-wsl-baseline](tickets/validate-wsl-baseline.md).
 - Live GitHub/GitLab/Azure DevOps mutation behavior against real targets —
   gated on
   [provision-provider-sandboxes](tickets/provision-provider-sandboxes.md)

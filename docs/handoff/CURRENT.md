@@ -2,9 +2,11 @@
 
 ## Status
 
-Exploration and offline implementation are complete. Release and upstream
-submission are blocked on external access (real WSL, and approved
-GitHub/GitLab/Azure DevOps sandboxes).
+Exploration, offline implementation, and the real Ubuntu/WSL baseline are
+complete. A disposable self-hosted GitLab run is also complete. Release and
+upstream submission remain blocked on approved GitHub/Azure DevOps sandboxes,
+GitLab durable-publication gaps, and explicit disposition of the WSL caveats
+recorded below.
 
 ## Decision
 
@@ -27,11 +29,20 @@ Full decision text: `docs/fork/DECISIONS.md`.
   `ca319dc` (this handoff doc, `docs/fork/DECISIONS.md`/`PATCHES.md`,
   `docs/wayfinder/`, `docs/fork/AGENT-WORKFLOW.md`, and the tracked
   `.tpatch/` workspace) — no `src/` changes beyond `ca319dc`.
-- Reported version: `tuicr 0.19.1-offline-candidate.1+ca319dc`.
+- Current tip build reports:
+  `tuicr 0.19.1-offline-candidate.1+c2a7554`. The archived implementation
+  package at `ca319dc` reports the corresponding `+ca319dc` identity.
 - Platforms packaged: macOS x86_64 and Linux x86_64 only.
 - Artifact readiness: `OFFLINE_VALIDATED_ONLY` — not a release. See
   `docs/offline-candidate/README.md` and `docs/offline-candidate/SECRET-SCAN.md`
   for the accepted scope and artifact/checksum contract.
+- Real Ubuntu 24.04 under WSL2: **pass with caveats** for upstream `v0.19.1`
+  and fork tip `c2a7554`; see
+  `docs/wayfinder/tickets/validate-wsl-baseline.md`.
+- Self-hosted GitLab 19.2.1: legacy comment/approve/request-changes and direct
+  durable adapter operations live-pass; TUI durable publication and range
+  stale classification remain gaps. See
+  `docs/wayfinder/tickets/validate-live-provider-parity.md`.
 
 Per-feature commit ranges and validation state:
 `docs/fork/PATCHES.md`.
@@ -40,13 +51,13 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Run the baseline and candidate inside actual Ubuntu under WSL —
-   `docs/wayfinder/tickets/validate-wsl-baseline.md`.
-2. Approve/provision disposable GitHub, GitLab, and Azure DevOps sandboxes
-   (local Gitea 1.24/Forgejo 16 are already done) —
+1. Approve/provision disposable GitHub and Azure DevOps sandboxes (GitLab
+   19.2.1, Gitea 1.24, and Forgejo 16 are already done) —
    `docs/wayfinder/tickets/provision-provider-sandboxes.md`.
-3. Execute live provider mutation parity and teardown against those sandboxes
-   — `docs/wayfinder/tickets/validate-live-provider-parity.md`.
+2. Execute remaining GitHub/Azure parity and wire/retest GitLab durable
+   publication — `docs/wayfinder/tickets/validate-live-provider-parity.md`.
+3. Explicitly accept or fix the WSL semantic-anchor and Windows-clipboard
+   caveats before declaring the release interface ready.
 4. Add arm64, signing/notarization, package-manager distribution, and cut an
    actual tagged/pushed release — depends on 1–3;
    `docs/wayfinder/tickets/release-cross-platform-fork.md`.
@@ -67,10 +78,22 @@ In dependency order:
 - `docs/fork/TPATCH.md` — the local tpatch committed-range verifier fix and
   when to apply it.
 
+## Known WSL caveats
+
+- line anchors retain their numeric position after the five-line fixture
+  shift instead of relocating or becoming stale;
+- TUI clipboard export does not reach the Windows clipboard; `--stdout` and
+  direct `clip.exe` work;
+- Ubuntu Git 2.43 cannot execute two newer-Git fixture tests;
+- `wslview` misdetects interop although PowerShell browser launch works.
+
+GitLab remains out of scope for the WSL baseline itself. Its separate
+self-hosted provider run is complete with the gaps noted above.
+
 ## Remaining evidence gaps
 
-- actual Ubuntu/WSL run;
-- approved GitHub/GitLab/Azure DevOps mutation sandboxes;
+- approved GitHub/Azure DevOps mutation sandboxes;
+- GitLab TUI durable-publication and range-staleness behavior;
 - multi-review daily-use observation.
 
 No external issues or review comments have been submitted.

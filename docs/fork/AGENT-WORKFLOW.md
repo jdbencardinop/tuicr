@@ -51,11 +51,26 @@ cargo test --locked --lib            # full suite
 cargo test --lib forge::azure        # scoped, e.g. one adapter module
 ```
 
-**Known pre-existing failure**: `cargo test --lib` has exactly one
-environmental failure, `vcs::git::libgit2::tests::should_discover_worktree_with_relativeworktrees_extension`
-("not in a git directory"), unrelated to fork changes. Treat a run as clean
-if this is the only failure; investigate any other failure or any change in
-count.
+**Known environment-dependent failures**:
+
+- `vcs::git::libgit2::tests::should_discover_worktree_with_relativeworktrees_extension`
+  exercises relative worktree links introduced in Git 2.48 and fails on
+  Ubuntu 24.04's Git 2.43 with "not in a git directory".
+- On that same Git 2.43 host,
+  `vcs::git::tests::default_preference_routes_reftable_repo_to_cli` also
+  fails because the reftable backend integrated in Git 2.45 is unavailable
+  and Git refuses the manually enabled repository extension.
+
+Investigate any other failure. To confirm the supported suite on Git 2.43,
+rerun with only those exact tests skipped; the real WSL baseline passed all
+1,642 remaining fork tests. Git 2.48 is the oldest version that can exercise
+both fixtures; put Git 2.48 or newer earlier on `PATH` to run the unfiltered
+suite. Keep Ubuntu's security-patched system Git 2.43 available as the stock
+distribution baseline rather than replacing it only to hide this portability
+result. Official release notes:
+[Git 2.45](https://github.com/git/git/blob/v2.45.0/Documentation/RelNotes/2.45.0.txt)
+and
+[Git 2.48](https://github.com/git/git/blob/v2.48.0/Documentation/RelNotes/2.48.0.txt).
 
 ## `tpatch` feature lifecycle
 
