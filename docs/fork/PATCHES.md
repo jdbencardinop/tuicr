@@ -5,14 +5,12 @@ derived from committed `Tpatch-Feature:` trailers in `git log`. This is the
 durable record; do not hand-edit the table below without re-deriving it from
 `git log` (see "How this list was produced").
 
-Every commit below carries a `Tpatch-Feature: <name>` Git trailer identifying
-the informal feature/branch it belongs to, as a naming convention only: none
-of the entries in the Index below have a corresponding
-`.tpatch/features/<name>/` directory (request/plan/exploration/apply-recipe),
-because they predate this repo's tracked `.tpatch/` workspace (introduced by
-`tpatch init` at commit `ca319dc`; see
-[`../../.tpatch/README.md`](../../.tpatch/README.md)). Do not create one after
-the fact.
+Every commit below carries a `Tpatch-Feature: <name>` Git trailer. Historical
+entries through `fork-tpatch-bootstrap` used that trailer as a naming
+convention and predate this repo's tracked `.tpatch/` workspace; do not create
+feature directories for them after the fact. New customizations beginning with
+`classify-gitlab-range-anchors` use the full tracked lifecycle and retain their
+request/spec/exploration/recipe/evidence under `.tpatch/features/<name>/`.
 
 ## Honesty note on `.tpatch/` metadata
 
@@ -24,10 +22,9 @@ The table below treats the committed `Tpatch-Feature:` trailer as the only
 guaranteed-durable identifier, and reports local `.tpatch` state only where it
 was directly inspected in a still-present sibling worktree at the time this
 file was written. Where it was not (re)inspected, this is stated explicitly
-rather than assumed. This repo's own `.tpatch/` workspace (tracked from
-`24376a6` onward) starts with an empty `FEATURES.md` and is unrelated to the
-historical entries below — see "Relationship to this repo's `.tpatch/`
-workspace" below.
+rather than assumed. This repo's own `.tpatch/` workspace is tracked from `24376a6` onward. Its
+current feature state is portable in Git and is reported directly below; see
+"Relationship to this repo's `.tpatch/` workspace".
 
 ## Source vs. reconciled commits
 
@@ -53,6 +50,7 @@ is not reachable from this branch's history, only the reconciled range is.
 | `offline-release-candidate` | `0ef4dcf..ca319dc` (5 commits) | `d8b1f63` | not (re)inspected this pass | `OFFLINE_VALIDATED_ONLY` — packaged, checksummed, secret-scanned macOS/Linux x86_64 archives; not a tagged/pushed release | **Never upstream** — fork identity, disabled self-update, isolated data dir, and packaging secret-scan are deliberately fork-only divergences from upstream (see `docs/fork/DECISIONS.md#fork-identity-update-and-data-dir-behavior`) |
 | `fork-agent-guide` | `880ee0a` (1 commit) | `ca319dc` | n/a (docs-only, no source patch) | Complete — adds `docs/fork/AGENT-WORKFLOW.md`, an `AGENTS.md` pointer, and a pointer-only `CLAUDE.md` | N/A — fork-internal agent guidance, not upstream-proposable |
 | `fork-tpatch-bootstrap` | `24376a6` (1 commit) | `ca319dc` | `FEATURES.md` intentionally empty; this workspace tracks only customizations made from here forward | Complete — `tpatch doctor`/`tpatch status` verified clean after sanitizing the auto-detected local provider endpoint out of `.tpatch/config.yaml` | N/A — tooling bootstrap, not upstream-proposable |
+| `classify-gitlab-range-anchors` | `958c815` (1 commit) | `4f60eda` | Tracked feature: `state: applied`, `verified-fresh`; full lifecycle artifacts committed | Offline-complete: 61 GitLab tests and all 1,655 supported locked library tests pass; ranges/native anchors persist and stale state is monotonic; live GitLab head-shift rerun pending | Fork-only pending live rerun; upstream split TBD |
 
 The commit that added `docs/fork/DECISIONS.md`, `docs/wayfinder/`, and
 `docs/handoff/CURRENT.md` carries no `Tpatch-Feature:` trailer and is
@@ -93,10 +91,10 @@ work; wait until it lands, then regenerate.
 
 ## Relationship to this repo's `.tpatch/` workspace
 
-This repo's own `.tpatch/` workspace (bootstrapped by `fork-tpatch-bootstrap`,
-commit `24376a6`) intentionally starts with an empty `FEATURES.md`. See
-[`../../.tpatch/README.md`](../../.tpatch/README.md) for why the historical
-trailers above are not backfilled as tracked `.tpatch/features/` entries, and
-for the lifecycle new patch-bearing customizations must follow going forward
-(`tpatch add` → `analyze` → `define` → `explore` → `implement` → `apply` →
-`record`/`test` → `verify` → `reconcile` → `land`).
+This repo's own `.tpatch/` workspace was bootstrapped by
+`fork-tpatch-bootstrap` at `24376a6`; `classify-gitlab-range-anchors` is its
+first complete tracked customization. See
+[`../../.tpatch/README.md`](../../.tpatch/README.md) for why historical
+trailers are not backfilled and for the lifecycle every new patch-bearing
+customization follows (`tpatch add` → `analyze` → `define` → `explore` →
+`implement` → `apply` → `record`/`test` → `verify` → `reconcile` → `land`).

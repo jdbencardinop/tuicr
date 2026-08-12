@@ -1,8 +1,9 @@
 # Tessera Patch workspace
 
 This `.tpatch/` workspace was created with `tpatch init` (v0.11.3) to prepare
-tracked infrastructure for **future** fork customizations. It intentionally
-starts empty of features.
+tracked infrastructure for fork customizations. It started empty; new
+patch-bearing work now lives under `.tpatch/features/` and is summarized in
+`FEATURES.md`.
 
 ## Historical fork changes predate this workspace
 
@@ -26,8 +27,9 @@ plus the commit trailers themselves. **Do not invent a
 historical `.tpatch/features/<slug>/` directory** for that work — no such
 tracked feature artifacts (request/plan/exploration/recipe) were produced at
 the time, and fabricating them now would misrepresent what was actually
-analyzed, defined, explored, and recorded. `FEATURES.md` in this workspace
-correctly starts empty; it is not a backfill of prior history.
+analyzed, defined, explored, and recorded. The current `FEATURES.md` contains
+only customizations created after this workspace bootstrap; it is not a
+backfill of prior history.
 
 ## Workflow for new patch-bearing customizations
 

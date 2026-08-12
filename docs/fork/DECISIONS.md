@@ -113,8 +113,15 @@ anchor/clipboard caveats; GitLab legacy publication and direct durable adapter
 operations passed, while durable TUI publication and stale-range
 classification remain open.
 
+Offline follow-up commit `958c815` now classifies GitLab position-head
+mismatches, preserves validated same-side ranges plus opaque native positions,
+and propagates provider-stale state monotonically through durable import and
+head refresh. Its formatting, clippy, 61 focused GitLab tests, and all 1,655
+supported locked library tests pass; the disposable GitLab head-shift rerun
+remains required before the live range gap closes.
+
 Explicitly **not yet done**: live GitHub mutation validation; live Azure DevOps
-mutation validation; GitLab durable TUI publication/stale-range fixes and
+mutation validation; GitLab durable TUI publication and stale-range live
 retest; disposition of the WSL local-anchor and TUI-clipboard caveats;
 arm64/universal builds; signing/notarization; package-manager distribution; any
 Git tag or hosted release; upstream PR submission/reconciliation.

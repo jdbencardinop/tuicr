@@ -49,6 +49,9 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
 - [Validate live GitLab transport](tickets/validate-live-provider-parity.md)
   — legacy TUI publication and direct durable adapter operations passed
   against GitLab 19.2.1; durable TUI wiring and range staleness remain open.
+- [Classify GitLab range anchors](tickets/classify-gitlab-range-anchors.md)
+  — offline source now preserves valid ranges/native positions and marks
+  version mismatches stale monotonically; disposable live rerun remains.
 
 Historical patch/commit index (which `tpatch` feature produced which commits,
 and what each still needs before it can go upstream):
@@ -59,7 +62,8 @@ and what each still needs before it can go upstream):
 - Whether upstream Tuicr will accept the durable-thread/provider-adapter
   changes, and in what split — gated on
   [upstream-and-reconcile](tickets/upstream-and-reconcile.md).
-- Safe local and GitLab range behavior after a head shift — gated on
+- Safe local anchors after a head shift and live confirmation of the offline
+  GitLab range fix — gated on
   [classify-local-anchor-shifts](tickets/classify-local-anchor-shifts.md) and
   [classify-gitlab-range-anchors](tickets/classify-gitlab-range-anchors.md).
 - GitLab durable TUI publication — gated on

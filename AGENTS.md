@@ -70,7 +70,7 @@ src/
 │   ├── pr_open.rs       # Async pr-open flow: build session from details + diff
 │   ├── selector.rs      # Review target selector state (Local | Pull Requests tabs)
 │   ├── context.rs       # Remote context expansion via ForgeBackend::fetch_file_lines
-│   ├── remote_comments.rs # RemoteReviewThread shape + visibility filter
+│   ├── remote_comments.rs # RemoteReviewThread range/native-anchor shape + visibility filter
 │   ├── submit.rs        # Submit pipeline: preflight mapping, resolver actions,
 │   │                    # InlineComment payload, build_review_body, SubmitEvent
 │   ├── github/          # GitHub backend via `gh` CLI
@@ -211,7 +211,9 @@ Forge review (`tuicr pr <target>`, `tuicr mr <target>`, or their explicit `tuicr
 - `list_pull_request_review_metadata` — best-effort viewer login + review commit OIDs used to preselect commits since the viewer's latest submitted review and mark already-reviewed commits in the inline selector.
   GitHub uses review metadata; GitLab combines `/user`, MR diff versions, approvals, and discussions.
 - `get_pull_request_commit_range_diff` — cumulative diff for a contiguous subrange (`start_sha` is the parent of the first selected commit; `end_sha` is the last).
-- `list_review_threads` — existing forge comments + resolved/outdated state.
+- `list_review_threads` — existing forge comments + resolved/outdated state;
+  GitLab compares native position head SHAs with the current MR head and
+  retains validated ranges/native positions without guessing relocation.
 - `fetch_file_lines` — remote context expansion in the diff view.
 - `create_review` — POST a review with inline comments via `CreateReviewRequest`.
 

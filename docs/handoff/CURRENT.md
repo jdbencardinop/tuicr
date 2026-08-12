@@ -27,10 +27,9 @@ Full decision text: `docs/fork/DECISIONS.md`.
   self-update, and an isolated data dir.
 - Validation-record commit: `ecae453` — docs-only WSL/GitLab findings; no
   `src/` changes.
-- This development branch's tip adds docs-only bootstrap metadata on top of
-  `ca319dc` (this handoff doc, `docs/fork/DECISIONS.md`/`PATCHES.md`,
-  `docs/wayfinder/`, `docs/fork/AGENT-WORKFLOW.md`, and the tracked
-  `.tpatch/` workspace) — no `src/` changes beyond `ca319dc`.
+- Current source customization: `958c815` — offline-verified GitLab
+  position-version/range/native-anchor classification under the tracked
+  `classify-gitlab-range-anchors` feature; live rerun pending.
 - Latest build exercised on WSL reports
   `tuicr 0.19.1-offline-candidate.1+c2a7554`; later validation/tracker commits
   only change documentation and have not been rebuilt separately. The
@@ -44,8 +43,9 @@ Full decision text: `docs/fork/DECISIONS.md`.
   and fork tip `c2a7554`; see
   `docs/wayfinder/tickets/validate-wsl-baseline.md`.
 - Self-hosted GitLab 19.2.1: legacy comment/approve/request-changes and direct
-  durable adapter operations live-pass; TUI durable publication and range
-  stale classification remain gaps. See
+  durable adapter operations live-pass; range staleness is fixed offline at
+  `958c815` pending live rerun, while TUI durable publication remains a gap.
+  See
   `docs/wayfinder/tickets/validate-live-provider-parity.md`.
 
 Per-feature commit ranges and validation state:
@@ -55,8 +55,8 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Fix and retest unsafe anchor handling for local comments and GitLab durable
-   ranges — `docs/wayfinder/tickets/classify-local-anchor-shifts.md` and
+1. Fix unsafe local-comment anchors and live-rerun the offline GitLab range
+   fix — `docs/wayfinder/tickets/classify-local-anchor-shifts.md` and
    `docs/wayfinder/tickets/classify-gitlab-range-anchors.md`.
 2. Wire and retest GitLab durable TUI publication —
    `docs/wayfinder/tickets/wire-gitlab-durable-publication.md`.
@@ -101,8 +101,7 @@ self-hosted provider run is complete with the gaps noted above.
 ## Remaining evidence gaps
 
 - approved GitHub/Azure DevOps mutation sandboxes;
-- GitLab TUI durable-publication and range-staleness behavior;
-- durable sanitized WSL/GitLab run artifacts in shared Git history;
+- GitLab TUI durable publication and live stale-range rerun;
 - multi-review daily-use observation.
 
 The approved disposable GitLab target was mutated and fully torn down. Three

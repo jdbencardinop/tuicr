@@ -24,7 +24,9 @@ metadata on top of that base: the agent workflow guide, decision/patch index,
 Wayfinder map/tickets, handoff doc, tracked `.tpatch/` workspace, and the
 Ubuntu/WSL plus live-GitLab validation record. Commit `ecae453` imported that
 docs-only validation record; `c2a7554` is the exact source revision exercised
-by it. Neither commit changes `src/` beyond `ca319dc`.
+by it. Commit `958c815` is the first post-bootstrap source customization: it
+classifies GitLab position-version mismatches, preserves validated ranges and
+native anchors, and is offline-verified pending a disposable live rerun.
 
 ## Provider rules (no silent loss)
 
