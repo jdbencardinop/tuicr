@@ -767,6 +767,8 @@ mod tests {
             side: RemoteCommentSide::Right,
             is_resolved,
             is_outdated: false,
+            range: None,
+            provider_native_anchor: None,
             comments: vec![
                 RemoteReviewComment {
                     id: "remote-root".to_string(),

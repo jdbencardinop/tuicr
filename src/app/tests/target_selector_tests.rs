@@ -2515,6 +2515,8 @@ fn sample_thread(line: u32, body: &str, resolved: bool, outdated: bool) -> Remot
         side: RemoteCommentSide::Right,
         is_resolved: resolved,
         is_outdated: outdated,
+        range: None,
+        provider_native_anchor: None,
         comments: vec![RemoteReviewComment {
             id: "C".to_string(),
             author: Some("alice".to_string()),

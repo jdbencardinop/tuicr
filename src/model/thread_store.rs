@@ -436,13 +436,15 @@ pub fn thread_from_remote(provider: &str, remote: &RemoteReviewThread) -> Persis
         .split_first()
         .expect("thread_from_remote requires a non-empty RemoteReviewThread.comments");
 
-    let anchor = match remote.line {
-        Some(line) => Anchor::line(
-            remote.path.clone(),
-            anchor_side_for_remote(remote.side),
-            line,
-        ),
-        None => Anchor::file(remote.path.clone()),
+    let side = anchor_side_for_remote(remote.side);
+    let anchor = if let Some(range) = remote.range.as_ref() {
+        Anchor::range(remote.path.clone(), side, range.start(), range.end())
+            .expect("RemoteReviewRange guarantees ordered inclusive bounds")
+    } else {
+        match remote.line {
+            Some(line) => Anchor::line(remote.path.clone(), side, line),
+            None => Anchor::file(remote.path.clone()),
+        }
     };
 
     let thread_id = remote_thread_id_for(provider, &remote.id);
@@ -451,21 +453,31 @@ pub fn thread_from_remote(provider: &str, remote: &RemoteReviewThread) -> Persis
     for reply in replies {
         thread.reply(remote_thread_comment(reply));
     }
+    if remote.is_outdated {
+        thread.mark_stale_from_provider();
+    }
     if remote.is_resolved {
         thread.resolve();
     }
 
     let mut persisted = PersistedThread::new(thread);
-    persisted.upsert_provider_mapping(
-        provider,
-        serde_json::json!({
-            "id": remote.id,
-            "path": remote.path,
-            "line": remote.line,
-            "is_outdated": remote.is_outdated,
-            "is_resolved": remote.is_resolved,
-        }),
-    );
+    let mut provider_mapping = serde_json::json!({
+        "id": remote.id,
+        "path": remote.path,
+        "line": remote.line,
+        "is_outdated": remote.is_outdated,
+        "is_resolved": remote.is_resolved,
+    });
+    if let Some(range) = remote.range.as_ref() {
+        provider_mapping["range"] = serde_json::json!({
+            "start": range.start(),
+            "end": range.end(),
+        });
+    }
+    if let Some(native_anchor) = remote.provider_native_anchor.as_ref() {
+        provider_mapping["native_anchor"] = native_anchor.clone();
+    }
+    persisted.upsert_provider_mapping(provider, provider_mapping);
     // Seed the namespaced root-comment ledger from the remote payload
     // itself, the same ledger `create_thread` populates via
     // `record_root_comment_id`, so `ForgeBackend::reply_to_thread` can
@@ -527,6 +539,7 @@ pub(super) fn merge_remote_thread_into_existing(
     fresh: PersistedThread,
     provider: &str,
 ) {
+    let fresh_anchor_is_stale = fresh.thread.anchor().is_stale();
     let local_only_replies: Vec<ThreadComment> = existing
         .thread
         .replies()
@@ -559,6 +572,9 @@ pub(super) fn merge_remote_thread_into_existing(
     });
     existing.thread = serde_json::from_value(merged_thread_value)
         .expect("Thread fields always round-trip through JSON");
+    if fresh_anchor_is_stale {
+        existing.thread.mark_stale_from_provider();
+    }
 
     if let Some(mapping) = fresh.provider_mapping(provider) {
         existing.upsert_provider_mapping(provider, mapping.clone());
@@ -863,6 +879,8 @@ mod tests {
             side: RemoteCommentSide::Right,
             is_resolved: false,
             is_outdated: false,
+            range: None,
+            provider_native_anchor: None,
             comments: vec![crate::forge::remote_comments::RemoteReviewComment {
                 id: "PRRC_kwABC".to_string(),
                 author: Some("alice".to_string()),
@@ -902,6 +920,98 @@ mod tests {
         // (unaffected by rest_id), so display/lookup-by-native-id logic is
         // unchanged either way.
         assert!(without_rest_id.has_provider_id("github", "PRRT_1"));
+    }
+
+    fn gitlab_range_thread(is_outdated: bool, is_resolved: bool) -> RemoteReviewThread {
+        RemoteReviewThread {
+            id: "discussion-1".to_string(),
+            path: "src/lib.rs".to_string(),
+            line: Some(12),
+            side: RemoteCommentSide::Right,
+            is_resolved,
+            is_outdated,
+            range: Some(crate::forge::remote_comments::RemoteReviewRange::new(10, 12).unwrap()),
+            provider_native_anchor: Some(serde_json::json!({
+                "position_type": "text",
+                "head_sha": if is_outdated { "old-head" } else { "current-head" },
+                "new_path": "src/lib.rs",
+                "new_line": 12,
+                "line_range": {
+                    "start": {"type": "new", "new_line": 10},
+                    "end": {"type": "new", "new_line": 12}
+                }
+            })),
+            comments: vec![crate::forge::remote_comments::RemoteReviewComment {
+                id: "100".to_string(),
+                author: Some("alice".to_string()),
+                body: "range review".to_string(),
+                created_at: None,
+                in_reply_to: None,
+                url: String::new(),
+                rest_id: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn should_import_gitlab_range_native_anchor_and_provider_stale_state() {
+        let persisted = thread_from_remote("gitlab", &gitlab_range_thread(true, false));
+
+        assert_eq!(persisted.thread.status(), ThreadStatus::Stale);
+        assert!(persisted.thread.anchor().is_stale());
+        assert!(matches!(
+            persisted.thread.anchor().target(),
+            crate::model::thread::AnchorTarget::Range {
+                path,
+                side: AnchorSide::New,
+                start: 10,
+                end: 12,
+            } if path == "src/lib.rs"
+        ));
+        let mapping = persisted.provider_mapping("gitlab").unwrap();
+        assert_eq!(
+            mapping["range"],
+            serde_json::json!({"start": 10, "end": 12})
+        );
+        assert_eq!(mapping["native_anchor"]["head_sha"], "old-head");
+        assert_eq!(mapping["is_outdated"], true);
+    }
+
+    #[test]
+    fn should_monotonically_apply_provider_stale_on_repeat_import_and_reopen() {
+        let mut existing = thread_from_remote("gitlab", &gitlab_range_thread(false, false));
+        existing.thread.resolve();
+        let fresh = thread_from_remote("gitlab", &gitlab_range_thread(true, false));
+
+        merge_remote_thread_into_existing(&mut existing, fresh, "gitlab");
+
+        assert_eq!(existing.thread.status(), ThreadStatus::Resolved);
+        assert!(existing.thread.anchor().is_stale());
+        assert_eq!(
+            existing.provider_mapping("gitlab").unwrap()["is_outdated"],
+            true
+        );
+        assert!(existing.thread.reopen());
+        assert_eq!(existing.thread.status(), ThreadStatus::Stale);
+    }
+
+    #[test]
+    fn should_not_replace_local_ambiguous_state_on_outdated_repeat_import() {
+        let mut existing = thread_from_remote("gitlab", &gitlab_range_thread(false, false));
+        let mut thread_json = serde_json::to_value(&existing.thread).unwrap();
+        thread_json["status"] = serde_json::json!("ambiguous");
+        thread_json["anchor"]["state"] = serde_json::json!("ambiguous");
+        existing.thread = serde_json::from_value(thread_json).unwrap();
+        let fresh = thread_from_remote("gitlab", &gitlab_range_thread(true, false));
+
+        merge_remote_thread_into_existing(&mut existing, fresh, "gitlab");
+
+        assert_eq!(existing.thread.status(), ThreadStatus::Ambiguous);
+        assert!(existing.thread.anchor().is_ambiguous());
+        assert_eq!(
+            existing.provider_mapping("gitlab").unwrap()["is_outdated"],
+            true
+        );
     }
 
     /// Regression test (audit finding: "cross-provider mapping

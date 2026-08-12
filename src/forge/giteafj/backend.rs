@@ -559,6 +559,8 @@ impl ForgeBackend for GiteaForgejoBackend {
                     // `capabilities.rs`) — Gitea/Forgejo do not track
                     // staleness per comment.
                     is_outdated: review.stale,
+                    range: None,
+                    provider_native_anchor: None,
                     comments: vec![RemoteReviewComment {
                         id: comment.id.to_string(),
                         author: comment.user.map(|u| u.login),

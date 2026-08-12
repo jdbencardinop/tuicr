@@ -1,8 +1,10 @@
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::error::{Result, TuicrError};
-use crate::forge::remote_comments::{RemoteCommentSide, RemoteReviewComment, RemoteReviewThread};
+use crate::forge::remote_comments::{
+    RemoteCommentSide, RemoteReviewComment, RemoteReviewRange, RemoteReviewThread,
+};
 use crate::forge::traits::{
     ForgeRepository, PullRequestCommit, PullRequestDetails, PullRequestSummary,
 };
@@ -231,7 +233,7 @@ fn notes_into_comments(notes: Vec<GlabNote>) -> Vec<RemoteReviewComment> {
 }
 
 impl GlabDiscussion {
-    pub fn into_review_thread(self) -> Option<RemoteReviewThread> {
+    pub fn into_review_thread(self, current_mr_head: Option<&str>) -> Option<RemoteReviewThread> {
         let root = self.notes.first()?;
 
         if self.individual_note {
@@ -256,6 +258,8 @@ impl GlabDiscussion {
                 side: RemoteCommentSide::Right,
                 is_resolved: false,
                 is_outdated: false,
+                range: None,
+                provider_native_anchor: None,
                 comments,
             });
         }
@@ -288,6 +292,10 @@ impl GlabDiscussion {
         }
 
         let is_resolved = root.resolved;
+        let provider_native_anchor = Some(position.raw().clone());
+        let (range, invalid_range) = validated_range(position, side, line);
+        let is_outdated =
+            invalid_range || version_mismatch(position.head_sha.as_deref(), current_mr_head);
         let comments = notes_into_comments(self.notes);
 
         Some(RemoteReviewThread {
@@ -296,9 +304,47 @@ impl GlabDiscussion {
             line,
             side,
             is_resolved,
-            is_outdated: false,
+            is_outdated,
+            range,
+            provider_native_anchor,
             comments,
         })
+    }
+}
+
+fn version_mismatch(position_head: Option<&str>, current_mr_head: Option<&str>) -> bool {
+    match (
+        position_head.filter(|value| !value.is_empty()),
+        current_mr_head.filter(|value| !value.is_empty()),
+    ) {
+        (Some(position_head), Some(current_mr_head)) => position_head != current_mr_head,
+        _ => false,
+    }
+}
+
+fn validated_range(
+    position: &GlabNotePosition,
+    side: RemoteCommentSide,
+    terminal_line: Option<u32>,
+) -> (Option<RemoteReviewRange>, bool) {
+    let Some(line_range) = position.line_range.as_ref() else {
+        return (None, false);
+    };
+    let Some(terminal_line) = terminal_line else {
+        return (None, true);
+    };
+    let Some(start) = line_range.start.line_for_side(side) else {
+        return (None, true);
+    };
+    let Some(end) = line_range.end.line_for_side(side) else {
+        return (None, true);
+    };
+    if end != terminal_line {
+        return (None, true);
+    }
+    match RemoteReviewRange::new(start, end) {
+        Ok(range) => (Some(range), false),
+        Err(_) => (None, true),
     }
 }
 
@@ -329,16 +375,95 @@ pub struct GlabNoteAuthor {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct GlabNotePosition {
-    #[serde(default)]
+    raw: serde_json::Value,
     pub position_type: String,
-    #[serde(default)]
     pub head_sha: Option<String>,
     pub new_path: Option<String>,
     pub new_line: Option<u32>,
     pub old_path: Option<String>,
     pub old_line: Option<u32>,
+    pub line_range: Option<GlabNoteLineRange>,
+}
+
+impl GlabNotePosition {
+    fn raw(&self) -> &serde_json::Value {
+        &self.raw
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GlabNotePositionFields {
+    #[serde(default)]
+    position_type: String,
+    #[serde(default)]
+    head_sha: Option<String>,
+    new_path: Option<String>,
+    new_line: Option<u32>,
+    old_path: Option<String>,
+    old_line: Option<u32>,
+    #[serde(default)]
+    line_range: Option<GlabNoteLineRange>,
+}
+
+impl<'de> Deserialize<'de> for GlabNotePosition {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let fields: GlabNotePositionFields =
+            serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            raw,
+            position_type: fields.position_type,
+            head_sha: fields.head_sha,
+            new_path: fields.new_path,
+            new_line: fields.new_line,
+            old_path: fields.old_path,
+            old_line: fields.old_line,
+            line_range: fields.line_range,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GlabNoteLineRange {
+    pub start: GlabNoteLineRangeEndpoint,
+    pub end: GlabNoteLineRangeEndpoint,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GlabNoteLineRangeEndpoint {
+    #[serde(default, rename = "type")]
+    pub line_type: Option<String>,
+    #[serde(default)]
+    pub old_line: Option<u32>,
+    #[serde(default)]
+    pub new_line: Option<u32>,
+    #[serde(default)]
+    pub line_code: Option<String>,
+}
+
+impl GlabNoteLineRangeEndpoint {
+    fn line_for_side(&self, side: RemoteCommentSide) -> Option<u32> {
+        match (self.line_type.as_deref(), side) {
+            (Some("new"), RemoteCommentSide::Right) => self.new_line,
+            (Some("old"), RemoteCommentSide::Left) => self.old_line,
+            (None, RemoteCommentSide::Right)
+                if self.old_line.is_some() && self.new_line.is_some() =>
+            {
+                self.new_line
+            }
+            (None, RemoteCommentSide::Left)
+                if self.old_line.is_some() && self.new_line.is_some() =>
+            {
+                self.old_line
+            }
+            _ => None,
+        }
+    }
 }
 
 fn normalize_state(state: &str) -> String {
@@ -357,6 +482,30 @@ mod tests {
 
     fn gitlab_repo() -> ForgeRepository {
         ForgeRepository::gitlab("gitlab.com", "owner", "repo")
+    }
+
+    fn position(value: serde_json::Value) -> GlabNotePosition {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn positional_discussion(id: &str, position: serde_json::Value) -> GlabDiscussion {
+        GlabDiscussion {
+            id: id.to_string(),
+            individual_note: false,
+            notes: vec![GlabNote {
+                id: 100,
+                body: "review comment".to_string(),
+                author: GlabNoteAuthor {
+                    username: "bob".to_string(),
+                    name: "Bob".to_string(),
+                },
+                created_at: None,
+                commit_id: None,
+                position: Some(self::position(position)),
+                resolved: false,
+                system: false,
+            }],
+        }
     }
 
     #[test]
@@ -427,26 +576,169 @@ mod tests {
                 },
                 created_at: None,
                 commit_id: None,
-                position: Some(GlabNotePosition {
-                    position_type: "text".to_string(),
-                    head_sha: None,
-                    new_path: Some("src/lib.rs".to_string()),
-                    new_line: Some(42),
-                    old_path: None,
-                    old_line: None,
-                }),
+                position: Some(position(serde_json::json!({
+                    "position_type": "text",
+                    "new_path": "src/lib.rs",
+                    "new_line": 42
+                }))),
                 resolved: false,
                 system: false,
             }],
         };
-        let thread = discussion.into_review_thread().unwrap();
+        let thread = discussion.into_review_thread(None).unwrap();
         assert_eq!(thread.id, "disc-1");
         assert_eq!(thread.path, "src/lib.rs");
         assert_eq!(thread.line, Some(42));
         assert_eq!(thread.side, RemoteCommentSide::Right);
         assert!(!thread.is_resolved);
         assert!(!thread.is_outdated);
+        assert!(thread.range.is_none());
+        assert_eq!(
+            thread.provider_native_anchor.unwrap()["new_line"],
+            serde_json::json!(42)
+        );
         assert_eq!(thread.comments[0].author.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn should_classify_current_and_old_head_ranges_and_preserve_native_anchor() {
+        let position = |head_sha: &str| {
+            serde_json::json!({
+                "position_type": "text",
+                "base_sha": "base-sha",
+                "start_sha": "start-sha",
+                "head_sha": head_sha,
+                "new_path": "src/lib.rs",
+                "new_line": 12,
+                "line_range": {
+                    "start": {
+                        "line_code": "start-code",
+                        "type": "new",
+                        "new_line": 10
+                    },
+                    "end": {
+                        "line_code": "end-code",
+                        "type": "new",
+                        "new_line": 12
+                    }
+                },
+                "unmodeled_provider_field": "preserved"
+            })
+        };
+
+        let current = positional_discussion("current", position("head-current"))
+            .into_review_thread(Some("head-current"))
+            .unwrap();
+        assert!(!current.is_outdated);
+        assert_eq!(current.range.as_ref().unwrap().start(), 10);
+        assert_eq!(current.range.as_ref().unwrap().end(), 12);
+        assert_eq!(
+            current.provider_native_anchor.as_ref().unwrap()["unmodeled_provider_field"],
+            serde_json::json!("preserved")
+        );
+
+        let outdated = positional_discussion("outdated", position("head-old"))
+            .into_review_thread(Some("head-current"))
+            .unwrap();
+        assert!(outdated.is_outdated);
+        assert_eq!(outdated.range.as_ref().unwrap().start(), 10);
+        assert_eq!(outdated.range.as_ref().unwrap().end(), 12);
+    }
+
+    #[test]
+    fn should_accept_context_line_range_endpoints_for_the_selected_side() {
+        let discussion = positional_discussion(
+            "context-range",
+            serde_json::json!({
+                "position_type": "text",
+                "head_sha": "head-current",
+                "new_path": "src/lib.rs",
+                "new_line": 12,
+                "line_range": {
+                    "start": {
+                        "line_code": "context-code",
+                        "type": null,
+                        "old_line": 9,
+                        "new_line": 10
+                    },
+                    "end": {
+                        "line_code": "new-code",
+                        "type": "new",
+                        "new_line": 12
+                    }
+                }
+            }),
+        );
+
+        let thread = discussion.into_review_thread(Some("head-current")).unwrap();
+        assert!(!thread.is_outdated);
+        assert_eq!(thread.range.as_ref().unwrap().start(), 10);
+        assert_eq!(thread.range.as_ref().unwrap().end(), 12);
+    }
+
+    #[test]
+    fn should_mark_malformed_ranges_outdated_without_collapsing_or_losing_native_data() {
+        let malformed_ranges = [
+            serde_json::json!({
+                "start": {"type": "old", "old_line": 10},
+                "end": {"type": "new", "new_line": 12}
+            }),
+            serde_json::json!({
+                "start": {"type": "new", "new_line": 13},
+                "end": {"type": "new", "new_line": 12}
+            }),
+            serde_json::json!({
+                "start": {"type": "new", "new_line": 10},
+                "end": {"type": "new", "new_line": 11}
+            }),
+            serde_json::json!({
+                "start": {"type": "unknown", "new_line": 10},
+                "end": {"type": "new", "new_line": 12}
+            }),
+        ];
+
+        for (index, line_range) in malformed_ranges.into_iter().enumerate() {
+            let discussion = positional_discussion(
+                &format!("malformed-{index}"),
+                serde_json::json!({
+                    "position_type": "text",
+                    "head_sha": "head-current",
+                    "new_path": "src/lib.rs",
+                    "new_line": 12,
+                    "line_range": line_range
+                }),
+            );
+            let thread = discussion.into_review_thread(Some("head-current")).unwrap();
+            assert!(thread.is_outdated, "malformed case {index}");
+            assert!(thread.range.is_none(), "malformed case {index}");
+            assert!(
+                thread.provider_native_anchor.as_ref().unwrap()["line_range"].is_object(),
+                "malformed case {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_not_infer_outdated_when_either_head_is_missing_or_empty() {
+        for (position_head, current_head) in [
+            (None, Some("head-current")),
+            (Some(""), Some("head-current")),
+            (Some("head-old"), None),
+            (Some("head-old"), Some("")),
+        ] {
+            let mut value = serde_json::json!({
+                "position_type": "text",
+                "new_path": "src/lib.rs",
+                "new_line": 12
+            });
+            if let Some(position_head) = position_head {
+                value["head_sha"] = serde_json::json!(position_head);
+            }
+            let thread = positional_discussion("missing-head", value)
+                .into_review_thread(current_head)
+                .unwrap();
+            assert!(!thread.is_outdated);
+        }
     }
 
     #[test]
@@ -466,7 +758,7 @@ mod tests {
                 system: false,
             }],
         };
-        assert!(discussion.into_review_thread().is_none());
+        assert!(discussion.into_review_thread(None).is_none());
     }
 
     #[test]
@@ -488,7 +780,7 @@ mod tests {
                 system: false,
             }],
         };
-        let thread = discussion.into_review_thread().unwrap();
+        let thread = discussion.into_review_thread(None).unwrap();
         assert_eq!(thread.id, "disc-3");
         assert_eq!(thread.path, "");
         assert_eq!(thread.line, None);
@@ -514,7 +806,7 @@ mod tests {
                 system: true,
             }],
         };
-        assert!(discussion.into_review_thread().is_none());
+        assert!(discussion.into_review_thread(None).is_none());
     }
 
     fn note(id: u64, body: &str, username: &str) -> GlabNote {
@@ -540,14 +832,11 @@ mod tests {
         // so `in_reply_to` must point at the root note's own ID for every
         // note after the first, never hardcoded `None`.
         let mut root = note(300, "please fix this", "reviewer");
-        root.position = Some(GlabNotePosition {
-            position_type: "text".to_string(),
-            head_sha: None,
-            new_path: Some("src/lib.rs".to_string()),
-            new_line: Some(10),
-            old_path: None,
-            old_line: None,
-        });
+        root.position = Some(position(serde_json::json!({
+            "position_type": "text",
+            "new_path": "src/lib.rs",
+            "new_line": 10
+        })));
         let discussion = GlabDiscussion {
             id: "disc-5".to_string(),
             individual_note: false,
@@ -557,7 +846,7 @@ mod tests {
                 note(302, "done, please re-check", "author"),
             ],
         };
-        let thread = discussion.into_review_thread().unwrap();
+        let thread = discussion.into_review_thread(None).unwrap();
         assert_eq!(thread.comments.len(), 3);
         assert_eq!(thread.comments[0].id, "300");
         assert_eq!(thread.comments[0].in_reply_to, None);
@@ -575,7 +864,7 @@ mod tests {
                 note(401, "thanks!", "author"),
             ],
         };
-        let thread = discussion.into_review_thread().unwrap();
+        let thread = discussion.into_review_thread(None).unwrap();
         assert_eq!(thread.comments.len(), 2);
         assert_eq!(thread.comments[0].in_reply_to, None);
         assert_eq!(thread.comments[1].in_reply_to.as_deref(), Some("400"));

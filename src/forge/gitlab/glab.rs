@@ -483,6 +483,7 @@ where
     fn list_review_threads(&self, pr: &PullRequestDetails) -> Result<Vec<RemoteReviewThread>> {
         let project = gl_project_path(&pr.repository.owner, &pr.repository.name);
         let mut all: Vec<RemoteReviewThread> = Vec::new();
+        let current_mr_head = (!pr.head_sha.is_empty()).then_some(pr.head_sha.as_str());
         for page in 1..=100 {
             let endpoint = format!(
                 "projects/{}/merge_requests/{}/discussions?per_page=100&page={}",
@@ -511,7 +512,7 @@ where
             all.extend(
                 discussions
                     .into_iter()
-                    .filter_map(|d| d.into_review_thread()),
+                    .filter_map(|d| d.into_review_thread(current_mr_head)),
             );
             if received < 100 {
                 break;
@@ -1514,6 +1515,71 @@ mod tests {
             merged_at: None,
             diff_start_sha: Some("startsha1".to_string()),
         }
+    }
+
+    #[test]
+    fn should_classify_gitlab_ranges_against_the_current_mr_head() {
+        let repo = ForgeRepository::gitlab("gitlab.com", "owner", "repo");
+        let pr = make_pr_details(repo.clone());
+        let response = r#"[
+            {
+                "id": "current-range",
+                "individual_note": false,
+                "notes": [{
+                    "id": 100,
+                    "body": "current",
+                    "author": {"username": "alice"},
+                    "position": {
+                        "position_type": "text",
+                        "head_sha": "headsha1",
+                        "new_path": "src/lib.rs",
+                        "new_line": 12,
+                        "line_range": {
+                            "start": {"type": "new", "new_line": 10, "line_code": "a"},
+                            "end": {"type": "new", "new_line": 12, "line_code": "b"}
+                        }
+                    }
+                }]
+            },
+            {
+                "id": "old-range",
+                "individual_note": false,
+                "notes": [{
+                    "id": 101,
+                    "body": "old",
+                    "author": {"username": "bob"},
+                    "position": {
+                        "position_type": "text",
+                        "head_sha": "old-head",
+                        "new_path": "src/lib.rs",
+                        "new_line": 22,
+                        "line_range": {
+                            "start": {"type": "new", "new_line": 20, "line_code": "c"},
+                            "end": {"type": "new", "new_line": 22, "line_code": "d"}
+                        }
+                    }
+                }]
+            }
+        ]"#
+        .to_string();
+        let backend = GitLabGlabBackend::with_runner(
+            Some(repo),
+            RecordingRunner::new_with_responses(vec![response]),
+        );
+
+        let threads = backend.list_review_threads(&pr).unwrap();
+
+        assert_eq!(threads.len(), 2);
+        assert!(!threads[0].is_outdated);
+        assert_eq!(threads[0].range.as_ref().unwrap().start(), 10);
+        assert_eq!(threads[0].range.as_ref().unwrap().end(), 12);
+        assert!(threads[1].is_outdated);
+        assert_eq!(threads[1].range.as_ref().unwrap().start(), 20);
+        assert_eq!(threads[1].range.as_ref().unwrap().end(), 22);
+        assert_eq!(
+            threads[1].provider_native_anchor.as_ref().unwrap()["head_sha"],
+            "old-head"
+        );
     }
 
     #[test]

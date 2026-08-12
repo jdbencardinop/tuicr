@@ -819,6 +819,8 @@ impl ForgeBackend for AzureDevOpsBackend {
                     side,
                     is_resolved: thread.status.is_resolved(),
                     is_outdated,
+                    range: None,
+                    provider_native_anchor: None,
                     comments: thread
                         .comments
                         .into_iter()

@@ -1,0 +1,8 @@
+{
+  "slug": "classify-gitlab-range-anchors",
+  "completed_at": "2026-08-12T10:48:59Z",
+  "base_commit": "4f60eda583f49b82b416e933f795e98ceb35a413",
+  "has_patch": true,
+  "validation_status": "passed",
+  "validation_notes": "tpatch test — command: export SDKROOT=\"$(xcrun --sdk macosx --show-sdk-path)\" CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=\"$(xcrun --find clang)\" CC=\"$(xcrun --find clang)\" CXX=\"$(xcrun --find clang++)\"; cargo fmt --all --check \u0026\u0026 cargo clippy --all-targets -- -D warnings \u0026\u0026 cargo test --locked --lib -- --skip should_discover_worktree_with_relativeworktrees_extension"
+}

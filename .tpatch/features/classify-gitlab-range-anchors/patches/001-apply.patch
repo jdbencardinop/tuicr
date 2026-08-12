@@ -1,0 +1,1323 @@
+diff --git a/docs/wayfinder/tickets/classify-gitlab-range-anchors.md b/docs/wayfinder/tickets/classify-gitlab-range-anchors.md
+index 2df19c9..374aadd 100644
+--- a/docs/wayfinder/tickets/classify-gitlab-range-anchors.md
++++ b/docs/wayfinder/tickets/classify-gitlab-range-anchors.md
+@@ -3,8 +3,8 @@ id: classify-gitlab-range-anchors
+ title: Classify GitLab range anchors after head shifts
+ type: prototype
+ mode: AFK
+-status: open
+-owner:
++status: in-progress
++owner: copilot
+ blocked_by: []
+ ---
+ 
+@@ -27,3 +27,12 @@ The live GitLab 19.2.1 run relocated a legacy line from 42 to 47 but left a
+ durable range at 70-72 and imported it with `is_outdated = false`.
+ [Private continuation issue #1](https://github.com/jdbencardinop/diffreviewtui/issues/1)
+ contains the sanitized acceptance criteria.
++
++## Progress
++
++Offline implementation is claimed under the `tpatch` feature
++`classify-gitlab-range-anchors`. It will classify position-head mismatches,
++retain validated same-side range endpoints and the opaque native position in
++durable mappings, and propagate provider-outdated state into the durable
++thread lifecycle. The ticket stays open until the disposable GitLab head-shift
++fixture is rerun.
+diff --git a/src/app/tests/expand_gap_tests.rs b/src/app/tests/expand_gap_tests.rs
+index 507f2f4..4646554 100644
+--- a/src/app/tests/expand_gap_tests.rs
++++ b/src/app/tests/expand_gap_tests.rs
+@@ -1083,6 +1083,8 @@ fn total_lines_must_match_annotations_with_remote_threads() {
+         side: RemoteCommentSide::Right,
+         is_resolved: false,
+         is_outdated: false,
++        range: None,
++        provider_native_anchor: None,
+         comments: vec![RemoteReviewComment {
+             id: "C1".into(),
+             author: Some("alice".into()),
+@@ -1199,6 +1201,8 @@ fn comment_navigator_items_follow_rendered_comment_order() {
+         side: RemoteCommentSide::Right,
+         is_resolved: false,
+         is_outdated: false,
++        range: None,
++        provider_native_anchor: None,
+         comments: vec![RemoteReviewComment {
+             id: "C1".into(),
+             author: Some("alice".into()),
+@@ -1326,6 +1330,8 @@ fn should_update_current_file_when_navigating_to_remote_comment() {
+         side: RemoteCommentSide::Right,
+         is_resolved: false,
+         is_outdated: false,
++        range: None,
++        provider_native_anchor: None,
+         comments: vec![RemoteReviewComment {
+             id: "C1".into(),
+             author: Some("alice".into()),
+@@ -1375,6 +1381,8 @@ fn should_rebuild_single_file_annotations_when_navigating_to_outdated_remote_com
+         side: RemoteCommentSide::Right,
+         is_resolved: false,
+         is_outdated: true,
++        range: None,
++        provider_native_anchor: None,
+         comments: vec![RemoteReviewComment {
+             id: "C1".into(),
+             author: Some("alice".into()),
+diff --git a/src/app/tests/target_selector_tests.rs b/src/app/tests/target_selector_tests.rs
+index 0b44564..304fc5c 100644
+--- a/src/app/tests/target_selector_tests.rs
++++ b/src/app/tests/target_selector_tests.rs
+@@ -2515,6 +2515,8 @@ fn sample_thread(line: u32, body: &str, resolved: bool, outdated: bool) -> Remot
+         side: RemoteCommentSide::Right,
+         is_resolved: resolved,
+         is_outdated: outdated,
++        range: None,
++        provider_native_anchor: None,
+         comments: vec![RemoteReviewComment {
+             id: "C".to_string(),
+             author: Some("alice".to_string()),
+diff --git a/src/app/tests/thread_navigator_tests.rs b/src/app/tests/thread_navigator_tests.rs
+index 8eb53db..890cbe7 100644
+--- a/src/app/tests/thread_navigator_tests.rs
++++ b/src/app/tests/thread_navigator_tests.rs
+@@ -715,6 +715,8 @@ mod remote_thread_cursor_resolution {
+             side: RemoteCommentSide::Right,
+             is_resolved: false,
+             is_outdated: false,
++            range: None,
++            provider_native_anchor: None,
+             comments: vec![RemoteReviewComment {
+                 id: "comment-1".to_string(),
+                 author: Some("octocat".to_string()),
+diff --git a/src/forge/azure/backend.rs b/src/forge/azure/backend.rs
+index cf39a79..f88b755 100644
+--- a/src/forge/azure/backend.rs
++++ b/src/forge/azure/backend.rs
+@@ -819,6 +819,8 @@ impl ForgeBackend for AzureDevOpsBackend {
+                     side,
+                     is_resolved: thread.status.is_resolved(),
+                     is_outdated,
++                    range: None,
++                    provider_native_anchor: None,
+                     comments: thread
+                         .comments
+                         .into_iter()
+diff --git a/src/forge/giteafj/backend.rs b/src/forge/giteafj/backend.rs
+index 4721f99..19f8587 100644
+--- a/src/forge/giteafj/backend.rs
++++ b/src/forge/giteafj/backend.rs
+@@ -559,6 +559,8 @@ impl ForgeBackend for GiteaForgejoBackend {
+                     // `capabilities.rs`) — Gitea/Forgejo do not track
+                     // staleness per comment.
+                     is_outdated: review.stale,
++                    range: None,
++                    provider_native_anchor: None,
+                     comments: vec![RemoteReviewComment {
+                         id: comment.id.to_string(),
+                         author: comment.user.map(|u| u.login),
+diff --git a/src/forge/github/review_threads.rs b/src/forge/github/review_threads.rs
+index 4db44e8..4dac55c 100644
+--- a/src/forge/github/review_threads.rs
++++ b/src/forge/github/review_threads.rs
+@@ -228,6 +228,8 @@ fn convert_thread(raw: GhReviewThread) -> RemoteReviewThread {
+         side,
+         is_resolved: raw.is_resolved,
+         is_outdated: raw.is_outdated,
++        range: None,
++        provider_native_anchor: None,
+         comments,
+     }
+ }
+diff --git a/src/forge/gitlab/glab.rs b/src/forge/gitlab/glab.rs
+index ffb4100..8035b96 100644
+--- a/src/forge/gitlab/glab.rs
++++ b/src/forge/gitlab/glab.rs
+@@ -483,6 +483,7 @@ where
+     fn list_review_threads(&self, pr: &PullRequestDetails) -> Result<Vec<RemoteReviewThread>> {
+         let project = gl_project_path(&pr.repository.owner, &pr.repository.name);
+         let mut all: Vec<RemoteReviewThread> = Vec::new();
++        let current_mr_head = (!pr.head_sha.is_empty()).then_some(pr.head_sha.as_str());
+         for page in 1..=100 {
+             let endpoint = format!(
+                 "projects/{}/merge_requests/{}/discussions?per_page=100&page={}",
+@@ -511,7 +512,7 @@ where
+             all.extend(
+                 discussions
+                     .into_iter()
+-                    .filter_map(|d| d.into_review_thread()),
++                    .filter_map(|d| d.into_review_thread(current_mr_head)),
+             );
+             if received < 100 {
+                 break;
+@@ -1516,6 +1517,71 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn should_classify_gitlab_ranges_against_the_current_mr_head() {
++        let repo = ForgeRepository::gitlab("gitlab.com", "owner", "repo");
++        let pr = make_pr_details(repo.clone());
++        let response = r#"[
++            {
++                "id": "current-range",
++                "individual_note": false,
++                "notes": [{
++                    "id": 100,
++                    "body": "current",
++                    "author": {"username": "alice"},
++                    "position": {
++                        "position_type": "text",
++                        "head_sha": "headsha1",
++                        "new_path": "src/lib.rs",
++                        "new_line": 12,
++                        "line_range": {
++                            "start": {"type": "new", "new_line": 10, "line_code": "a"},
++                            "end": {"type": "new", "new_line": 12, "line_code": "b"}
++                        }
++                    }
++                }]
++            },
++            {
++                "id": "old-range",
++                "individual_note": false,
++                "notes": [{
++                    "id": 101,
++                    "body": "old",
++                    "author": {"username": "bob"},
++                    "position": {
++                        "position_type": "text",
++                        "head_sha": "old-head",
++                        "new_path": "src/lib.rs",
++                        "new_line": 22,
++                        "line_range": {
++                            "start": {"type": "new", "new_line": 20, "line_code": "c"},
++                            "end": {"type": "new", "new_line": 22, "line_code": "d"}
++                        }
++                    }
++                }]
++            }
++        ]"#
++        .to_string();
++        let backend = GitLabGlabBackend::with_runner(
++            Some(repo),
++            RecordingRunner::new_with_responses(vec![response]),
++        );
++
++        let threads = backend.list_review_threads(&pr).unwrap();
++
++        assert_eq!(threads.len(), 2);
++        assert!(!threads[0].is_outdated);
++        assert_eq!(threads[0].range.as_ref().unwrap().start(), 10);
++        assert_eq!(threads[0].range.as_ref().unwrap().end(), 12);
++        assert!(threads[1].is_outdated);
++        assert_eq!(threads[1].range.as_ref().unwrap().start(), 20);
++        assert_eq!(threads[1].range.as_ref().unwrap().end(), 22);
++        assert_eq!(
++            threads[1].provider_native_anchor.as_ref().unwrap()["head_sha"],
++            "old-head"
++        );
++    }
++
+     #[test]
+     fn should_send_inline_comment_as_json_with_integer_line_number() {
+         let repo = ForgeRepository::gitlab("gitlab.com", "owner", "repo");
+diff --git a/src/forge/gitlab/models.rs b/src/forge/gitlab/models.rs
+index 1bbf0e4..44c6049 100644
+--- a/src/forge/gitlab/models.rs
++++ b/src/forge/gitlab/models.rs
+@@ -1,8 +1,10 @@
+ use chrono::{DateTime, Utc};
+-use serde::Deserialize;
++use serde::{Deserialize, Deserializer};
+ 
+ use crate::error::{Result, TuicrError};
+-use crate::forge::remote_comments::{RemoteCommentSide, RemoteReviewComment, RemoteReviewThread};
++use crate::forge::remote_comments::{
++    RemoteCommentSide, RemoteReviewComment, RemoteReviewRange, RemoteReviewThread,
++};
+ use crate::forge::traits::{
+     ForgeRepository, PullRequestCommit, PullRequestDetails, PullRequestSummary,
+ };
+@@ -231,7 +233,7 @@ fn notes_into_comments(notes: Vec<GlabNote>) -> Vec<RemoteReviewComment> {
+ }
+ 
+ impl GlabDiscussion {
+-    pub fn into_review_thread(self) -> Option<RemoteReviewThread> {
++    pub fn into_review_thread(self, current_mr_head: Option<&str>) -> Option<RemoteReviewThread> {
+         let root = self.notes.first()?;
+ 
+         if self.individual_note {
+@@ -256,6 +258,8 @@ impl GlabDiscussion {
+                 side: RemoteCommentSide::Right,
+                 is_resolved: false,
+                 is_outdated: false,
++                range: None,
++                provider_native_anchor: None,
+                 comments,
+             });
+         }
+@@ -288,6 +292,10 @@ impl GlabDiscussion {
+         }
+ 
+         let is_resolved = root.resolved;
++        let provider_native_anchor = Some(position.raw().clone());
++        let (range, invalid_range) = validated_range(position, side, line);
++        let is_outdated =
++            invalid_range || version_mismatch(position.head_sha.as_deref(), current_mr_head);
+         let comments = notes_into_comments(self.notes);
+ 
+         Some(RemoteReviewThread {
+@@ -296,12 +304,50 @@ impl GlabDiscussion {
+             line,
+             side,
+             is_resolved,
+-            is_outdated: false,
++            is_outdated,
++            range,
++            provider_native_anchor,
+             comments,
+         })
+     }
+ }
+ 
++fn version_mismatch(position_head: Option<&str>, current_mr_head: Option<&str>) -> bool {
++    match (
++        position_head.filter(|value| !value.is_empty()),
++        current_mr_head.filter(|value| !value.is_empty()),
++    ) {
++        (Some(position_head), Some(current_mr_head)) => position_head != current_mr_head,
++        _ => false,
++    }
++}
++
++fn validated_range(
++    position: &GlabNotePosition,
++    side: RemoteCommentSide,
++    terminal_line: Option<u32>,
++) -> (Option<RemoteReviewRange>, bool) {
++    let Some(line_range) = position.line_range.as_ref() else {
++        return (None, false);
++    };
++    let Some(terminal_line) = terminal_line else {
++        return (None, true);
++    };
++    let Some(start) = line_range.start.line_for_side(side) else {
++        return (None, true);
++    };
++    let Some(end) = line_range.end.line_for_side(side) else {
++        return (None, true);
++    };
++    if end != terminal_line {
++        return (None, true);
++    }
++    match RemoteReviewRange::new(start, end) {
++        Ok(range) => (Some(range), false),
++        Err(_) => (None, true),
++    }
++}
++
+ #[derive(Debug, Deserialize)]
+ pub struct GlabNote {
+     pub id: u64,
+@@ -329,16 +375,95 @@ pub struct GlabNoteAuthor {
+     pub name: String,
+ }
+ 
+-#[derive(Debug, Deserialize)]
++#[derive(Debug)]
+ pub struct GlabNotePosition {
+-    #[serde(default)]
++    raw: serde_json::Value,
+     pub position_type: String,
+-    #[serde(default)]
+     pub head_sha: Option<String>,
+     pub new_path: Option<String>,
+     pub new_line: Option<u32>,
+     pub old_path: Option<String>,
+     pub old_line: Option<u32>,
++    pub line_range: Option<GlabNoteLineRange>,
++}
++
++impl GlabNotePosition {
++    fn raw(&self) -> &serde_json::Value {
++        &self.raw
++    }
++}
++
++#[derive(Debug, Deserialize)]
++struct GlabNotePositionFields {
++    #[serde(default)]
++    position_type: String,
++    #[serde(default)]
++    head_sha: Option<String>,
++    new_path: Option<String>,
++    new_line: Option<u32>,
++    old_path: Option<String>,
++    old_line: Option<u32>,
++    #[serde(default)]
++    line_range: Option<GlabNoteLineRange>,
++}
++
++impl<'de> Deserialize<'de> for GlabNotePosition {
++    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
++    where
++        D: Deserializer<'de>,
++    {
++        let raw = serde_json::Value::deserialize(deserializer)?;
++        let fields: GlabNotePositionFields =
++            serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
++        Ok(Self {
++            raw,
++            position_type: fields.position_type,
++            head_sha: fields.head_sha,
++            new_path: fields.new_path,
++            new_line: fields.new_line,
++            old_path: fields.old_path,
++            old_line: fields.old_line,
++            line_range: fields.line_range,
++        })
++    }
++}
++
++#[derive(Debug, Deserialize)]
++pub struct GlabNoteLineRange {
++    pub start: GlabNoteLineRangeEndpoint,
++    pub end: GlabNoteLineRangeEndpoint,
++}
++
++#[derive(Debug, Deserialize)]
++pub struct GlabNoteLineRangeEndpoint {
++    #[serde(default, rename = "type")]
++    pub line_type: Option<String>,
++    #[serde(default)]
++    pub old_line: Option<u32>,
++    #[serde(default)]
++    pub new_line: Option<u32>,
++    #[serde(default)]
++    pub line_code: Option<String>,
++}
++
++impl GlabNoteLineRangeEndpoint {
++    fn line_for_side(&self, side: RemoteCommentSide) -> Option<u32> {
++        match (self.line_type.as_deref(), side) {
++            (Some("new"), RemoteCommentSide::Right) => self.new_line,
++            (Some("old"), RemoteCommentSide::Left) => self.old_line,
++            (None, RemoteCommentSide::Right)
++                if self.old_line.is_some() && self.new_line.is_some() =>
++            {
++                self.new_line
++            }
++            (None, RemoteCommentSide::Left)
++                if self.old_line.is_some() && self.new_line.is_some() =>
++            {
++                self.old_line
++            }
++            _ => None,
++        }
++    }
+ }
+ 
+ fn normalize_state(state: &str) -> String {
+@@ -359,6 +484,30 @@ mod tests {
+         ForgeRepository::gitlab("gitlab.com", "owner", "repo")
+     }
+ 
++    fn position(value: serde_json::Value) -> GlabNotePosition {
++        serde_json::from_value(value).unwrap()
++    }
++
++    fn positional_discussion(id: &str, position: serde_json::Value) -> GlabDiscussion {
++        GlabDiscussion {
++            id: id.to_string(),
++            individual_note: false,
++            notes: vec![GlabNote {
++                id: 100,
++                body: "review comment".to_string(),
++                author: GlabNoteAuthor {
++                    username: "bob".to_string(),
++                    name: "Bob".to_string(),
++                },
++                created_at: None,
++                commit_id: None,
++                position: Some(self::position(position)),
++                resolved: false,
++                system: false,
++            }],
++        }
++    }
++
+     #[test]
+     fn should_deserialize_glab_mr_summary() {
+         let json = r#"{
+@@ -427,28 +576,171 @@ mod tests {
+                 },
+                 created_at: None,
+                 commit_id: None,
+-                position: Some(GlabNotePosition {
+-                    position_type: "text".to_string(),
+-                    head_sha: None,
+-                    new_path: Some("src/lib.rs".to_string()),
+-                    new_line: Some(42),
+-                    old_path: None,
+-                    old_line: None,
+-                }),
++                position: Some(position(serde_json::json!({
++                    "position_type": "text",
++                    "new_path": "src/lib.rs",
++                    "new_line": 42
++                }))),
+                 resolved: false,
+                 system: false,
+             }],
+         };
+-        let thread = discussion.into_review_thread().unwrap();
++        let thread = discussion.into_review_thread(None).unwrap();
+         assert_eq!(thread.id, "disc-1");
+         assert_eq!(thread.path, "src/lib.rs");
+         assert_eq!(thread.line, Some(42));
+         assert_eq!(thread.side, RemoteCommentSide::Right);
+         assert!(!thread.is_resolved);
+         assert!(!thread.is_outdated);
++        assert!(thread.range.is_none());
++        assert_eq!(
++            thread.provider_native_anchor.unwrap()["new_line"],
++            serde_json::json!(42)
++        );
+         assert_eq!(thread.comments[0].author.as_deref(), Some("bob"));
+     }
+ 
++    #[test]
++    fn should_classify_current_and_old_head_ranges_and_preserve_native_anchor() {
++        let position = |head_sha: &str| {
++            serde_json::json!({
++                "position_type": "text",
++                "base_sha": "base-sha",
++                "start_sha": "start-sha",
++                "head_sha": head_sha,
++                "new_path": "src/lib.rs",
++                "new_line": 12,
++                "line_range": {
++                    "start": {
++                        "line_code": "start-code",
++                        "type": "new",
++                        "new_line": 10
++                    },
++                    "end": {
++                        "line_code": "end-code",
++                        "type": "new",
++                        "new_line": 12
++                    }
++                },
++                "unmodeled_provider_field": "preserved"
++            })
++        };
++
++        let current = positional_discussion("current", position("head-current"))
++            .into_review_thread(Some("head-current"))
++            .unwrap();
++        assert!(!current.is_outdated);
++        assert_eq!(current.range.as_ref().unwrap().start(), 10);
++        assert_eq!(current.range.as_ref().unwrap().end(), 12);
++        assert_eq!(
++            current.provider_native_anchor.as_ref().unwrap()["unmodeled_provider_field"],
++            serde_json::json!("preserved")
++        );
++
++        let outdated = positional_discussion("outdated", position("head-old"))
++            .into_review_thread(Some("head-current"))
++            .unwrap();
++        assert!(outdated.is_outdated);
++        assert_eq!(outdated.range.as_ref().unwrap().start(), 10);
++        assert_eq!(outdated.range.as_ref().unwrap().end(), 12);
++    }
++
++    #[test]
++    fn should_accept_context_line_range_endpoints_for_the_selected_side() {
++        let discussion = positional_discussion(
++            "context-range",
++            serde_json::json!({
++                "position_type": "text",
++                "head_sha": "head-current",
++                "new_path": "src/lib.rs",
++                "new_line": 12,
++                "line_range": {
++                    "start": {
++                        "line_code": "context-code",
++                        "type": null,
++                        "old_line": 9,
++                        "new_line": 10
++                    },
++                    "end": {
++                        "line_code": "new-code",
++                        "type": "new",
++                        "new_line": 12
++                    }
++                }
++            }),
++        );
++
++        let thread = discussion.into_review_thread(Some("head-current")).unwrap();
++        assert!(!thread.is_outdated);
++        assert_eq!(thread.range.as_ref().unwrap().start(), 10);
++        assert_eq!(thread.range.as_ref().unwrap().end(), 12);
++    }
++
++    #[test]
++    fn should_mark_malformed_ranges_outdated_without_collapsing_or_losing_native_data() {
++        let malformed_ranges = [
++            serde_json::json!({
++                "start": {"type": "old", "old_line": 10},
++                "end": {"type": "new", "new_line": 12}
++            }),
++            serde_json::json!({
++                "start": {"type": "new", "new_line": 13},
++                "end": {"type": "new", "new_line": 12}
++            }),
++            serde_json::json!({
++                "start": {"type": "new", "new_line": 10},
++                "end": {"type": "new", "new_line": 11}
++            }),
++            serde_json::json!({
++                "start": {"type": "unknown", "new_line": 10},
++                "end": {"type": "new", "new_line": 12}
++            }),
++        ];
++
++        for (index, line_range) in malformed_ranges.into_iter().enumerate() {
++            let discussion = positional_discussion(
++                &format!("malformed-{index}"),
++                serde_json::json!({
++                    "position_type": "text",
++                    "head_sha": "head-current",
++                    "new_path": "src/lib.rs",
++                    "new_line": 12,
++                    "line_range": line_range
++                }),
++            );
++            let thread = discussion.into_review_thread(Some("head-current")).unwrap();
++            assert!(thread.is_outdated, "malformed case {index}");
++            assert!(thread.range.is_none(), "malformed case {index}");
++            assert!(
++                thread.provider_native_anchor.as_ref().unwrap()["line_range"].is_object(),
++                "malformed case {index}"
++            );
++        }
++    }
++
++    #[test]
++    fn should_not_infer_outdated_when_either_head_is_missing_or_empty() {
++        for (position_head, current_head) in [
++            (None, Some("head-current")),
++            (Some(""), Some("head-current")),
++            (Some("head-old"), None),
++            (Some("head-old"), Some("")),
++        ] {
++            let mut value = serde_json::json!({
++                "position_type": "text",
++                "new_path": "src/lib.rs",
++                "new_line": 12
++            });
++            if let Some(position_head) = position_head {
++                value["head_sha"] = serde_json::json!(position_head);
++            }
++            let thread = positional_discussion("missing-head", value)
++                .into_review_thread(current_head)
++                .unwrap();
++            assert!(!thread.is_outdated);
++        }
++    }
++
+     #[test]
+     fn should_skip_discussion_without_position() {
+         // A non-individual_note discussion without a diff position is dropped.
+@@ -466,7 +758,7 @@ mod tests {
+                 system: false,
+             }],
+         };
+-        assert!(discussion.into_review_thread().is_none());
++        assert!(discussion.into_review_thread(None).is_none());
+     }
+ 
+     #[test]
+@@ -488,7 +780,7 @@ mod tests {
+                 system: false,
+             }],
+         };
+-        let thread = discussion.into_review_thread().unwrap();
++        let thread = discussion.into_review_thread(None).unwrap();
+         assert_eq!(thread.id, "disc-3");
+         assert_eq!(thread.path, "");
+         assert_eq!(thread.line, None);
+@@ -514,7 +806,7 @@ mod tests {
+                 system: true,
+             }],
+         };
+-        assert!(discussion.into_review_thread().is_none());
++        assert!(discussion.into_review_thread(None).is_none());
+     }
+ 
+     fn note(id: u64, body: &str, username: &str) -> GlabNote {
+@@ -540,14 +832,11 @@ mod tests {
+         // so `in_reply_to` must point at the root note's own ID for every
+         // note after the first, never hardcoded `None`.
+         let mut root = note(300, "please fix this", "reviewer");
+-        root.position = Some(GlabNotePosition {
+-            position_type: "text".to_string(),
+-            head_sha: None,
+-            new_path: Some("src/lib.rs".to_string()),
+-            new_line: Some(10),
+-            old_path: None,
+-            old_line: None,
+-        });
++        root.position = Some(position(serde_json::json!({
++            "position_type": "text",
++            "new_path": "src/lib.rs",
++            "new_line": 10
++        })));
+         let discussion = GlabDiscussion {
+             id: "disc-5".to_string(),
+             individual_note: false,
+@@ -557,7 +846,7 @@ mod tests {
+                 note(302, "done, please re-check", "author"),
+             ],
+         };
+-        let thread = discussion.into_review_thread().unwrap();
++        let thread = discussion.into_review_thread(None).unwrap();
+         assert_eq!(thread.comments.len(), 3);
+         assert_eq!(thread.comments[0].id, "300");
+         assert_eq!(thread.comments[0].in_reply_to, None);
+@@ -575,7 +864,7 @@ mod tests {
+                 note(401, "thanks!", "author"),
+             ],
+         };
+-        let thread = discussion.into_review_thread().unwrap();
++        let thread = discussion.into_review_thread(None).unwrap();
+         assert_eq!(thread.comments.len(), 2);
+         assert_eq!(thread.comments[0].in_reply_to, None);
+         assert_eq!(thread.comments[1].in_reply_to.as_deref(), Some("400"));
+diff --git a/src/forge/publish.rs b/src/forge/publish.rs
+index 5f681a7..beaab8b 100644
+--- a/src/forge/publish.rs
++++ b/src/forge/publish.rs
+@@ -597,6 +597,8 @@ mod tests {
+             side: RemoteCommentSide::Right,
+             is_resolved: false,
+             is_outdated: false,
++            range: None,
++            provider_native_anchor: None,
+             comments: vec![RemoteReviewComment {
+                 id: "PRRC_root_node".to_string(),
+                 author: Some("teammate".to_string()),
+diff --git a/src/forge/remote_comments.rs b/src/forge/remote_comments.rs
+index 36a9568..e11e315 100644
+--- a/src/forge/remote_comments.rs
++++ b/src/forge/remote_comments.rs
+@@ -1,12 +1,13 @@
+ //! Remote review comment/thread models.
+ //!
+-//! These types carry existing GitHub review discussions into the App for
+-//! read-only display, filtering, and export. They are deliberately
+-//! source-of-truth-on-remote: we never mutate, reply to, or persist them
+-//! locally past the in-memory cache.
++//! These types carry existing provider review discussions into the App for
++//! read-only display, filtering, export, and durable import. They remain
++//! source-of-truth-on-remote DTOs: local reply/status overlays never mutate
++//! them, while [`crate::model::thread_store::thread_from_remote`] copies their
++//! normalized and provider-native anchor data into the canonical store.
+ 
+ use chrono::{DateTime, Utc};
+-use serde::{Deserialize, Serialize};
++use serde::{Deserialize, Deserializer, Serialize};
+ 
+ /// Which side of the diff a remote comment anchors to.
+ ///
+@@ -117,6 +118,48 @@ pub struct RemoteReviewSummary {
+     pub url: String,
+ }
+ 
++/// A validated inclusive range carried by a remote provider anchor.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++pub struct RemoteReviewRange {
++    start: u32,
++    end: u32,
++}
++
++impl RemoteReviewRange {
++    pub fn new(start: u32, end: u32) -> Result<Self, String> {
++        if end < start {
++            return Err(format!(
++                "remote review range end {end} is before start {start}"
++            ));
++        }
++        Ok(Self { start, end })
++    }
++
++    pub fn start(&self) -> u32 {
++        self.start
++    }
++
++    pub fn end(&self) -> u32 {
++        self.end
++    }
++}
++
++#[derive(Deserialize)]
++struct RemoteReviewRangeWire {
++    start: u32,
++    end: u32,
++}
++
++impl<'de> Deserialize<'de> for RemoteReviewRange {
++    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
++    where
++        D: Deserializer<'de>,
++    {
++        let wire = RemoteReviewRangeWire::deserialize(deserializer)?;
++        Self::new(wire.start, wire.end).map_err(serde::de::Error::custom)
++    }
++}
++
+ /// A discussion thread on a forge — one root comment plus zero or more replies.
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub struct RemoteReviewThread {
+@@ -129,6 +172,10 @@ pub struct RemoteReviewThread {
+     pub side: RemoteCommentSide,
+     pub is_resolved: bool,
+     pub is_outdated: bool,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub range: Option<RemoteReviewRange>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub provider_native_anchor: Option<serde_json::Value>,
+     /// Root comment first, replies in posted order.
+     pub comments: Vec<RemoteReviewComment>,
+ }
+@@ -356,6 +403,8 @@ mod tests {
+             side: RemoteCommentSide::Right,
+             is_resolved,
+             is_outdated,
++            range: None,
++            provider_native_anchor: None,
+             comments: vec![RemoteReviewComment {
+                 id: format!("{id}-root"),
+                 author: Some("alice".to_string()),
+@@ -471,6 +520,39 @@ mod tests {
+         assert_eq!(RemoteCommentSide::parse(""), RemoteCommentSide::Right);
+     }
+ 
++    #[test]
++    fn should_validate_and_round_trip_remote_review_ranges() {
++        let range = RemoteReviewRange::new(10, 12).unwrap();
++        assert_eq!(range.start(), 10);
++        assert_eq!(range.end(), 12);
++        assert!(RemoteReviewRange::new(12, 10).is_err());
++
++        let json = serde_json::to_value(&range).unwrap();
++        assert_eq!(json, serde_json::json!({"start": 10, "end": 12}));
++        assert_eq!(
++            serde_json::from_value::<RemoteReviewRange>(json).unwrap(),
++            range
++        );
++        assert!(
++            serde_json::from_value::<RemoteReviewRange>(
++                serde_json::json!({"start": 12, "end": 10})
++            )
++            .is_err()
++        );
++    }
++
++    #[test]
++    fn should_omit_absent_range_and_native_anchor_from_thread_json() {
++        let thread = make_thread("a", "src/lib.rs", Some(10), false, false);
++        let json = serde_json::to_value(&thread).unwrap();
++        assert!(json.get("range").is_none());
++        assert!(json.get("provider_native_anchor").is_none());
++        assert_eq!(
++            serde_json::from_value::<RemoteReviewThread>(json).unwrap(),
++            thread
++        );
++    }
++
+     /// Regression test (audit finding: "Add rest_id ... serialization
+     /// regression tests") covering both `rest_id` states: `Some` (GitHub's
+     /// `databaseId`-backed REST identifier, distinct from the GraphQL node
+diff --git a/src/model/review.rs b/src/model/review.rs
+index 831d2db..91b3b03 100644
+--- a/src/model/review.rs
++++ b/src/model/review.rs
+@@ -1863,6 +1863,8 @@ mod tests {
+                 side: RemoteCommentSide::Right,
+                 is_resolved,
+                 is_outdated,
++                range: None,
++                provider_native_anchor: None,
+                 comments: comment_bodies
+                     .iter()
+                     .map(|(author, body)| RemoteReviewComment {
+diff --git a/src/model/thread.rs b/src/model/thread.rs
+index 58d0e82..43a21bb 100644
+--- a/src/model/thread.rs
++++ b/src/model/thread.rs
+@@ -14,8 +14,10 @@
+ //! - an open/resolved thread lifecycle with explicit reopen limited to
+ //!   `Resolved` threads (`Dismissed` is terminal: it means "won't fix" and
+ //!   can never be reopened or resolved again); both closed statuses
+-//!   (`Resolved`/`Dismissed`) fully freeze their anchor's state and target —
+-//!   `Resolved` until reopened, `Dismissed` permanently. Reopening
++//!   (`Resolved`/`Dismissed`) freeze anchor relocation and target changes —
++//!   `Resolved` until reopened, `Dismissed` permanently. An explicit
++//!   provider-outdated signal may still monotonically mark a current anchor
++//!   stale without moving its target. Reopening
+ //!   re-derives status from the anchor's frozen `state` (`Current` =>
+ //!   `Open`, `Stale` => `Stale`, `Ambiguous` => `Ambiguous`) instead of
+ //!   always forcing `Open`, so a thread that was already stale or
+@@ -492,6 +494,18 @@ impl Anchor {
+         self.state == AnchorState::Ambiguous
+     }
+ 
++    /// Monotonically apply a provider's explicit stale/outdated signal.
++    ///
++    /// Only a still-current anchor changes. Existing local `Stale` or
++    /// `Ambiguous` results are preserved, and the target is never moved.
++    pub fn mark_stale_from_provider(&mut self) -> bool {
++        if self.state != AnchorState::Current {
++            return false;
++        }
++        self.state = AnchorState::Stale;
++        true
++    }
++
+     /// Relocate using unique context matching only. Equivalent to
+     /// `relocate_with_remap(new_lines, None).expect(...)`; without a
+     /// provider remap there is no remap/target shape to validate, so this
+@@ -573,12 +587,20 @@ impl Anchor {
+         }
+ 
+         let Some(context) = self.context.as_ref() else {
+-            let (new_start, span) = match &self.target {
+-                AnchorTarget::Line { line, .. } => (*line, 1),
+-                AnchorTarget::Range { start, end, .. } => (*start, end.saturating_sub(*start) + 1),
+-                _ => (0, 1),
+-            };
+-            return Ok(AnchorRelocation::Current { new_start, span });
++            return Ok(match self.state {
++                AnchorState::Current => {
++                    let (new_start, span) = match &self.target {
++                        AnchorTarget::Line { line, .. } => (*line, 1),
++                        AnchorTarget::Range { start, end, .. } => {
++                            (*start, end.saturating_sub(*start) + 1)
++                        }
++                        _ => (0, 1),
++                    };
++                    AnchorRelocation::Current { new_start, span }
++                }
++                AnchorState::Stale => AnchorRelocation::Stale,
++                AnchorState::Ambiguous => AnchorRelocation::Ambiguous,
++            });
+         };
+ 
+         let relocation = relocate_context(context, new_lines);
+@@ -684,9 +706,11 @@ pub enum ThreadAnchorRefresh {
+     Applied(AnchorRelocation),
+     /// The thread is closed (`Resolved` or `Dismissed`), so the anchor's
+     /// `state` and `target` were left byte-for-byte unchanged: closed
+-    /// threads never call into relocation at all. Reopening a `Resolved`
+-    /// thread resumes anchor churn; `Dismissed` is terminal and can never be
+-    /// reopened, so its freeze is permanent.
++    /// threads never call into relocation at all. An explicit
++    /// provider-outdated signal can still mark a current anchor stale without
++    /// moving its target via [`Thread::mark_stale_from_provider`]. Reopening a
++    /// `Resolved` thread resumes anchor churn; `Dismissed` is terminal and can
++    /// never be reopened, so its target freeze is permanent.
+     Frozen,
+ }
+ 
+@@ -803,6 +827,26 @@ impl Thread {
+         self.status == ThreadStatus::Resolved
+     }
+ 
++    /// Monotonically apply an explicit provider-outdated signal without
++    /// guessing a new target.
++    ///
++    /// Open-family threads become `Stale`. Resolved/dismissed threads retain
++    /// their closed status but keep the stale anchor state, so reopening a
++    /// resolved thread correctly returns it to `Stale`. Existing local stale
++    /// or ambiguous anchor results always win.
++    pub fn mark_stale_from_provider(&mut self) -> bool {
++        if !self.anchor.mark_stale_from_provider() {
++            return false;
++        }
++        if !matches!(
++            self.status,
++            ThreadStatus::Resolved | ThreadStatus::Dismissed
++        ) {
++            self.status = ThreadStatus::Stale;
++        }
++        true
++    }
++
+     /// Re-run anchor relocation against updated file content using unique
+     /// context matching only. Equivalent to
+     /// `refresh_anchor_with_remap(new_lines, None).expect(...)`; without a
+@@ -817,12 +861,14 @@ impl Thread {
+     /// exact `provider_remap` (when supplied) win over unique context
+     /// relocation.
+     ///
+-    /// Closed threads (`Resolved`/`Dismissed`) are fully frozen: this
+-    /// returns `Ok(Frozen)` immediately, without calling into
+-    /// `Anchor::relocate_with_remap` at all, so neither the anchor's
+-    /// `state` nor its `target` are touched — even if `provider_remap` is
+-    /// supplied. Reopening a `Resolved` thread resumes anchor churn;
+-    /// `Dismissed` is terminal, so its freeze is permanent.
++    /// Closed threads (`Resolved`/`Dismissed`) are frozen against relocation:
++    /// this returns `Ok(Frozen)` immediately, without calling into
++    /// `Anchor::relocate_with_remap` at all, so neither the anchor's `state`
++    /// nor its `target` are touched — even if `provider_remap` is supplied.
++    /// The separate [`Self::mark_stale_from_provider`] path may mark state
++    /// stale but never changes the target. Reopening a `Resolved` thread
++    /// resumes anchor churn; `Dismissed` is terminal, so its target freeze is
++    /// permanent.
+     ///
+     /// For open-family threads (`Open`, `Stale`, `Ambiguous`), the anchor is
+     /// re-evaluated and the thread's status follows the resulting anchor
+@@ -1083,6 +1129,60 @@ mod tests {
+             );
+             assert_eq!(dismissed.status(), ThreadStatus::Dismissed);
+         }
++
++        #[test]
++        fn provider_stale_is_monotonic_and_resolved_reopens_stale() {
++            let anchor = Anchor::line("src/lib.rs", AnchorSide::New, 42);
++            let mut thread = Thread::open(
++                anchor,
++                ThreadComment::new(ThreadAuthor::remote("alice", "alice"), "review"),
++            );
++
++            assert!(thread.mark_stale_from_provider());
++            assert_eq!(thread.status(), ThreadStatus::Stale);
++            assert!(thread.anchor().is_stale());
++            assert!(!thread.mark_stale_from_provider());
++            assert_eq!(
++                thread.refresh_anchor(&["unrelated content"]),
++                ThreadAnchorRefresh::Applied(AnchorRelocation::Stale)
++            );
++            assert_eq!(thread.status(), ThreadStatus::Stale);
++            assert!(thread.anchor().is_stale());
++
++            thread.resolve();
++            assert_eq!(thread.status(), ThreadStatus::Resolved);
++            assert!(thread.anchor().is_stale());
++            assert!(thread.reopen());
++            assert_eq!(thread.status(), ThreadStatus::Stale);
++        }
++
++        #[test]
++        fn provider_stale_does_not_replace_an_ambiguous_anchor() {
++            let anchor: Anchor = serde_json::from_value(serde_json::json!({
++                "target": {
++                    "kind": "line",
++                    "path": "src/lib.rs",
++                    "side": "new",
++                    "line": 42
++                },
++                "state": "ambiguous",
++                "context": null
++            }))
++            .unwrap();
++            let mut thread = Thread {
++                id: ThreadId::new(),
++                status: ThreadStatus::Ambiguous,
++                anchor,
++                comments: vec![ThreadComment::new(
++                    ThreadAuthor::remote("alice", "alice"),
++                    "review",
++                )],
++            };
++
++            assert!(!thread.mark_stale_from_provider());
++            assert!(thread.anchor().is_ambiguous());
++            assert_eq!(thread.status(), ThreadStatus::Ambiguous);
++        }
+     }
+ 
+     mod anchor_kind_tests {
+diff --git a/src/model/thread_store.rs b/src/model/thread_store.rs
+index 7694b69..cd80d15 100644
+--- a/src/model/thread_store.rs
++++ b/src/model/thread_store.rs
+@@ -436,13 +436,15 @@ pub fn thread_from_remote(provider: &str, remote: &RemoteReviewThread) -> Persis
+         .split_first()
+         .expect("thread_from_remote requires a non-empty RemoteReviewThread.comments");
+ 
+-    let anchor = match remote.line {
+-        Some(line) => Anchor::line(
+-            remote.path.clone(),
+-            anchor_side_for_remote(remote.side),
+-            line,
+-        ),
+-        None => Anchor::file(remote.path.clone()),
++    let side = anchor_side_for_remote(remote.side);
++    let anchor = if let Some(range) = remote.range.as_ref() {
++        Anchor::range(remote.path.clone(), side, range.start(), range.end())
++            .expect("RemoteReviewRange guarantees ordered inclusive bounds")
++    } else {
++        match remote.line {
++            Some(line) => Anchor::line(remote.path.clone(), side, line),
++            None => Anchor::file(remote.path.clone()),
++        }
+     };
+ 
+     let thread_id = remote_thread_id_for(provider, &remote.id);
+@@ -451,21 +453,31 @@ pub fn thread_from_remote(provider: &str, remote: &RemoteReviewThread) -> Persis
+     for reply in replies {
+         thread.reply(remote_thread_comment(reply));
+     }
++    if remote.is_outdated {
++        thread.mark_stale_from_provider();
++    }
+     if remote.is_resolved {
+         thread.resolve();
+     }
+ 
+     let mut persisted = PersistedThread::new(thread);
+-    persisted.upsert_provider_mapping(
+-        provider,
+-        serde_json::json!({
+-            "id": remote.id,
+-            "path": remote.path,
+-            "line": remote.line,
+-            "is_outdated": remote.is_outdated,
+-            "is_resolved": remote.is_resolved,
+-        }),
+-    );
++    let mut provider_mapping = serde_json::json!({
++        "id": remote.id,
++        "path": remote.path,
++        "line": remote.line,
++        "is_outdated": remote.is_outdated,
++        "is_resolved": remote.is_resolved,
++    });
++    if let Some(range) = remote.range.as_ref() {
++        provider_mapping["range"] = serde_json::json!({
++            "start": range.start(),
++            "end": range.end(),
++        });
++    }
++    if let Some(native_anchor) = remote.provider_native_anchor.as_ref() {
++        provider_mapping["native_anchor"] = native_anchor.clone();
++    }
++    persisted.upsert_provider_mapping(provider, provider_mapping);
+     // Seed the namespaced root-comment ledger from the remote payload
+     // itself, the same ledger `create_thread` populates via
+     // `record_root_comment_id`, so `ForgeBackend::reply_to_thread` can
+@@ -527,6 +539,7 @@ pub(super) fn merge_remote_thread_into_existing(
+     fresh: PersistedThread,
+     provider: &str,
+ ) {
++    let fresh_anchor_is_stale = fresh.thread.anchor().is_stale();
+     let local_only_replies: Vec<ThreadComment> = existing
+         .thread
+         .replies()
+@@ -559,6 +572,9 @@ pub(super) fn merge_remote_thread_into_existing(
+     });
+     existing.thread = serde_json::from_value(merged_thread_value)
+         .expect("Thread fields always round-trip through JSON");
++    if fresh_anchor_is_stale {
++        existing.thread.mark_stale_from_provider();
++    }
+ 
+     if let Some(mapping) = fresh.provider_mapping(provider) {
+         existing.upsert_provider_mapping(provider, mapping.clone());
+@@ -863,6 +879,8 @@ mod tests {
+             side: RemoteCommentSide::Right,
+             is_resolved: false,
+             is_outdated: false,
++            range: None,
++            provider_native_anchor: None,
+             comments: vec![crate::forge::remote_comments::RemoteReviewComment {
+                 id: "PRRC_kwABC".to_string(),
+                 author: Some("alice".to_string()),
+@@ -904,6 +922,98 @@ mod tests {
+         assert!(without_rest_id.has_provider_id("github", "PRRT_1"));
+     }
+ 
++    fn gitlab_range_thread(is_outdated: bool, is_resolved: bool) -> RemoteReviewThread {
++        RemoteReviewThread {
++            id: "discussion-1".to_string(),
++            path: "src/lib.rs".to_string(),
++            line: Some(12),
++            side: RemoteCommentSide::Right,
++            is_resolved,
++            is_outdated,
++            range: Some(crate::forge::remote_comments::RemoteReviewRange::new(10, 12).unwrap()),
++            provider_native_anchor: Some(serde_json::json!({
++                "position_type": "text",
++                "head_sha": if is_outdated { "old-head" } else { "current-head" },
++                "new_path": "src/lib.rs",
++                "new_line": 12,
++                "line_range": {
++                    "start": {"type": "new", "new_line": 10},
++                    "end": {"type": "new", "new_line": 12}
++                }
++            })),
++            comments: vec![crate::forge::remote_comments::RemoteReviewComment {
++                id: "100".to_string(),
++                author: Some("alice".to_string()),
++                body: "range review".to_string(),
++                created_at: None,
++                in_reply_to: None,
++                url: String::new(),
++                rest_id: None,
++            }],
++        }
++    }
++
++    #[test]
++    fn should_import_gitlab_range_native_anchor_and_provider_stale_state() {
++        let persisted = thread_from_remote("gitlab", &gitlab_range_thread(true, false));
++
++        assert_eq!(persisted.thread.status(), ThreadStatus::Stale);
++        assert!(persisted.thread.anchor().is_stale());
++        assert!(matches!(
++            persisted.thread.anchor().target(),
++            crate::model::thread::AnchorTarget::Range {
++                path,
++                side: AnchorSide::New,
++                start: 10,
++                end: 12,
++            } if path == "src/lib.rs"
++        ));
++        let mapping = persisted.provider_mapping("gitlab").unwrap();
++        assert_eq!(
++            mapping["range"],
++            serde_json::json!({"start": 10, "end": 12})
++        );
++        assert_eq!(mapping["native_anchor"]["head_sha"], "old-head");
++        assert_eq!(mapping["is_outdated"], true);
++    }
++
++    #[test]
++    fn should_monotonically_apply_provider_stale_on_repeat_import_and_reopen() {
++        let mut existing = thread_from_remote("gitlab", &gitlab_range_thread(false, false));
++        existing.thread.resolve();
++        let fresh = thread_from_remote("gitlab", &gitlab_range_thread(true, false));
++
++        merge_remote_thread_into_existing(&mut existing, fresh, "gitlab");
++
++        assert_eq!(existing.thread.status(), ThreadStatus::Resolved);
++        assert!(existing.thread.anchor().is_stale());
++        assert_eq!(
++            existing.provider_mapping("gitlab").unwrap()["is_outdated"],
++            true
++        );
++        assert!(existing.thread.reopen());
++        assert_eq!(existing.thread.status(), ThreadStatus::Stale);
++    }
++
++    #[test]
++    fn should_not_replace_local_ambiguous_state_on_outdated_repeat_import() {
++        let mut existing = thread_from_remote("gitlab", &gitlab_range_thread(false, false));
++        let mut thread_json = serde_json::to_value(&existing.thread).unwrap();
++        thread_json["status"] = serde_json::json!("ambiguous");
++        thread_json["anchor"]["state"] = serde_json::json!("ambiguous");
++        existing.thread = serde_json::from_value(thread_json).unwrap();
++        let fresh = thread_from_remote("gitlab", &gitlab_range_thread(true, false));
++
++        merge_remote_thread_into_existing(&mut existing, fresh, "gitlab");
++
++        assert_eq!(existing.thread.status(), ThreadStatus::Ambiguous);
++        assert!(existing.thread.anchor().is_ambiguous());
++        assert_eq!(
++            existing.provider_mapping("gitlab").unwrap()["is_outdated"],
++            true
++        );
++    }
++
+     /// Regression test (audit finding: "cross-provider mapping
+     /// serialization regression tests") pinning that each provider's
+     /// distinctively-shaped `provider_mappings` JSON payload (GitHub's
+diff --git a/src/output/markdown.rs b/src/output/markdown.rs
+index 9edbdbc..2b067bc 100644
+--- a/src/output/markdown.rs
++++ b/src/output/markdown.rs
+@@ -2042,6 +2042,8 @@ mod tests {
+             side: RemoteCommentSide::Right,
+             is_resolved: resolved,
+             is_outdated: false,
++            range: None,
++            provider_native_anchor: None,
+             comments: vec![RemoteReviewComment {
+                 id: format!("{id}-root"),
+                 author: Some(author.to_string()),
+diff --git a/src/ui/diff_side_by_side.rs b/src/ui/diff_side_by_side.rs
+index 43652e0..80bda99 100644
+--- a/src/ui/diff_side_by_side.rs
++++ b/src/ui/diff_side_by_side.rs
+@@ -2051,6 +2051,8 @@ mod remote_comments_side_by_side_snapshot_tests {
+             side: RemoteCommentSide::Right,
+             is_resolved: false,
+             is_outdated: false,
++            range: None,
++            provider_native_anchor: None,
+             comments: vec![RemoteReviewComment {
+                 id: "C".to_string(),
+                 author: Some("alice".to_string()),
+diff --git a/src/ui/diff_unified.rs b/src/ui/diff_unified.rs
+index 07c5f2b..c4945d3 100644
+--- a/src/ui/diff_unified.rs
++++ b/src/ui/diff_unified.rs
+@@ -1516,6 +1516,8 @@ mod remote_comments_snapshot_tests {
+             side: RemoteCommentSide::Right,
+             is_resolved: resolved,
+             is_outdated: outdated,
++            range: None,
++            provider_native_anchor: None,
+             comments: vec![RemoteReviewComment {
+                 id: format!("{id}-root"),
+                 author: Some(author.to_string()),
+@@ -2028,6 +2030,8 @@ mod remote_comments_snapshot_tests {
+             side: RemoteCommentSide::Right,
+             is_resolved: false,
+             is_outdated: false,
++            range: None,
++            provider_native_anchor: None,
+             comments: vec![RemoteReviewComment {
+                 id: "rv1-root".to_string(),
+                 author: Some("carol".to_string()),
+@@ -2063,6 +2067,8 @@ mod remote_comments_snapshot_tests {
+             side: RemoteCommentSide::Right,
+             is_resolved: false,
+             is_outdated: false,
++            range: None,
++            provider_native_anchor: None,
+             comments: vec![RemoteReviewComment {
+                 id: "rv1-root".to_string(),
+                 author: Some("carol".to_string()),
+diff --git a/src/ui/row_height.rs b/src/ui/row_height.rs
+index c709c32..2941be9 100644
+--- a/src/ui/row_height.rs
++++ b/src/ui/row_height.rs
+@@ -589,6 +589,8 @@ mod tests {
+             side: RemoteCommentSide::Right,
+             is_resolved: false,
+             is_outdated: false,
++            range: None,
++            provider_native_anchor: None,
+             comments: vec![RemoteReviewComment {
+                 id: "comment-1".to_string(),
+                 author: Some("reviewer".to_string()),
+diff --git a/src/ui/submit_modals.rs b/src/ui/submit_modals.rs
+index 20b923f..32b6274 100644
+--- a/src/ui/submit_modals.rs
++++ b/src/ui/submit_modals.rs
+@@ -767,6 +767,8 @@ mod tests {
+             side: RemoteCommentSide::Right,
+             is_resolved,
+             is_outdated: false,
++            range: None,
++            provider_native_anchor: None,
+             comments: vec![
+                 RemoteReviewComment {
+                     id: "remote-root".to_string(),

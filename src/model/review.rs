@@ -1863,6 +1863,8 @@ mod tests {
                 side: RemoteCommentSide::Right,
                 is_resolved,
                 is_outdated,
+                range: None,
+                provider_native_anchor: None,
                 comments: comment_bodies
                     .iter()
                     .map(|(author, body)| RemoteReviewComment {

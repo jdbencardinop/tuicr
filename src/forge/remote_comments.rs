@@ -1,12 +1,13 @@
 //! Remote review comment/thread models.
 //!
-//! These types carry existing GitHub review discussions into the App for
-//! read-only display, filtering, and export. They are deliberately
-//! source-of-truth-on-remote: we never mutate, reply to, or persist them
-//! locally past the in-memory cache.
+//! These types carry existing provider review discussions into the App for
+//! read-only display, filtering, export, and durable import. They remain
+//! source-of-truth-on-remote DTOs: local reply/status overlays never mutate
+//! them, while [`crate::model::thread_store::thread_from_remote`] copies their
+//! normalized and provider-native anchor data into the canonical store.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Which side of the diff a remote comment anchors to.
 ///
@@ -117,6 +118,48 @@ pub struct RemoteReviewSummary {
     pub url: String,
 }
 
+/// A validated inclusive range carried by a remote provider anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemoteReviewRange {
+    start: u32,
+    end: u32,
+}
+
+impl RemoteReviewRange {
+    pub fn new(start: u32, end: u32) -> Result<Self, String> {
+        if end < start {
+            return Err(format!(
+                "remote review range end {end} is before start {start}"
+            ));
+        }
+        Ok(Self { start, end })
+    }
+
+    pub fn start(&self) -> u32 {
+        self.start
+    }
+
+    pub fn end(&self) -> u32 {
+        self.end
+    }
+}
+
+#[derive(Deserialize)]
+struct RemoteReviewRangeWire {
+    start: u32,
+    end: u32,
+}
+
+impl<'de> Deserialize<'de> for RemoteReviewRange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RemoteReviewRangeWire::deserialize(deserializer)?;
+        Self::new(wire.start, wire.end).map_err(serde::de::Error::custom)
+    }
+}
+
 /// A discussion thread on a forge — one root comment plus zero or more replies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteReviewThread {
@@ -129,6 +172,10 @@ pub struct RemoteReviewThread {
     pub side: RemoteCommentSide,
     pub is_resolved: bool,
     pub is_outdated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<RemoteReviewRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_native_anchor: Option<serde_json::Value>,
     /// Root comment first, replies in posted order.
     pub comments: Vec<RemoteReviewComment>,
 }
@@ -356,6 +403,8 @@ mod tests {
             side: RemoteCommentSide::Right,
             is_resolved,
             is_outdated,
+            range: None,
+            provider_native_anchor: None,
             comments: vec![RemoteReviewComment {
                 id: format!("{id}-root"),
                 author: Some("alice".to_string()),
@@ -469,6 +518,39 @@ mod tests {
         assert_eq!(RemoteCommentSide::parse("left"), RemoteCommentSide::Left);
         // unknown defaults to RIGHT (head side) — safer for display
         assert_eq!(RemoteCommentSide::parse(""), RemoteCommentSide::Right);
+    }
+
+    #[test]
+    fn should_validate_and_round_trip_remote_review_ranges() {
+        let range = RemoteReviewRange::new(10, 12).unwrap();
+        assert_eq!(range.start(), 10);
+        assert_eq!(range.end(), 12);
+        assert!(RemoteReviewRange::new(12, 10).is_err());
+
+        let json = serde_json::to_value(&range).unwrap();
+        assert_eq!(json, serde_json::json!({"start": 10, "end": 12}));
+        assert_eq!(
+            serde_json::from_value::<RemoteReviewRange>(json).unwrap(),
+            range
+        );
+        assert!(
+            serde_json::from_value::<RemoteReviewRange>(
+                serde_json::json!({"start": 12, "end": 10})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn should_omit_absent_range_and_native_anchor_from_thread_json() {
+        let thread = make_thread("a", "src/lib.rs", Some(10), false, false);
+        let json = serde_json::to_value(&thread).unwrap();
+        assert!(json.get("range").is_none());
+        assert!(json.get("provider_native_anchor").is_none());
+        assert_eq!(
+            serde_json::from_value::<RemoteReviewThread>(json).unwrap(),
+            thread
+        );
     }
 
     /// Regression test (audit finding: "Add rest_id ... serialization

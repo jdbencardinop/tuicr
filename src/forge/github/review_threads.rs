@@ -228,6 +228,8 @@ fn convert_thread(raw: GhReviewThread) -> RemoteReviewThread {
         side,
         is_resolved: raw.is_resolved,
         is_outdated: raw.is_outdated,
+        range: None,
+        provider_native_anchor: None,
         comments,
     }
 }

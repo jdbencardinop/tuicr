@@ -597,6 +597,8 @@ mod tests {
             side: RemoteCommentSide::Right,
             is_resolved: false,
             is_outdated: false,
+            range: None,
+            provider_native_anchor: None,
             comments: vec![RemoteReviewComment {
                 id: "PRRC_root_node".to_string(),
                 author: Some("teammate".to_string()),

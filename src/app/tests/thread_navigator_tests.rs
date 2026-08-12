@@ -715,6 +715,8 @@ mod remote_thread_cursor_resolution {
             side: RemoteCommentSide::Right,
             is_resolved: false,
             is_outdated: false,
+            range: None,
+            provider_native_anchor: None,
             comments: vec![RemoteReviewComment {
                 id: "comment-1".to_string(),
                 author: Some("octocat".to_string()),

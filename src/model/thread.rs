@@ -14,8 +14,10 @@
 //! - an open/resolved thread lifecycle with explicit reopen limited to
 //!   `Resolved` threads (`Dismissed` is terminal: it means "won't fix" and
 //!   can never be reopened or resolved again); both closed statuses
-//!   (`Resolved`/`Dismissed`) fully freeze their anchor's state and target —
-//!   `Resolved` until reopened, `Dismissed` permanently. Reopening
+//!   (`Resolved`/`Dismissed`) freeze anchor relocation and target changes —
+//!   `Resolved` until reopened, `Dismissed` permanently. An explicit
+//!   provider-outdated signal may still monotonically mark a current anchor
+//!   stale without moving its target. Reopening
 //!   re-derives status from the anchor's frozen `state` (`Current` =>
 //!   `Open`, `Stale` => `Stale`, `Ambiguous` => `Ambiguous`) instead of
 //!   always forcing `Open`, so a thread that was already stale or
@@ -492,6 +494,18 @@ impl Anchor {
         self.state == AnchorState::Ambiguous
     }
 
+    /// Monotonically apply a provider's explicit stale/outdated signal.
+    ///
+    /// Only a still-current anchor changes. Existing local `Stale` or
+    /// `Ambiguous` results are preserved, and the target is never moved.
+    pub fn mark_stale_from_provider(&mut self) -> bool {
+        if self.state != AnchorState::Current {
+            return false;
+        }
+        self.state = AnchorState::Stale;
+        true
+    }
+
     /// Relocate using unique context matching only. Equivalent to
     /// `relocate_with_remap(new_lines, None).expect(...)`; without a
     /// provider remap there is no remap/target shape to validate, so this
@@ -573,12 +587,20 @@ impl Anchor {
         }
 
         let Some(context) = self.context.as_ref() else {
-            let (new_start, span) = match &self.target {
-                AnchorTarget::Line { line, .. } => (*line, 1),
-                AnchorTarget::Range { start, end, .. } => (*start, end.saturating_sub(*start) + 1),
-                _ => (0, 1),
-            };
-            return Ok(AnchorRelocation::Current { new_start, span });
+            return Ok(match self.state {
+                AnchorState::Current => {
+                    let (new_start, span) = match &self.target {
+                        AnchorTarget::Line { line, .. } => (*line, 1),
+                        AnchorTarget::Range { start, end, .. } => {
+                            (*start, end.saturating_sub(*start) + 1)
+                        }
+                        _ => (0, 1),
+                    };
+                    AnchorRelocation::Current { new_start, span }
+                }
+                AnchorState::Stale => AnchorRelocation::Stale,
+                AnchorState::Ambiguous => AnchorRelocation::Ambiguous,
+            });
         };
 
         let relocation = relocate_context(context, new_lines);
@@ -684,9 +706,11 @@ pub enum ThreadAnchorRefresh {
     Applied(AnchorRelocation),
     /// The thread is closed (`Resolved` or `Dismissed`), so the anchor's
     /// `state` and `target` were left byte-for-byte unchanged: closed
-    /// threads never call into relocation at all. Reopening a `Resolved`
-    /// thread resumes anchor churn; `Dismissed` is terminal and can never be
-    /// reopened, so its freeze is permanent.
+    /// threads never call into relocation at all. An explicit
+    /// provider-outdated signal can still mark a current anchor stale without
+    /// moving its target via [`Thread::mark_stale_from_provider`]. Reopening a
+    /// `Resolved` thread resumes anchor churn; `Dismissed` is terminal and can
+    /// never be reopened, so its target freeze is permanent.
     Frozen,
 }
 
@@ -803,6 +827,26 @@ impl Thread {
         self.status == ThreadStatus::Resolved
     }
 
+    /// Monotonically apply an explicit provider-outdated signal without
+    /// guessing a new target.
+    ///
+    /// Open-family threads become `Stale`. Resolved/dismissed threads retain
+    /// their closed status but keep the stale anchor state, so reopening a
+    /// resolved thread correctly returns it to `Stale`. Existing local stale
+    /// or ambiguous anchor results always win.
+    pub fn mark_stale_from_provider(&mut self) -> bool {
+        if !self.anchor.mark_stale_from_provider() {
+            return false;
+        }
+        if !matches!(
+            self.status,
+            ThreadStatus::Resolved | ThreadStatus::Dismissed
+        ) {
+            self.status = ThreadStatus::Stale;
+        }
+        true
+    }
+
     /// Re-run anchor relocation against updated file content using unique
     /// context matching only. Equivalent to
     /// `refresh_anchor_with_remap(new_lines, None).expect(...)`; without a
@@ -817,12 +861,14 @@ impl Thread {
     /// exact `provider_remap` (when supplied) win over unique context
     /// relocation.
     ///
-    /// Closed threads (`Resolved`/`Dismissed`) are fully frozen: this
-    /// returns `Ok(Frozen)` immediately, without calling into
-    /// `Anchor::relocate_with_remap` at all, so neither the anchor's
-    /// `state` nor its `target` are touched — even if `provider_remap` is
-    /// supplied. Reopening a `Resolved` thread resumes anchor churn;
-    /// `Dismissed` is terminal, so its freeze is permanent.
+    /// Closed threads (`Resolved`/`Dismissed`) are frozen against relocation:
+    /// this returns `Ok(Frozen)` immediately, without calling into
+    /// `Anchor::relocate_with_remap` at all, so neither the anchor's `state`
+    /// nor its `target` are touched — even if `provider_remap` is supplied.
+    /// The separate [`Self::mark_stale_from_provider`] path may mark state
+    /// stale but never changes the target. Reopening a `Resolved` thread
+    /// resumes anchor churn; `Dismissed` is terminal, so its target freeze is
+    /// permanent.
     ///
     /// For open-family threads (`Open`, `Stale`, `Ambiguous`), the anchor is
     /// re-evaluated and the thread's status follows the resulting anchor
@@ -1082,6 +1128,60 @@ mod tests {
                 "reopen must be a permanent no-op from Dismissed"
             );
             assert_eq!(dismissed.status(), ThreadStatus::Dismissed);
+        }
+
+        #[test]
+        fn provider_stale_is_monotonic_and_resolved_reopens_stale() {
+            let anchor = Anchor::line("src/lib.rs", AnchorSide::New, 42);
+            let mut thread = Thread::open(
+                anchor,
+                ThreadComment::new(ThreadAuthor::remote("alice", "alice"), "review"),
+            );
+
+            assert!(thread.mark_stale_from_provider());
+            assert_eq!(thread.status(), ThreadStatus::Stale);
+            assert!(thread.anchor().is_stale());
+            assert!(!thread.mark_stale_from_provider());
+            assert_eq!(
+                thread.refresh_anchor(&["unrelated content"]),
+                ThreadAnchorRefresh::Applied(AnchorRelocation::Stale)
+            );
+            assert_eq!(thread.status(), ThreadStatus::Stale);
+            assert!(thread.anchor().is_stale());
+
+            thread.resolve();
+            assert_eq!(thread.status(), ThreadStatus::Resolved);
+            assert!(thread.anchor().is_stale());
+            assert!(thread.reopen());
+            assert_eq!(thread.status(), ThreadStatus::Stale);
+        }
+
+        #[test]
+        fn provider_stale_does_not_replace_an_ambiguous_anchor() {
+            let anchor: Anchor = serde_json::from_value(serde_json::json!({
+                "target": {
+                    "kind": "line",
+                    "path": "src/lib.rs",
+                    "side": "new",
+                    "line": 42
+                },
+                "state": "ambiguous",
+                "context": null
+            }))
+            .unwrap();
+            let mut thread = Thread {
+                id: ThreadId::new(),
+                status: ThreadStatus::Ambiguous,
+                anchor,
+                comments: vec![ThreadComment::new(
+                    ThreadAuthor::remote("alice", "alice"),
+                    "review",
+                )],
+            };
+
+            assert!(!thread.mark_stale_from_provider());
+            assert!(thread.anchor().is_ambiguous());
+            assert_eq!(thread.status(), ThreadStatus::Ambiguous);
         }
     }
 

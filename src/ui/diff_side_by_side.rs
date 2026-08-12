@@ -2051,6 +2051,8 @@ mod remote_comments_side_by_side_snapshot_tests {
             side: RemoteCommentSide::Right,
             is_resolved: false,
             is_outdated: false,
+            range: None,
+            provider_native_anchor: None,
             comments: vec![RemoteReviewComment {
                 id: "C".to_string(),
                 author: Some("alice".to_string()),

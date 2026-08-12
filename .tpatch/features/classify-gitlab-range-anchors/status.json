@@ -1,0 +1,23 @@
+{
+  "id": "classify-gitlab-range-anchors",
+  "slug": "classify-gitlab-range-anchors",
+  "title": "Classify GitLab review threads as outdated when provider position head SHA differs from the current merge-request head, preserve current ranges, add regression tests, and leave the disposable live GitLab rerun explicitly blocked.",
+  "state": "applied",
+  "compatibility": "unknown",
+  "requested_at": "2026-08-12T10:10:24Z",
+  "updated_at": "2026-08-12T10:56:36Z",
+  "last_command": "verify",
+  "notes": "Patch recorded",
+  "apply": {
+    "completed_at": "2026-08-12T10:48:59Z",
+    "base_commit": "4f60eda583f49b82b416e933f795e98ceb35a413",
+    "has_patch": true
+  },
+  "reconcile": {},
+  "verify": {
+    "verified_at": "2026-08-12T10:56:36Z",
+    "passed": true,
+    "recipe_hash_at_verify": "6317145ec2c13f456fb7a8a97ec09c0e63280ceef1ba778d7b1811562de01c4e",
+    "patch_hash_at_verify": "09cbeb7a887a5e96761b19e2c436ff5b48fd4390d45db5c34ed022ed45ea4d88"
+  }
+}

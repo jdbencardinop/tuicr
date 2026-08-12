@@ -1083,6 +1083,8 @@ fn total_lines_must_match_annotations_with_remote_threads() {
         side: RemoteCommentSide::Right,
         is_resolved: false,
         is_outdated: false,
+        range: None,
+        provider_native_anchor: None,
         comments: vec![RemoteReviewComment {
             id: "C1".into(),
             author: Some("alice".into()),
@@ -1199,6 +1201,8 @@ fn comment_navigator_items_follow_rendered_comment_order() {
         side: RemoteCommentSide::Right,
         is_resolved: false,
         is_outdated: false,
+        range: None,
+        provider_native_anchor: None,
         comments: vec![RemoteReviewComment {
             id: "C1".into(),
             author: Some("alice".into()),
@@ -1326,6 +1330,8 @@ fn should_update_current_file_when_navigating_to_remote_comment() {
         side: RemoteCommentSide::Right,
         is_resolved: false,
         is_outdated: false,
+        range: None,
+        provider_native_anchor: None,
         comments: vec![RemoteReviewComment {
             id: "C1".into(),
             author: Some("alice".into()),
@@ -1375,6 +1381,8 @@ fn should_rebuild_single_file_annotations_when_navigating_to_outdated_remote_com
         side: RemoteCommentSide::Right,
         is_resolved: false,
         is_outdated: true,
+        range: None,
+        provider_native_anchor: None,
         comments: vec![RemoteReviewComment {
             id: "C1".into(),
             author: Some("alice".into()),

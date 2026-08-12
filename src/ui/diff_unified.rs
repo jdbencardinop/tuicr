@@ -1516,6 +1516,8 @@ mod remote_comments_snapshot_tests {
             side: RemoteCommentSide::Right,
             is_resolved: resolved,
             is_outdated: outdated,
+            range: None,
+            provider_native_anchor: None,
             comments: vec![RemoteReviewComment {
                 id: format!("{id}-root"),
                 author: Some(author.to_string()),
@@ -2028,6 +2030,8 @@ mod remote_comments_snapshot_tests {
             side: RemoteCommentSide::Right,
             is_resolved: false,
             is_outdated: false,
+            range: None,
+            provider_native_anchor: None,
             comments: vec![RemoteReviewComment {
                 id: "rv1-root".to_string(),
                 author: Some("carol".to_string()),
@@ -2063,6 +2067,8 @@ mod remote_comments_snapshot_tests {
             side: RemoteCommentSide::Right,
             is_resolved: false,
             is_outdated: false,
+            range: None,
+            provider_native_anchor: None,
             comments: vec![RemoteReviewComment {
                 id: "rv1-root".to_string(),
                 author: Some("carol".to_string()),
