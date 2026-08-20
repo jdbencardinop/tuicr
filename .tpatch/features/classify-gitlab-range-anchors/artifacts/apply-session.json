@@ -1,8 +1,8 @@
 {
   "slug": "classify-gitlab-range-anchors",
-  "completed_at": "2026-08-12T10:48:59Z",
-  "base_commit": "4f60eda583f49b82b416e933f795e98ceb35a413",
+  "completed_at": "2026-08-20T03:36:28Z",
+  "base_commit": "5d44ad197b2f02ea7152ec5ec05e864988edf7c7",
   "has_patch": true,
   "validation_status": "passed",
-  "validation_notes": "tpatch test — command: export SDKROOT=\"$(xcrun --sdk macosx --show-sdk-path)\" CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=\"$(xcrun --find clang)\" CC=\"$(xcrun --find clang)\" CXX=\"$(xcrun --find clang++)\"; cargo fmt --all --check \u0026\u0026 cargo clippy --all-targets -- -D warnings \u0026\u0026 cargo test --locked --lib -- --skip should_discover_worktree_with_relativeworktrees_extension"
+  "validation_notes": "tpatch test — command: /home/juanbe/.cargo/bin/cargo test --locked --lib forge::gitlab"
 }

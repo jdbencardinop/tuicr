@@ -1,21 +1,2 @@
- .tpatch/FEATURES.md                                |   4 +-
- .../tickets/classify-gitlab-range-anchors.md       |  28 +-
- src/app/tests/expand_gap_tests.rs                  |   8 +
- src/app/tests/target_selector_tests.rs             |   2 +
- src/app/tests/thread_navigator_tests.rs            |   2 +
- src/forge/azure/backend.rs                         |   2 +
- src/forge/giteafj/backend.rs                       |   2 +
- src/forge/github/review_threads.rs                 |   2 +
- src/forge/gitlab/glab.rs                           |  68 +++-
- src/forge/gitlab/models.rs                         | 347 +++++++++++++++++++--
- src/forge/publish.rs                               |   2 +
- src/forge/remote_comments.rs                       |  92 +++++-
- src/model/review.rs                                |   2 +
- src/model/thread.rs                                | 134 +++++++-
- src/model/thread_store.rs                          | 144 ++++++++-
- src/output/markdown.rs                             |   2 +
- src/ui/diff_side_by_side.rs                        |   2 +
- src/ui/diff_unified.rs                             |   6 +
- src/ui/row_height.rs                               |   2 +
- src/ui/submit_modals.rs                            |   2 +
- 20 files changed, 781 insertions(+), 72 deletions(-)
+ src/forge/gitlab/models.rs | 61 ++++++++++++++++++++++++++++++++++------------
+ 1 file changed, 45 insertions(+), 16 deletions(-)

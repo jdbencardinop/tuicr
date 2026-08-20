@@ -272,7 +272,7 @@ impl GlabDiscussion {
             return None;
         }
 
-        let (path, line, side) = if let Some(new_line) = position.new_line {
+        let (path, mut line, side) = if let Some(new_line) = position.new_line {
             // Comment on the new (right) side.
             let path = position.new_path.clone().unwrap_or_default();
             (path, Some(new_line), RemoteCommentSide::Right)
@@ -293,9 +293,12 @@ impl GlabDiscussion {
 
         let is_resolved = root.resolved;
         let provider_native_anchor = Some(position.raw().clone());
-        let (range, invalid_range) = validated_range(position, side, line);
-        let is_outdated =
-            invalid_range || version_mismatch(position.head_sha.as_deref(), current_mr_head);
+        let head_mismatch = version_mismatch(position.head_sha.as_deref(), current_mr_head);
+        let (range, invalid_range) = validated_range(position, side, line, !head_mismatch);
+        if head_mismatch || invalid_range {
+            line = range.as_ref().map(|range| range.end()).or(line);
+        }
+        let is_outdated = invalid_range || head_mismatch;
         let comments = notes_into_comments(self.notes);
 
         Some(RemoteReviewThread {
@@ -326,6 +329,7 @@ fn validated_range(
     position: &GlabNotePosition,
     side: RemoteCommentSide,
     terminal_line: Option<u32>,
+    require_terminal_match: bool,
 ) -> (Option<RemoteReviewRange>, bool) {
     let Some(line_range) = position.line_range.as_ref() else {
         return (None, false);
@@ -339,11 +343,8 @@ fn validated_range(
     let Some(end) = line_range.end.line_for_side(side) else {
         return (None, true);
     };
-    if end != terminal_line {
-        return (None, true);
-    }
     match RemoteReviewRange::new(start, end) {
-        Ok(range) => (Some(range), false),
+        Ok(range) => (Some(range), require_terminal_match && end != terminal_line),
         Err(_) => (None, true),
     }
 }
@@ -602,14 +603,14 @@ mod tests {
 
     #[test]
     fn should_classify_current_and_old_head_ranges_and_preserve_native_anchor() {
-        let position = |head_sha: &str| {
+        let position = |head_sha: &str, terminal_line: u32| {
             serde_json::json!({
                 "position_type": "text",
                 "base_sha": "base-sha",
                 "start_sha": "start-sha",
                 "head_sha": head_sha,
                 "new_path": "src/lib.rs",
-                "new_line": 12,
+                "new_line": terminal_line,
                 "line_range": {
                     "start": {
                         "line_code": "start-code",
@@ -626,7 +627,7 @@ mod tests {
             })
         };
 
-        let current = positional_discussion("current", position("head-current"))
+        let current = positional_discussion("current", position("head-current", 12))
             .into_review_thread(Some("head-current"))
             .unwrap();
         assert!(!current.is_outdated);
@@ -637,12 +638,17 @@ mod tests {
             serde_json::json!("preserved")
         );
 
-        let outdated = positional_discussion("outdated", position("head-old"))
+        let outdated = positional_discussion("outdated", position("head-old", 17))
             .into_review_thread(Some("head-current"))
             .unwrap();
         assert!(outdated.is_outdated);
+        assert_eq!(outdated.line, Some(12));
         assert_eq!(outdated.range.as_ref().unwrap().start(), 10);
         assert_eq!(outdated.range.as_ref().unwrap().end(), 12);
+        assert_eq!(
+            outdated.provider_native_anchor.as_ref().unwrap()["new_line"],
+            serde_json::json!(17)
+        );
     }
 
     #[test]
@@ -688,10 +694,6 @@ mod tests {
                 "end": {"type": "new", "new_line": 12}
             }),
             serde_json::json!({
-                "start": {"type": "new", "new_line": 10},
-                "end": {"type": "new", "new_line": 11}
-            }),
-            serde_json::json!({
                 "start": {"type": "unknown", "new_line": 10},
                 "end": {"type": "new", "new_line": 12}
             }),
@@ -716,6 +718,33 @@ mod tests {
                 "malformed case {index}"
             );
         }
+    }
+
+    #[test]
+    fn should_preserve_terminal_mismatched_range_as_outdated() {
+        let discussion = positional_discussion(
+            "terminal-mismatch",
+            serde_json::json!({
+                "position_type": "text",
+                "head_sha": "head-current",
+                "new_path": "src/lib.rs",
+                "new_line": 17,
+                "line_range": {
+                    "start": {"type": "new", "new_line": 10},
+                    "end": {"type": "new", "new_line": 12}
+                }
+            }),
+        );
+
+        let thread = discussion.into_review_thread(Some("head-current")).unwrap();
+        assert!(thread.is_outdated);
+        assert_eq!(thread.line, Some(12));
+        assert_eq!(thread.range.as_ref().unwrap().start(), 10);
+        assert_eq!(thread.range.as_ref().unwrap().end(), 12);
+        assert_eq!(
+            thread.provider_native_anchor.as_ref().unwrap()["new_line"],
+            serde_json::json!(17)
+        );
     }
 
     #[test]

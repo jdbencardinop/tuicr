@@ -5,19 +5,19 @@
   "state": "applied",
   "compatibility": "unknown",
   "requested_at": "2026-08-12T10:10:24Z",
-  "updated_at": "2026-08-12T10:56:36Z",
+  "updated_at": "2026-08-20T03:36:28Z",
   "last_command": "verify",
-  "notes": "Patch recorded",
+  "notes": "landed at 2026-08-20T03:37:54Z",
   "apply": {
-    "completed_at": "2026-08-12T10:48:59Z",
-    "base_commit": "4f60eda583f49b82b416e933f795e98ceb35a413",
+    "completed_at": "2026-08-20T03:36:28Z",
+    "base_commit": "5d44ad197b2f02ea7152ec5ec05e864988edf7c7",
     "has_patch": true
   },
   "reconcile": {},
   "verify": {
-    "verified_at": "2026-08-12T10:56:36Z",
-    "passed": true,
-    "recipe_hash_at_verify": "6317145ec2c13f456fb7a8a97ec09c0e63280ceef1ba778d7b1811562de01c4e",
-    "patch_hash_at_verify": "09cbeb7a887a5e96761b19e2c436ff5b48fd4390d45db5c34ed022ed45ea4d88"
+    "verified_at": "2026-08-20T03:36:28Z",
+    "passed": false,
+    "recipe_hash_at_verify": "ff175fb5edbb8711df69f5d63e0338edc1424856ad050407edf4079dd0ca44ef",
+    "patch_hash_at_verify": "ffc3b0355cd76b241c7b1b93baeb7720c57ac929d4b1695d2303634bb09b7bc8"
   }
 }
