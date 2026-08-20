@@ -27,9 +27,10 @@ Full decision text: `docs/fork/DECISIONS.md`.
   self-update, and an isolated data dir.
 - Validation-record commit: `ecae453` — docs-only WSL/GitLab findings; no
   `src/` changes.
-- Current source customization: `958c815` — offline-verified GitLab
+- Current source customization: `d5cbbdd` — live-verified GitLab
   position-version/range/native-anchor classification under the tracked
-  `classify-gitlab-range-anchors` feature; live rerun pending.
+  `classify-gitlab-range-anchors` feature. It preserves valid stale ranges
+  when GitLab rewrites the native head but relocates the terminal line.
 - Latest build exercised on WSL reports
   `tuicr 0.19.1-offline-candidate.1+c2a7554`; later validation/tracker commits
   only change documentation and have not been rebuilt separately. The
@@ -42,9 +43,9 @@ Full decision text: `docs/fork/DECISIONS.md`.
 - Real Ubuntu 24.04 under WSL2: **pass with caveats** for upstream `v0.19.1`
   and fork tip `c2a7554`; see
   `docs/wayfinder/tickets/validate-wsl-baseline.md`.
-- Self-hosted GitLab 19.2.1: legacy comment/approve/request-changes and direct
-  durable adapter operations live-pass; range staleness is fixed offline at
-  `958c815` pending live rerun, while TUI durable publication remains a gap.
+- Self-hosted GitLab 19.2.1: legacy comment/approve/request-changes, direct
+  durable adapter operations, and stale-range classification live-pass;
+  durable TUI publication remains a gap.
   See
   `docs/wayfinder/tickets/validate-live-provider-parity.md`.
 
@@ -55,9 +56,8 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Fix unsafe local-comment anchors and live-rerun the offline GitLab range
-   fix — `docs/wayfinder/tickets/classify-local-anchor-shifts.md` and
-   `docs/wayfinder/tickets/classify-gitlab-range-anchors.md`.
+1. Fix unsafe local-comment anchors —
+   `docs/wayfinder/tickets/classify-local-anchor-shifts.md`.
 2. Wire and retest GitLab durable TUI publication —
    `docs/wayfinder/tickets/wire-gitlab-durable-publication.md`.
 3. Approve/provision disposable GitHub and Azure DevOps sandboxes, then
@@ -101,7 +101,7 @@ self-hosted provider run is complete with the gaps noted above.
 ## Remaining evidence gaps
 
 - approved GitHub/Azure DevOps mutation sandboxes;
-- GitLab TUI durable publication and live stale-range rerun;
+- GitLab TUI durable publication;
 - multi-review daily-use observation.
 
 The approved disposable GitLab target was mutated and fully torn down. Three

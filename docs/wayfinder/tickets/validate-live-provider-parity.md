@@ -26,7 +26,7 @@ behavior.
 
 ## Status
 
-GitLab is now **live-tested with two integration gaps**. GitHub and Azure
+GitLab is now **live-tested with one integration gap**. GitHub and Azure
 DevOps remain live-blocked:
 
 - GitHub/GitLab offline/mock parity is complete (durable create/reply/resolve,
@@ -75,20 +75,30 @@ Observed gaps:
   local-only. The backend methods work live, but the TUI publication path is
   not wired to execute them and persisted no provider mapping —
   [diffreviewtui#3](https://github.com/jdbencardinop/diffreviewtui/issues/3).
-- The durable range stayed at 70-72 after five lines were inserted before it,
-  while the legacy single-line discussion relocated. GitLab's discussion
-  response exposes no explicit stale field and Tuicr currently imports GitLab
-  threads with `is_outdated = false` —
-  [diffreviewtui#1](https://github.com/jdbencardinop/diffreviewtui/issues/1).
 - A full self-hosted URL containing custom port `:8929` fails through `glab`
   (`--hostname` rejects ports and MR repository URLs force HTTPS). The working
   configuration uses a portless logical GitLab hostname mapped by `glab` to
   the port-bearing HTTP API host —
   [diffreviewtui#2](https://github.com/jdbencardinop/diffreviewtui/issues/2).
 
+### GitLab stale-range rerun — 2026-08-20
+
+The approved loopback-only GitLab 19.2.1 fixture was recreated with the public
+1,000-line synthetic repository and one-day credentials. The original pinned
+implementation classified the shifted range stale but discarded its range:
+GitLab rewrote the native `head_sha` to the current MR head, relocated
+`new_line` from 72 to 77, and retained `line_range` 70-72.
+
+Commit `d5cbbdd` now treats that provider-terminal mismatch as stale evidence
+without guessing relocation. The committed harness, default/all/reloaded TUI
+views, and durable `ReviewStore` all passed with the preserved stale range at
+70-72. Exact container, volume, credential, build-state, forward, and tunnel
+teardown passed. Durable TUI publication remains the only GitLab integration
+gap.
+
 ## Unblock condition
 
-Close `classify-gitlab-range-anchors` and
-`wire-gitlab-durable-publication`, provision and validate the approved
-GitHub/Azure DevOps targets, then re-run the GitLab durable lifecycle. Record
-each remaining pass/fail delta directly in this ticket's Resolution section.
+Close `wire-gitlab-durable-publication`, provision and validate the approved
+GitHub/Azure DevOps targets, then re-run the GitLab publication lifecycle.
+Record each remaining pass/fail delta directly in this ticket's Resolution
+section.

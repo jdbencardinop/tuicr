@@ -3,7 +3,7 @@ id: classify-gitlab-range-anchors
 title: Classify GitLab range anchors after head shifts
 type: prototype
 mode: AFK
-status: blocked
+status: closed
 owner: copilot
 blocked_by: []
 ---
@@ -45,9 +45,25 @@ and clippy passed; 61 focused GitLab tests and all 1,655 supported locked
 library tests passed. Only the documented libgit2 relative-worktree environment
 test was filtered.
 
-## Unblock condition
+## Resolution
 
-Recreate the approved disposable GitLab fixture, repeat the five-line head
-shift, and confirm the durable range is reported stale/outdated (never current
-at 70-72) through both backend and TUI reload paths. Record the sanitized result
-here before closing the ticket.
+The 2026-08-20 disposable GitLab 19.2.1 rerun exposed a second native stale
+shape not represented by the offline fixtures. After the five-line shift,
+GitLab preserved `line_range` 70-72, relocated the root `new_line` to 77, and
+rewrote the position `head_sha` to the current MR head. Commit `d5cbbdd`
+therefore extends the `classify-gitlab-range-anchors` feature to preserve a
+valid same-side ordered range while treating a provider-terminal mismatch as
+stale evidence; current consistent ranges remain strict, and malformed
+cross-side/reversed ranges remain untrusted.
+
+The committed live harness passed create/reply/resolve/reopen and then verified
+`range_start=70`, `range_end=72`, `is_outdated=true`,
+`native_head_differs=false`, and `native_terminal_differs=true`. The default
+TUI unresolved view hid the thread; `:comments all` showed the marked thread
+muted as `outdated` and locally `stale`; `:e` preserved that result. The
+durable `ReviewStore` retained a stale range anchor at 70-72 with
+`provider_mappings.gitlab.is_outdated=true`.
+
+Formatting, clippy, 62 focused GitLab tests, live backend verification, TUI
+reload, durable-store inspection, and exact sandbox teardown passed. The
+tracked `tpatch` feature was landed and verified at `d5cbbdd`.
