@@ -51,6 +51,7 @@ is not reachable from this branch's history, only the reconciled range is.
 | `fork-agent-guide` | `880ee0a` (1 commit) | `ca319dc` | n/a (docs-only, no source patch) | Complete — adds `docs/fork/AGENT-WORKFLOW.md`, an `AGENTS.md` pointer, and a pointer-only `CLAUDE.md` | N/A — fork-internal agent guidance, not upstream-proposable |
 | `fork-tpatch-bootstrap` | `24376a6` (1 commit) | `ca319dc` | `FEATURES.md` intentionally empty; this workspace tracks only customizations made from here forward | Complete — `tpatch doctor`/`tpatch status` verified clean after sanitizing the auto-detected local provider endpoint out of `.tpatch/config.yaml` | N/A — tooling bootstrap, not upstream-proposable |
 | `classify-gitlab-range-anchors` | `958c815`, `d5cbbdd` (2 commits) | `4f60eda` | Tracked feature: `state: applied`, landing evidence exact at `d5cbbdd`; replay and preimage verification pass | Live-complete on GitLab 19.2.1: 62 focused tests plus backend/TUI/ReviewStore head-shift checks pass; valid 70-72 native ranges survive old-head or relocated-terminal stale shapes | Fork-only; upstream split TBD |
+| `capture-provider-neutral-context-for-local-line-and-range` | `59faa80` (1 commit) | `c40f552` | Tracked feature: `state: applied`, landing evidence exact at `59faa80`; replay and preimage verification pass | Live-complete on Ubuntu 24.04/WSL2: line 42 moved to 47 through real TUI reload and persisted through CLI/durable-store inspection; 1,666 supported locked library tests pass | Fork-only for now; upstream split TBD |
 
 The commit that added `docs/fork/DECISIONS.md`, `docs/wayfinder/`, and
 `docs/handoff/CURRENT.md` carries no `Tpatch-Feature:` trailer and is
@@ -92,8 +93,9 @@ work; wait until it lands, then regenerate.
 ## Relationship to this repo's `.tpatch/` workspace
 
 This repo's own `.tpatch/` workspace was bootstrapped by
-`fork-tpatch-bootstrap` at `24376a6`; `classify-gitlab-range-anchors` is its
-first complete tracked customization. See
+`fork-tpatch-bootstrap` at `24376a6`; `classify-gitlab-range-anchors` and
+`capture-provider-neutral-context-for-local-line-and-range` are complete
+tracked customizations. See
 [`../../.tpatch/README.md`](../../.tpatch/README.md) for why historical
 trailers are not backfilled and for the lifecycle every new patch-bearing
 customization follows (`tpatch add` → `analyze` → `define` → `explore` →

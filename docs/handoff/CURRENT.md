@@ -2,11 +2,11 @@
 
 ## Status
 
-Exploration, offline implementation, and the real Ubuntu/WSL baseline are
-complete. A disposable self-hosted GitLab run is also complete. Release and
-upstream submission remain blocked on approved GitHub/Azure DevOps sandboxes,
-GitLab durable-publication gaps, and explicit disposition of the WSL caveats
-recorded below.
+Exploration, offline implementation, the real Ubuntu/WSL baseline, local
+anchor relocation, and a disposable self-hosted GitLab run are complete.
+Release and upstream submission remain blocked on approved GitHub/Azure
+DevOps sandboxes, GitLab durable-publication gaps, and explicit disposition
+of the remaining WSL caveats recorded below.
 
 ## Decision
 
@@ -31,6 +31,10 @@ Full decision text: `docs/fork/DECISIONS.md`.
   position-version/range/native-anchor classification under the tracked
   `classify-gitlab-range-anchors` feature. It preserves valid stale ranges
   when GitLab rewrites the native head but relocates the terminal line.
+- Local-anchor customization: `59faa80` — TUI-created local line/range
+  anchors capture exact-side context, relocate only on a unique match, persist
+  the canonical row across reload/reopen, and become stale/ambiguous without
+  nearest-line guessing.
 - Latest build exercised on WSL reports
   `tuicr 0.19.1-offline-candidate.1+c2a7554`; later validation/tracker commits
   only change documentation and have not been rebuilt separately. The
@@ -56,24 +60,22 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Fix unsafe local-comment anchors —
-   `docs/wayfinder/tickets/classify-local-anchor-shifts.md`.
-2. Wire and retest GitLab durable TUI publication —
+1. Wire and retest GitLab durable TUI publication —
    `docs/wayfinder/tickets/wire-gitlab-durable-publication.md`.
-3. Approve/provision disposable GitHub and Azure DevOps sandboxes, then
+2. Approve/provision disposable GitHub and Azure DevOps sandboxes, then
    execute their remaining live parity —
    `docs/wayfinder/tickets/provision-provider-sandboxes.md` and
    `docs/wayfinder/tickets/validate-live-provider-parity.md`.
-4. Explicitly accept or fix the WSL TUI-clipboard boundary —
+3. Explicitly accept or fix the WSL TUI-clipboard boundary —
    `docs/wayfinder/tickets/decide-wsl-clipboard-boundary.md`.
-5. Add arm64, signing/notarization, package-manager distribution, and cut an
-   actual tagged/pushed release — depends on 1–4;
+4. Add arm64, signing/notarization, package-manager distribution, and cut an
+   actual tagged/pushed release — depends on 1–3;
    `docs/wayfinder/tickets/release-cross-platform-fork.md`.
-6. Post the one ready upstream patch (comment-author JSON) once approved, and
+5. Post the one ready upstream patch (comment-author JSON) once approved, and
    reconcile the rest after the release interface stabilizes —
    `docs/wayfinder/tickets/upstream-and-reconcile.md`.
-7. Update the teaching package only after a real release interface is fixed —
-   depends on step 5; not tracked as its own ticket here since it strictly
+6. Update the teaching package only after a real release interface is fixed —
+   depends on step 4; not tracked as its own ticket here since it strictly
    follows that release.
 
 ## Evidence pointers in this repo
@@ -88,8 +90,6 @@ In dependency order:
 
 ## Known WSL caveats
 
-- line anchors retain their numeric position after the five-line fixture
-  shift instead of relocating or becoming stale;
 - TUI clipboard export does not reach the Windows clipboard; `--stdout` and
   direct `clip.exe` work;
 - Ubuntu Git 2.43 cannot execute two newer-Git fixture tests;
