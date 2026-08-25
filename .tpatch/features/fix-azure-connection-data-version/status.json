@@ -1,0 +1,23 @@
+{
+  "id": "fix-azure-connection-data-version",
+  "slug": "fix-azure-connection-data-version",
+  "title": "Use the official Azure DevOps Connection Data API preview version so live reviewer vote operations can resolve the authenticated viewer ID.",
+  "state": "applied",
+  "compatibility": "unknown",
+  "requested_at": "2026-08-25T19:39:02Z",
+  "updated_at": "2026-08-25T19:42:27Z",
+  "last_command": "verify",
+  "notes": "Patch recorded",
+  "apply": {
+    "completed_at": "2026-08-25T19:42:18Z",
+    "base_commit": "522824eaf3e74113109ed47bca89af2b914213ea",
+    "has_patch": true
+  },
+  "reconcile": {},
+  "verify": {
+    "verified_at": "2026-08-25T19:42:27Z",
+    "passed": true,
+    "recipe_hash_at_verify": "f78eb655cd07b5337d60b60bf13a8e99edc3f150d102f5d115ae611a9ae5295a",
+    "patch_hash_at_verify": "8c383b7909db4304fa3768a13249d1ade421a5ab239db9f6eb26cb8d17a06636"
+  }
+}

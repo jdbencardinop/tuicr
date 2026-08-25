@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "feature": "fix-azure-connection-data-version",
+  "current_generation": 1,
+  "generations": [
+    {
+      "generation": 1,
+      "generation_id": "pg_012095cc7535",
+      "kind": "record",
+      "patch_sha256": "8c383b7909db4304fa3768a13249d1ade421a5ab239db9f6eb26cb8d17a06636",
+      "git_patch_id": "d9929bf61a45ea3b8d27878ce6442f5ecf4b5a60",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "f78eb655cd07b5337d60b60bf13a8e99edc3f150d102f5d115ae611a9ae5295a",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/001-record.patch",
+      "base_commit": "522824eaf3e74113109ed47bca89af2b914213ea",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "src/forge/azure/backend.rs",
+        "src/forge/azure/contract_tests.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    }
+  ]
+}

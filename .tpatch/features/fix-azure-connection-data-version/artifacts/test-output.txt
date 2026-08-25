@@ -1,0 +1,73 @@
+# Test run — 2026-08-25T19:42:18Z
+# Command: cargo test --locked --lib forge::azure
+# Directory: /home/juanbe/development/tools/diffreviewtui/tuicr
+
+   Compiling tuicr v0.19.1-offline-candidate.1 (/home/juanbe/development/tools/diffreviewtui/tuicr)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.44s
+     Running unittests src/lib.rs (target/debug/deps/tuicr-4e06e49e1fff1af7)
+
+running 61 tests
+test forge::azure::backend::tests::should_build_empty_org_scope_prefix_for_legacy_host ... ok
+test forge::azure::backend::tests::should_build_base_path_with_encoded_multi_segment_owner ... ok
+test forge::azure::auth::tests::should_build_basic_auth_header_from_pat ... ok
+test forge::azure::auth::tests::should_never_display_header_value_via_debug ... ok
+test forge::azure::backend::tests::should_accept_repository_with_matching_kind ... ok
+test forge::azure::backend::tests::should_reject_repository_with_mismatched_kind ... ok
+test forge::azure::backend::tests::should_fail_resolve_repository_without_target_or_default ... ok
+test forge::azure::backend::tests::should_map_approve_and_request_changes_events_to_votes ... ok
+test forge::azure::backend::tests::should_resolve_repository_from_default ... ok
+test forge::azure::client::tests::should_never_display_auth_header_via_debug ... ok
+test forge::azure::backend::tests::should_reject_draft_submit_event ... ok
+test forge::azure::backend::tests::should_build_org_scope_prefix_for_cloud_host ... ok
+test forge::azure::backend::tests::should_return_unsupported_for_diff_without_local_checkout ... ok
+test forge::azure::client::tests::should_report_failure_for_non_2xx_status ... ok
+test forge::azure::auth::tests::should_resolve_pat_env_var_as_basic_auth_when_az_cli_unavailable ... ok
+test forge::azure::client::tests::should_surface_retry_after_and_rate_limit_headers_in_error_message_without_retrying ... ok
+test forge::azure::client::tests::should_report_success_for_2xx_status ... ok
+test forge::azure::auth::tests::should_prefer_az_cli_entra_token_over_pat_when_both_available ... ok
+test forge::azure::auth::tests::should_ignore_blank_pat_env_var ... ok
+test forge::azure::contract_tests::should_create_thread_as_a_standalone_operation_independent_of_create_review ... ok
+test forge::azure::contract_tests::should_get_single_pull_request_details ... ok
+test forge::azure::contract_tests::should_fetch_file_content_via_items_api_when_no_local_checkout ... ok
+test forge::azure::contract_tests::should_preserve_both_sides_when_a_thread_context_has_simultaneous_left_and_right_anchors ... ok
+test forge::azure::contract_tests::should_list_review_threads_with_dual_side_anchors_general_thread_and_stale_detection ... ok
+test forge::azure::contract_tests::should_map_request_changes_event_to_rejected_vote ... ok
+test forge::azure::contract_tests::should_paginate_commits_via_continuation_token_with_no_duplicate_requests ... ok
+test forge::azure::contract_tests::should_percent_encode_continuation_token_across_paginated_commit_pages ... ok
+test forge::azure::live_tests::should_drive_full_review_lifecycle_against_live_instance ... ignored, requires a live, explicitly-approved disposable Azure DevOps organization; never run for this task (see module docs) — no live sandbox is currently approved (docs/follow-on-map/tickets/04-provision-provider-sandboxes.md)
+test forge::azure::models::tests::should_classify_resolved_thread_statuses ... ok
+test forge::azure::models::tests::should_map_vote_values_both_ways ... ok
+test forge::azure::models::tests::should_return_none_for_unrecognized_vote_value ... ok
+test forge::azure::models::tests::should_serialize_thread_status_as_lower_camel_case ... ok
+test forge::azure::models::tests::should_strip_refs_heads_prefix ... ok
+test forge::azure::models::tests::should_treat_zero_parent_comment_id_as_root ... ok
+test forge::azure::tests::should_classify_cloud_host ... ok
+test forge::azure::tests::should_classify_legacy_visualstudio_host ... ok
+test forge::azure::tests::should_classify_on_prem_host_in_allow_list ... ok
+test forge::azure::tests::should_not_classify_on_prem_host_without_allow_list ... ok
+test forge::azure::tests::should_not_classify_unrelated_hosts ... ok
+test forge::azure::tests::should_parse_cloud_https_remote_url ... ok
+test forge::azure::tests::should_parse_cloud_https_remote_url_with_git_suffix ... ok
+test forge::azure::tests::should_parse_cloud_pr_url_target ... ok
+test forge::azure::tests::should_parse_cloud_ssh_remote_url ... ok
+test forge::azure::tests::should_parse_legacy_https_remote_url_with_default_collection ... ok
+test forge::azure::tests::should_parse_legacy_https_remote_url_without_collection ... ok
+test forge::azure::tests::should_parse_legacy_ssh_remote_url ... ok
+test forge::azure::tests::should_parse_on_prem_host_via_pure_classifier_and_path_parser ... ok
+test forge::azure::tests::should_parse_pr_url_target_with_query_string ... ok
+test forge::azure::tests::should_parse_repo_hash_target ... ok
+test forge::azure::tests::should_reject_malformed_target ... ok
+test forge::azure::tests::should_return_none_for_github_url ... ok
+test forge::azure::tests::should_return_none_for_gitlab_url ... ok
+test forge::azure::tests::should_return_none_for_on_prem_host_without_opt_in ... ok
+test forge::azure::tests::should_return_none_for_url_missing_git_segment ... ok
+test forge::azure::contract_tests::should_percent_encode_special_characters_in_items_api_query_values ... ok
+test forge::azure::contract_tests::should_list_pull_requests_with_paginated_query_and_redacted_auth ... ok
+test forge::azure::contract_tests::should_reply_to_thread_update_status_and_cast_vote ... ok
+test forge::azure::contract_tests::should_return_thread_provider_mapping_for_durable_persistence ... ok
+test forge::azure::contract_tests::should_surface_error_statuses_without_leaking_the_auth_header_or_retrying ... ok
+test forge::azure::contract_tests::should_surface_retry_after_and_rate_limit_headers_without_auto_retrying ... ok
+test forge::azure::contract_tests::should_create_review_with_comment_thread_and_approve_vote ... ok
+
+test result: ok. 60 passed; 0 failed; 1 ignored; 0 measured; 1617 filtered out; finished in 0.24s
+

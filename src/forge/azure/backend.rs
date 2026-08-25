@@ -274,9 +274,9 @@ impl AzureDevOpsBackend {
     /// module's `create_review` doc comment for the evidence behind this
     /// endpoint choice.
     fn viewer_id(&self, client: &AdoHttpClient, repo: &ForgeRepository) -> Result<String> {
-        let path = with_api_version(
-            &format!("{}/_apis/connectionData", Self::org_scope_prefix(repo)),
-            &[],
+        let path = format!(
+            "{}/_apis/connectionData?api-version=7.1-preview.1",
+            Self::org_scope_prefix(repo)
         );
         let data: AdoConnectionData = client.get_json(&path)?;
         data.authenticated_user

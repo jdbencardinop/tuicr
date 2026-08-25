@@ -1,0 +1,8 @@
+{
+  "slug": "fix-azure-connection-data-version",
+  "completed_at": "2026-08-25T19:42:18Z",
+  "base_commit": "522824eaf3e74113109ed47bca89af2b914213ea",
+  "has_patch": true,
+  "validation_status": "passed",
+  "validation_notes": "tpatch test — command: cargo test --locked --lib forge::azure"
+}

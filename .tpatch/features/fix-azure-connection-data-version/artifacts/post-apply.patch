@@ -1,0 +1,48 @@
+diff --git a/src/forge/azure/backend.rs b/src/forge/azure/backend.rs
+index f88b755..8fd1bb8 100644
+--- a/src/forge/azure/backend.rs
++++ b/src/forge/azure/backend.rs
+@@ -274,9 +274,9 @@ impl AzureDevOpsBackend {
+     /// module's `create_review` doc comment for the evidence behind this
+     /// endpoint choice.
+     fn viewer_id(&self, client: &AdoHttpClient, repo: &ForgeRepository) -> Result<String> {
+-        let path = with_api_version(
+-            &format!("{}/_apis/connectionData", Self::org_scope_prefix(repo)),
+-            &[],
++        let path = format!(
++            "{}/_apis/connectionData?api-version=7.1-preview.1",
++            Self::org_scope_prefix(repo)
+         );
+         let data: AdoConnectionData = client.get_json(&path)?;
+         data.authenticated_user
+diff --git a/src/forge/azure/contract_tests.rs b/src/forge/azure/contract_tests.rs
+index 5322a49..917af4c 100644
+--- a/src/forge/azure/contract_tests.rs
++++ b/src/forge/azure/contract_tests.rs
+@@ -445,7 +445,7 @@ fn should_create_review_with_comment_thread_and_approve_vote() {
+                 MockResponse::json(200, include_str!("fixtures/thread_create_response.json")),
+             ),
+             (
+-                "GET /contoso/_apis/connectionData?api-version=7.1".to_string(),
++                "GET /contoso/_apis/connectionData?api-version=7.1-preview.1".to_string(),
+                 MockResponse::json(200, include_str!("fixtures/connection_data.json")),
+             ),
+             (
+@@ -505,7 +505,7 @@ fn should_map_request_changes_event_to_rejected_vote() {
+     with_mock_pat(|| {
+         let responses = [
+             (
+-                "GET /contoso/_apis/connectionData?api-version=7.1".to_string(),
++                "GET /contoso/_apis/connectionData?api-version=7.1-preview.1".to_string(),
+                 MockResponse::json(200, include_str!("fixtures/connection_data.json")),
+             ),
+             (
+@@ -609,7 +609,7 @@ fn should_reply_to_thread_update_status_and_cast_vote() {
+                 MockResponse::json(200, r#"{"id": 101, "status": "fixed", "comments": []}"#),
+             ),
+             (
+-                "GET /contoso/_apis/connectionData?api-version=7.1".to_string(),
++                "GET /contoso/_apis/connectionData?api-version=7.1-preview.1".to_string(),
+                 MockResponse::json(200, include_str!("fixtures/connection_data.json")),
+             ),
+             (

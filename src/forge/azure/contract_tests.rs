@@ -445,7 +445,7 @@ fn should_create_review_with_comment_thread_and_approve_vote() {
                 MockResponse::json(200, include_str!("fixtures/thread_create_response.json")),
             ),
             (
-                "GET /contoso/_apis/connectionData?api-version=7.1".to_string(),
+                "GET /contoso/_apis/connectionData?api-version=7.1-preview.1".to_string(),
                 MockResponse::json(200, include_str!("fixtures/connection_data.json")),
             ),
             (
@@ -505,7 +505,7 @@ fn should_map_request_changes_event_to_rejected_vote() {
     with_mock_pat(|| {
         let responses = [
             (
-                "GET /contoso/_apis/connectionData?api-version=7.1".to_string(),
+                "GET /contoso/_apis/connectionData?api-version=7.1-preview.1".to_string(),
                 MockResponse::json(200, include_str!("fixtures/connection_data.json")),
             ),
             (
@@ -609,7 +609,7 @@ fn should_reply_to_thread_update_status_and_cast_vote() {
                 MockResponse::json(200, r#"{"id": 101, "status": "fixed", "comments": []}"#),
             ),
             (
-                "GET /contoso/_apis/connectionData?api-version=7.1".to_string(),
+                "GET /contoso/_apis/connectionData?api-version=7.1-preview.1".to_string(),
                 MockResponse::json(200, include_str!("fixtures/connection_data.json")),
             ),
             (
