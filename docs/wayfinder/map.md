@@ -47,8 +47,9 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
   provider checks passed; anchor relocation and Windows clipboard remain
   explicit caveats.
 - [Validate live GitLab transport](tickets/validate-live-provider-parity.md)
-  — legacy TUI publication and direct durable adapter operations passed
-  against GitLab 19.2.1; durable TUI wiring remains open.
+  — GitLab live-passes; GitHub legacy publication passes but durable TUI
+  publication and post-head-update rendering fail; Azure DevOps awaits an
+  approved target.
 - [Classify GitLab range anchors](tickets/classify-gitlab-range-anchors.md)
   — live GitLab 19.2.1 now preserves native range 70-72 and marks either
   old-head or provider-terminal mismatches stale through backend, TUI reload,
@@ -70,10 +71,12 @@ and what each still needs before it can go upstream):
 - Whether upstream Tuicr will accept the durable-thread/provider-adapter
   changes, and in what split — gated on
   [upstream-and-reconcile](tickets/upstream-and-reconcile.md).
-- Live GitHub/Azure DevOps mutation behavior against real targets —
-  gated on
-  [provision-provider-sandboxes](tickets/provision-provider-sandboxes.md)
-  and
+- GitHub durable TUI publication —
+  [wire-github-durable-publication](tickets/wire-github-durable-publication.md).
+- GitHub diff/comment preservation across a head update —
+  [fix-github-head-refresh](tickets/fix-github-head-refresh.md).
+- Azure DevOps mutation behavior against a real target — gated on
+  [provision-provider-sandboxes](tickets/provision-provider-sandboxes.md) and
   [validate-live-provider-parity](tickets/validate-live-provider-parity.md).
 - Whether WSL TUI clipboard support is required for release or the verified
   stdout/`clip.exe` workaround is accepted — gated on

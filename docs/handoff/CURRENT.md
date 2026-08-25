@@ -4,8 +4,8 @@
 
 Exploration, offline implementation, the real Ubuntu/WSL baseline, local
 anchor relocation, and a disposable self-hosted GitLab run are complete.
-Release and upstream submission remain blocked on approved GitHub/Azure
-DevOps sandboxes and explicit disposition
+Release and upstream submission remain blocked on GitHub live-parity fixes,
+an approved Azure DevOps target, and explicit disposition
 of the remaining WSL caveats recorded below.
 
 ## Decision
@@ -63,8 +63,8 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Approve/provision disposable GitHub and Azure DevOps sandboxes, then
-   execute their remaining live parity —
+1. Fix the GitHub durable-publication/head-refresh failures and execute the
+   remaining Azure DevOps live parity —
    `docs/wayfinder/tickets/provision-provider-sandboxes.md` and
    `docs/wayfinder/tickets/validate-live-provider-parity.md`.
 2. Explicitly accept or fix the WSL TUI-clipboard boundary —
@@ -101,10 +101,12 @@ self-hosted provider run is complete with the gaps noted above.
 
 ## Remaining evidence gaps
 
-- approved GitHub/Azure DevOps mutation sandboxes;
+- GitHub durable TUI publication and post-head-update rendering;
+- an approved Azure DevOps mutation target;
+- independent GitHub review-state validation with a second standard identity;
 - multi-review daily-use observation.
 
-The approved disposable GitLab target was mutated and fully torn down. Three
-private continuation issues were opened and are mirrored by the fork tickets
-above. No GitHub/Azure review mutation or upstream Tuicr issue/PR was
-submitted.
+The approved disposable GitLab target was mutated and fully torn down. The
+disposable GitHub target was mutated, closed, and deleted. Three private
+continuation issues were opened and are mirrored by the fork tickets above.
+No Azure DevOps review mutation or upstream Tuicr issue/PR was submitted.

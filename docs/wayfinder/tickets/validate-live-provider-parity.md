@@ -5,7 +5,7 @@ type: prototype
 mode: HITL
 status: blocked
 owner: copilot
-blocked_by: [provision-provider-sandboxes, classify-gitlab-range-anchors, wire-gitlab-durable-publication]
+blocked_by: [provision-provider-sandboxes, classify-gitlab-range-anchors, wire-gitlab-durable-publication, wire-github-durable-publication, fix-github-head-refresh]
 ---
 
 ## Question
@@ -26,8 +26,9 @@ behavior.
 
 ## Status
 
-GitLab is now **live-tested with one integration gap**. GitHub and Azure
-DevOps remain live-blocked:
+GitLab is live-tested. GitHub has a completed one-identity live run with two
+implementation blockers. Azure DevOps remains live-blocked pending an
+explicitly selected draft PR target:
 
 - GitHub/GitLab offline/mock parity is complete (durable create/reply/resolve,
   REST/GraphQL ID mapping, partial-resume/idempotency, head-update handling,
@@ -39,7 +40,42 @@ DevOps remain live-blocked:
   `azure-devops-adapter-offline`, see `docs/fork/PATCHES.md`. An `#[ignore]`d
   live-sandbox harness (`src/forge/azure/live_tests.rs`, env-var gated) is
   committed and compiles but has never been run.
-- **No live GitHub or Azure DevOps target has been mutated.**
+- **No live Azure DevOps target has been mutated.**
+
+### Live GitHub result — 2026-08-25
+
+The proposed two-identity public sandbox was unavailable because the second
+identity is an Enterprise Managed User. The user approved a one-identity run
+against a disposable public repository and draft pull request containing only
+the synthetic fixture.
+
+Observed passes:
+
+- The real WSL TUI rendered the initial 14-file, 1,000-line pull-request diff.
+- One legacy review body and one line-42 inline comment published in a single
+  `COMMENTED` review.
+- Repeated `:submit comment` was a local no-op and created no duplicate.
+- After the fixture head advanced, GitHub relocated the inline comment from
+  line 42 to line 47 and retained its original line/commit metadata.
+- The exact draft pull request was closed and the exact repository was
+  deleted after granting the CLI credential only the teardown scope required
+  for repository deletion.
+
+Observed failures and evidence gaps:
+
+- A durable ReviewStore range thread was ignored by `:submit comment`, which
+  reported `Nothing to submit`; no GitHub mapping or remote thread was
+  created.
+- After the head update, both reload and restart rendered an empty diff and
+  omitted the provider-relocated inline comment even though GitHub still
+  returned a valid 14-file diff and the comment at line 47.
+- Durable reply/status/resume behavior could not be exercised because the
+  durable root was not publishable through the TUI.
+- Independent approve/request-changes behavior remains untested because only
+  one standard GitHub identity was available.
+
+Sanitized evidence:
+`artifacts/validation/2026-08-25-wsl-github/`.
 
 ### Live GitLab 19.2.1 result — 2026-08-11
 
@@ -98,7 +134,6 @@ gap.
 
 ## Unblock condition
 
-Close `wire-gitlab-durable-publication`, provision and validate the approved
-GitHub/Azure DevOps targets, then re-run the GitLab publication lifecycle.
-Record each remaining pass/fail delta directly in this ticket's Resolution
-section.
+Close `wire-github-durable-publication` and `fix-github-head-refresh`, rerun
+the disposable GitHub lifecycle, and validate an explicitly approved Azure
+DevOps target. Record each remaining pass/fail delta directly in this ticket.
