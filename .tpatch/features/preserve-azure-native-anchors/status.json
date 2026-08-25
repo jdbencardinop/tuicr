@@ -1,0 +1,23 @@
+{
+  "id": "preserve-azure-native-anchors",
+  "slug": "preserve-azure-native-anchors",
+  "title": "Preserve Azure DevOps threadContext and pullRequestThreadContext in provider-native anchors, retain valid selected-side ranges, and persist them through durable import across head refresh.",
+  "state": "applied",
+  "compatibility": "unknown",
+  "requested_at": "2026-08-25T23:13:15Z",
+  "updated_at": "2026-08-25T23:49:39Z",
+  "last_command": "verify",
+  "notes": "landed at 2026-08-25T23:49:50Z",
+  "apply": {
+    "completed_at": "2026-08-25T23:49:39Z",
+    "base_commit": "44f557654d97fcb9d1fef757705512b6d7f80448",
+    "has_patch": true
+  },
+  "reconcile": {},
+  "verify": {
+    "verified_at": "2026-08-25T23:49:39Z",
+    "passed": true,
+    "recipe_hash_at_verify": "36864b43ed93fc33260b057f3361eaed07117e1763a2b9b69aefeb34f55826e2",
+    "patch_hash_at_verify": "ab47028d40170ff7339188f720a09d8d19dfa7971abd389271b66622fb39b4c3"
+  }
+}

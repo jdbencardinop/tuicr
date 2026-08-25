@@ -1,0 +1,8 @@
+{
+  "slug": "preserve-azure-native-anchors",
+  "completed_at": "2026-08-25T23:49:39Z",
+  "base_commit": "44f557654d97fcb9d1fef757705512b6d7f80448",
+  "has_patch": true,
+  "validation_status": "passed",
+  "validation_notes": "tpatch test — command: cargo test --locked --lib -- --skip vcs::git::libgit2::tests::should_discover_worktree_with_relativeworktrees_extension --skip vcs::git::tests::default_preference_routes_reftable_repo_to_cli"
+}

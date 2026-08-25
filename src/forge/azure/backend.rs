@@ -55,7 +55,9 @@ use crate::forge::azure::models::{
 use crate::forge::giteafj::url_encode::{
     encode_path_segment, encode_path_segments, encode_query_value,
 };
-use crate::forge::remote_comments::{RemoteCommentSide, RemoteReviewComment, RemoteReviewThread};
+use crate::forge::remote_comments::{
+    RemoteCommentSide, RemoteReviewComment, RemoteReviewRange, RemoteReviewThread,
+};
 use crate::forge::submit::SubmitEvent;
 use crate::forge::traits::ForgeRepository;
 use crate::forge::traits::{
@@ -176,6 +178,68 @@ impl std::fmt::Debug for AzureDevOpsBackend {
 }
 
 impl AzureDevOpsBackend {
+    fn native_anchor(thread: &AdoCommentThread) -> Option<serde_json::Value> {
+        let mut anchor = serde_json::Map::new();
+        if let Some(context) = thread.thread_context.as_ref() {
+            anchor.insert(
+                "threadContext".to_string(),
+                serde_json::to_value(context).expect("Azure thread context should serialize"),
+            );
+        }
+        if let Some(context) = thread.pull_request_thread_context.as_ref() {
+            anchor.insert(
+                "pullRequestThreadContext".to_string(),
+                serde_json::to_value(context)
+                    .expect("Azure pull-request thread context should serialize"),
+            );
+        }
+        (!anchor.is_empty()).then_some(serde_json::Value::Object(anchor))
+    }
+
+    fn normalized_anchor(
+        context: &crate::forge::azure::models::AdoCommentThreadContext,
+    ) -> (
+        String,
+        Option<u32>,
+        RemoteCommentSide,
+        Option<RemoteReviewRange>,
+        bool,
+    ) {
+        let path = context.file_path.trim_start_matches('/').to_string();
+        let selected = context
+            .right_file_start
+            .as_ref()
+            .map(|start| {
+                (
+                    start,
+                    context.right_file_end.as_ref(),
+                    RemoteCommentSide::Right,
+                )
+            })
+            .or_else(|| {
+                context.left_file_start.as_ref().map(|start| {
+                    (
+                        start,
+                        context.left_file_end.as_ref(),
+                        RemoteCommentSide::Left,
+                    )
+                })
+            });
+        let Some((start, end, side)) = selected else {
+            let malformed = context.right_file_end.is_some() || context.left_file_end.is_some();
+            return (path, None, RemoteCommentSide::Right, None, malformed);
+        };
+        let Some(end) = end else {
+            return (path, Some(start.line), side, None, false);
+        };
+        if end.line < start.line {
+            return (path, Some(start.line), side, None, true);
+        }
+        let range =
+            (end.line > start.line).then(|| RemoteReviewRange::new(start.line, end.line).unwrap());
+        (path, Some(end.line), side, range, false)
+    }
+
     pub fn new(default_repository: Option<ForgeRepository>) -> Self {
         Self {
             default_repository,
@@ -514,7 +578,11 @@ impl AzureDevOpsBackend {
         let path_str = format!("/{}", comment.path.to_string_lossy().replace('\\', "/"));
         let anchor_line = comment.start_line.unwrap_or(comment.line);
         let end_line = comment.line;
-        let position = |line: u32| AdoCommentPosition { line, offset: 1 };
+        let position = |line: u32| AdoCommentPosition {
+            line,
+            offset: 1,
+            extra: serde_json::Map::new(),
+        };
         let (left_start, left_end, right_start, right_end) = match comment.side {
             GhSide::Left => (
                 Some(position(anchor_line)),
@@ -535,6 +603,7 @@ impl AzureDevOpsBackend {
             left_file_end: left_end,
             right_file_start: right_start,
             right_file_end: right_end,
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -560,7 +629,11 @@ impl AzureDevOpsBackend {
         let path = request.path?;
         let end_line = request.line?;
         let start_line = request.range_start.unwrap_or(end_line);
-        let position = |line: u32| AdoCommentPosition { line, offset: 1 };
+        let position = |line: u32| AdoCommentPosition {
+            line,
+            offset: 1,
+            extra: serde_json::Map::new(),
+        };
         let (left_start, left_end, right_start, right_end) = match request.side {
             Some(AnchorSide::Old) => (
                 Some(position(start_line)),
@@ -587,6 +660,7 @@ impl AzureDevOpsBackend {
             left_file_end: left_end,
             right_file_start: right_start,
             right_file_end: right_end,
+            extra: serde_json::Map::new(),
         })
     }
 
@@ -764,9 +838,9 @@ impl ForgeBackend for AzureDevOpsBackend {
         Ok(threads
             .into_iter()
             .map(|thread| {
-                let (path, line, side) = match &thread.thread_context {
+                let provider_native_anchor = Self::native_anchor(&thread);
+                let (path, line, side, range, malformed_anchor) = match &thread.thread_context {
                     Some(ctx) => {
-                        let path = ctx.file_path.trim_start_matches('/').to_string();
                         // `RemoteReviewThread` (shared across every
                         // `ForgeBackend`) carries exactly one `line`/
                         // `side` pair and no `offset`, but Azure's own
@@ -787,13 +861,7 @@ impl ForgeBackend for AzureDevOpsBackend {
                         // `threadContext` (both sides, both offsets, both
                         // `*FileEnd` positions) is preserved verbatim,
                         // separately, via `Self::thread_provider_mapping`.
-                        if let Some(pos) = &ctx.right_file_start {
-                            (path, Some(pos.line), RemoteCommentSide::Right)
-                        } else if let Some(pos) = &ctx.left_file_start {
-                            (path, Some(pos.line), RemoteCommentSide::Left)
-                        } else {
-                            (path, None, RemoteCommentSide::Right)
-                        }
+                        Self::normalized_anchor(ctx)
                     }
                     // A thread with no `threadContext` at all is a
                     // general, PR-level discussion (not anchored to any
@@ -802,16 +870,24 @@ impl ForgeBackend for AzureDevOpsBackend {
                     // (`list_review_summaries` has no Azure DevOps
                     // override), so it is surfaced here instead of being
                     // silently dropped, with an empty path/no line.
-                    None => (String::new(), None, RemoteCommentSide::Right),
+                    None => (String::new(), None, RemoteCommentSide::Right, None, false),
                 };
-                let is_outdated = match (&thread.pull_request_thread_context, latest_iteration) {
-                    (Some(ctx), Some(latest)) => ctx
-                        .iteration_context
-                        .as_ref()
-                        .map(|ic| ic.second_comparing_iteration < latest)
-                        .unwrap_or(false),
-                    _ => false,
-                };
+                let is_outdated = malformed_anchor
+                    || match (&thread.pull_request_thread_context, latest_iteration) {
+                        (Some(ctx), Some(latest)) => ctx
+                            .iteration_context
+                            .as_ref()
+                            .map(|ic| ic.second_comparing_iteration)
+                            .or_else(|| {
+                                ctx.tracking_criteria
+                                    .as_ref()
+                                    .and_then(|criteria| criteria.second_comparing_iteration)
+                                    .filter(|iteration| *iteration > 0)
+                            })
+                            .map(|iteration| iteration < latest)
+                            .unwrap_or(false),
+                        _ => false,
+                    };
                 RemoteReviewThread {
                     id: thread.id.to_string(),
                     path,
@@ -819,8 +895,8 @@ impl ForgeBackend for AzureDevOpsBackend {
                     side,
                     is_resolved: thread.status.is_resolved(),
                     is_outdated,
-                    range: None,
-                    provider_native_anchor: None,
+                    range,
+                    provider_native_anchor,
                     comments: thread
                         .comments
                         .into_iter()

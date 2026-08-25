@@ -323,11 +323,13 @@ pub struct AdoGitItem {
 
 /// `CommentPosition` — a zero-based line/offset pair used by
 /// `CommentThreadContext`.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdoCommentPosition {
     pub line: u32,
     pub offset: u32,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// `CommentThreadContext` — the file/line anchor of a thread. Azure DevOps'
@@ -339,14 +341,16 @@ pub struct AdoCommentPosition {
 #[serde(rename_all = "camelCase")]
 pub struct AdoCommentThreadContext {
     pub file_path: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub left_file_start: Option<AdoCommentPosition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub left_file_end: Option<AdoCommentPosition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub right_file_start: Option<AdoCommentPosition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub right_file_end: Option<AdoCommentPosition>,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// `CommentIterationContext` — which iteration-pair a thread's anchor was
@@ -356,6 +360,8 @@ pub struct AdoCommentThreadContext {
 pub struct AdoCommentIterationContext {
     pub first_comparing_iteration: u32,
     pub second_comparing_iteration: u32,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// `CommentTrackingCriteria` — the original anchor plus enough context for
@@ -365,20 +371,22 @@ pub struct AdoCommentIterationContext {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdoCommentTrackingCriteria {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orig_file_path: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orig_left_file_start: Option<AdoCommentPosition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orig_left_file_end: Option<AdoCommentPosition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orig_right_file_start: Option<AdoCommentPosition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orig_right_file_end: Option<AdoCommentPosition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_comparing_iteration: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub second_comparing_iteration: Option<u32>,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// `GitPullRequestCommentThreadContext` — the sibling `pullRequestThreadContext`
@@ -387,12 +395,14 @@ pub struct AdoCommentTrackingCriteria {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdoPullRequestThreadContext {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_tracking_id: Option<i64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iteration_context: Option<AdoCommentIterationContext>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracking_criteria: Option<AdoCommentTrackingCriteria>,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// `CommentThreadStatus`. Evidenced values:

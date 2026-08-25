@@ -3,8 +3,8 @@ id: preserve-azure-native-anchors
 title: Preserve Azure DevOps iteration-native anchors
 type: implementation
 mode: autonomous
-status: open
-owner:
+status: in-progress
+owner: copilot
 blocked_by: []
 ---
 

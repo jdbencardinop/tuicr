@@ -21,15 +21,21 @@
       ],
       "threadContext": {
         "filePath": "/src/lib.rs",
-        "rightFileStart": { "line": 10, "offset": 1 },
-        "rightFileEnd": { "line": 10, "offset": 1 }
+        "rightFileStart": {
+          "line": 10,
+          "offset": 1,
+          "futurePositionField": "retained"
+        },
+        "rightFileEnd": { "line": 12, "offset": 3 },
+        "futureThreadField": { "retained": true }
       },
       "pullRequestThreadContext": {
         "changeTrackingId": 1,
         "iterationContext": {
           "firstComparingIteration": 1,
           "secondComparingIteration": 2
-        }
+        },
+        "futurePullRequestField": "retained"
       }
     },
     {
@@ -60,7 +66,16 @@
         "changeTrackingId": 2,
         "iterationContext": {
           "firstComparingIteration": 1,
-          "secondComparingIteration": 1
+          "secondComparingIteration": 1,
+          "futureIterationField": "retained"
+        },
+        "trackingCriteria": {
+          "origFilePath": "/src/main.rs",
+          "origLeftFileStart": { "line": 5, "offset": 1 },
+          "origLeftFileEnd": { "line": 5, "offset": 1 },
+          "firstComparingIteration": 1,
+          "secondComparingIteration": 1,
+          "futureTrackingField": "retained"
         }
       }
     },
@@ -96,7 +111,84 @@
           "isDeleted": false
         }
       ]
+    },
+    {
+      "id": 105,
+      "status": "active",
+      "isDeleted": false,
+      "comments": [
+        {
+          "id": 5,
+          "parentCommentId": 0,
+          "content": "reversed provider range",
+          "isDeleted": false
+        }
+      ],
+      "threadContext": {
+        "filePath": "/src/reversed.rs",
+        "rightFileStart": { "line": 12, "offset": 1 },
+        "rightFileEnd": { "line": 10, "offset": 1 }
+      },
+      "pullRequestThreadContext": {
+        "changeTrackingId": 5,
+        "iterationContext": {
+          "firstComparingIteration": 1,
+          "secondComparingIteration": 2
+        }
+      }
+    },
+    {
+      "id": 106,
+      "status": "active",
+      "isDeleted": false,
+      "comments": [
+        {
+          "id": 6,
+          "parentCommentId": 0,
+          "content": "tracking-criteria-only stale thread",
+          "isDeleted": false
+        }
+      ],
+      "threadContext": {
+        "filePath": "/src/tracking.rs",
+        "rightFileStart": { "line": 8, "offset": 1 }
+      },
+      "pullRequestThreadContext": {
+        "changeTrackingId": 6,
+        "trackingCriteria": {
+          "origFilePath": "/src/tracking.rs",
+          "origRightFileStart": { "line": 8, "offset": 1 },
+          "firstComparingIteration": 1,
+          "secondComparingIteration": 1
+        }
+      }
+    },
+    {
+      "id": 107,
+      "status": "active",
+      "isDeleted": false,
+      "comments": [
+        {
+          "id": 7,
+          "parentCommentId": 0,
+          "content": "untracked sentinel thread",
+          "isDeleted": false
+        }
+      ],
+      "threadContext": {
+        "filePath": "/src/untracked.rs",
+        "rightFileStart": { "line": 20, "offset": 1 }
+      },
+      "pullRequestThreadContext": {
+        "changeTrackingId": 7,
+        "trackingCriteria": {
+          "origFilePath": "/src/untracked.rs",
+          "origRightFileStart": { "line": 20, "offset": 1 },
+          "firstComparingIteration": 1,
+          "secondComparingIteration": 0
+        }
+      }
     }
   ],
-  "count": 4
+  "count": 7
 }

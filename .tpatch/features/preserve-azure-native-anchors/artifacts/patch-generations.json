@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "feature": "preserve-azure-native-anchors",
+  "current_generation": 1,
+  "generations": [
+    {
+      "generation": 1,
+      "generation_id": "pg_63f94dacfd6d",
+      "kind": "record",
+      "patch_sha256": "ab47028d40170ff7339188f720a09d8d19dfa7971abd389271b66622fb39b4c3",
+      "git_patch_id": "d2b373d32711f0c5af6fb13b31d3c0174ab9c95c",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "36864b43ed93fc33260b057f3361eaed07117e1763a2b9b69aefeb34f55826e2",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/001-record.patch",
+      "base_commit": "44f557654d97fcb9d1fef757705512b6d7f80448",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "docs/wayfinder/tickets/preserve-azure-native-anchors.md",
+        "src/forge/azure/backend.rs",
+        "src/forge/azure/contract_tests.rs",
+        "src/forge/azure/fixtures/threads_list.json",
+        "src/forge/azure/live_tests.rs",
+        "src/forge/azure/models.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    }
+  ]
+}

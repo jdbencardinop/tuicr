@@ -1,0 +1,8 @@
+ .tpatch/FEATURES.md                                |   1 +
+ .../tickets/preserve-azure-native-anchors.md       |   4 +-
+ src/forge/azure/backend.rs                         | 122 +++++++++++++---
+ src/forge/azure/contract_tests.rs                  | 100 ++++++++++++-
+ src/forge/azure/fixtures/threads_list.json         | 102 ++++++++++++-
+ src/forge/azure/live_tests.rs                      | 160 ++++++++++++++++++++-
+ src/forge/azure/models.rs                          |  40 ++++--
+ 7 files changed, 480 insertions(+), 49 deletions(-)

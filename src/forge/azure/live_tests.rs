@@ -41,10 +41,14 @@
 use std::path::PathBuf;
 
 use crate::forge::azure::backend::AzureDevOpsBackend;
+use crate::forge::azure::models::{AdoCommentPosition, AdoCommentThreadContext, AdoThreadStatus};
 use crate::forge::submit::{GhSide, InlineComment, SubmitEvent};
 use crate::forge::traits::{
-    CreateReviewRequest, ForgeBackend, ForgeRepository, PullRequestListQuery, PullRequestTarget,
+    CreateReviewRequest, ForgeBackend, ForgeRepository, PrSessionKey, PullRequestListQuery,
+    PullRequestTarget,
 };
+use crate::model::{ReviewSession, SessionDiffSource};
+use crate::review_store::ReviewStore;
 
 struct LiveEnv {
     host: String,
@@ -222,5 +226,159 @@ fn should_drive_full_review_lifecycle_against_live_instance() {
     assert!(
         threads_after.len() > threads_before.len(),
         "create_review should have posted a new thread"
+    );
+}
+
+#[test]
+#[ignore = "requires an explicitly approved disposable Azure DevOps draft PR; \
+            posts a reversible synthetic thread"]
+fn should_preserve_native_anchor_through_durable_import() {
+    let Some(env) = live_env() else {
+        eprintln!("skipping: TUICR_LIVE_AZURE_* env vars not set");
+        return;
+    };
+    let phase = std::env::var("TUICR_LIVE_AZURE_ANCHOR_PHASE")
+        .expect("TUICR_LIVE_AZURE_ANCHOR_PHASE must be seed or verify");
+    let marker = std::env::var("TUICR_LIVE_AZURE_ANCHOR_MARKER")
+        .expect("TUICR_LIVE_AZURE_ANCHOR_MARKER must identify the synthetic thread");
+    let path = std::env::var("TUICR_LIVE_AZURE_ANCHOR_PATH")
+        .expect("TUICR_LIVE_AZURE_ANCHOR_PATH must be the approved synthetic file");
+    let repo = repository(&env);
+    let backend = AzureDevOpsBackend::new(Some(repo.clone()));
+    let target = PullRequestTarget::with_repository(
+        repo.clone(),
+        env.pr_number,
+        format!("{}/{}/pullrequest/{}", env.owner, env.repo, env.pr_number),
+    );
+    let pr = backend
+        .get_pull_request(target)
+        .expect("get_pull_request should succeed");
+
+    if phase == "seed" {
+        let position = AdoCommentPosition {
+            line: 60,
+            offset: 1,
+            extra: Default::default(),
+        };
+        let thread_id = backend
+            .create_thread(
+                &pr,
+                &marker,
+                Some(AdoCommentThreadContext {
+                    file_path: path.clone(),
+                    left_file_start: None,
+                    left_file_end: None,
+                    right_file_start: Some(position.clone()),
+                    right_file_end: Some(position),
+                    extra: Default::default(),
+                }),
+            )
+            .expect("create_thread should succeed");
+        backend
+            .reply_to_thread(&pr, thread_id, &format!("{marker}:reply"))
+            .expect("reply_to_thread should succeed");
+        backend
+            .update_thread_status(&pr, thread_id, AdoThreadStatus::Fixed)
+            .expect("resolving the thread should succeed");
+        backend
+            .update_thread_status(&pr, thread_id, AdoThreadStatus::Active)
+            .expect("reopening the thread should succeed");
+        println!("TUICR_LIVE_AZURE_THREAD_ID={thread_id}");
+    } else {
+        assert!(
+            matches!(phase.as_str(), "current" | "verify"),
+            "anchor phase must be seed, current, or verify"
+        );
+    }
+
+    let remote_threads = backend
+        .list_review_threads(&pr)
+        .expect("list_review_threads should succeed");
+    let remote = remote_threads
+        .iter()
+        .find(|thread| {
+            thread
+                .comments
+                .first()
+                .is_some_and(|comment| comment.body == marker)
+        })
+        .expect("synthetic thread should round-trip through the adapter");
+    assert_eq!(
+        remote.path.trim_start_matches('/'),
+        path.trim_start_matches('/')
+    );
+    assert!(
+        remote.provider_native_anchor.is_some(),
+        "provider-native thread context must be retained"
+    );
+    if phase == "verify" {
+        assert!(
+            remote.is_outdated,
+            "the original iteration anchor must be stale after the head shift"
+        );
+        assert!(
+            remote
+                .provider_native_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.get("pullRequestThreadContext"))
+                .is_some(),
+            "the shifted thread must retain Azure iteration/tracking context"
+        );
+    }
+
+    let mut session = ReviewSession::new(
+        PathBuf::from("/synthetic/azure-live"),
+        pr.base_sha.clone(),
+        Some(pr.head_ref_name.clone()),
+        SessionDiffSource::PullRequest,
+    );
+    session.pr_session_key = Some(PrSessionKey::from_details(&pr));
+    assert_eq!(
+        session.import_remote_review_threads("azure-devops", &remote_threads),
+        remote_threads
+            .iter()
+            .filter(|thread| !thread.comments.is_empty())
+            .count()
+    );
+    let imported_count = session.threads.len();
+    assert_eq!(
+        session.import_remote_review_threads("azure-devops", &remote_threads),
+        0,
+        "repeat import must merge by provider ID"
+    );
+    assert_eq!(
+        session.threads.len(),
+        imported_count,
+        "repeat import must not duplicate durable threads"
+    );
+
+    let temp = tempfile::tempdir().expect("temporary ReviewStore root");
+    let store = ReviewStore::with_reviews_dir(temp.path().join("reviews"));
+    let session_ref = store
+        .save_review(&session)
+        .expect("saving the durable review should succeed");
+    let reloaded = store
+        .get_review(&session_ref)
+        .expect("reloading the durable review should succeed");
+    let persisted = serde_json::to_value(&reloaded).expect("serialize durable review");
+    let thread_id = remote.id.as_str();
+    let mapping = persisted["threads"]
+        .as_array()
+        .and_then(|threads| {
+            threads.iter().find_map(|thread| {
+                let mapping = &thread["provider_mappings"]["azure-devops"];
+                (mapping["id"] == thread_id).then_some(mapping)
+            })
+        })
+        .expect("durable provider mapping should exist");
+    assert!(
+        mapping
+            .get("native_anchor")
+            .is_some_and(|value| !value.is_null()),
+        "durable provider mapping must retain the native anchor"
+    );
+    println!(
+        "TUICR_LIVE_AZURE_ANCHOR_PHASE={phase} thread_id={} outdated={}",
+        remote.id, remote.is_outdated
     );
 }

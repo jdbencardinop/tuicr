@@ -222,12 +222,12 @@ fn should_list_review_threads_with_dual_side_anchors_general_thread_and_stale_de
             .expect("list_review_threads should succeed");
 
         // Thread 104 is `isDeleted: true` and must be filtered out; 101/
-        // 102/103 remain.
-        assert_eq!(threads.len(), 3);
+        // 102/103/105/106/107 remain.
+        assert_eq!(threads.len(), 6);
 
         let right_anchored = threads.iter().find(|t| t.id == "101").expect("thread 101");
         assert_eq!(right_anchored.path, "src/lib.rs");
-        assert_eq!(right_anchored.line, Some(10));
+        assert_eq!(right_anchored.line, Some(12));
         assert_eq!(
             right_anchored.side,
             crate::forge::remote_comments::RemoteCommentSide::Right
@@ -235,6 +235,44 @@ fn should_list_review_threads_with_dual_side_anchors_general_thread_and_stale_de
         // Latest iteration is 2; thread 101 compared against iteration 2 —
         // not stale.
         assert!(!right_anchored.is_outdated);
+        assert_eq!(
+            right_anchored
+                .range
+                .as_ref()
+                .map(|range| (range.start(), range.end())),
+            Some((10, 12))
+        );
+        let right_native = right_anchored
+            .provider_native_anchor
+            .as_ref()
+            .expect("right native anchor");
+        assert_eq!(right_native["threadContext"]["rightFileEnd"]["line"], 12);
+        assert_eq!(right_native["threadContext"]["rightFileEnd"]["offset"], 3);
+        assert!(right_native["threadContext"].get("leftFileStart").is_none());
+        assert_eq!(
+            right_native["threadContext"]["futureThreadField"]["retained"],
+            true
+        );
+        assert_eq!(
+            right_native["threadContext"]["rightFileStart"]["futurePositionField"],
+            "retained"
+        );
+        assert_eq!(
+            right_native["pullRequestThreadContext"]["iterationContext"]["secondComparingIteration"],
+            2
+        );
+        assert_eq!(
+            right_native["pullRequestThreadContext"]["futurePullRequestField"],
+            "retained"
+        );
+        let persisted =
+            crate::model::thread_store::thread_from_remote("azure-devops", right_anchored);
+        assert_eq!(
+            persisted
+                .provider_mapping("azure-devops")
+                .expect("durable Azure mapping")["native_anchor"],
+            right_native.clone()
+        );
 
         let left_anchored = threads.iter().find(|t| t.id == "102").expect("thread 102");
         assert_eq!(left_anchored.path, "src/main.rs");
@@ -246,11 +284,64 @@ fn should_list_review_threads_with_dual_side_anchors_general_thread_and_stale_de
         // fetched iteration (2) — this is exactly
         // `StaleAnchorSignal::Tracking`'s evidenced staleness signal.
         assert!(left_anchored.is_outdated);
+        let left_native = left_anchored
+            .provider_native_anchor
+            .as_ref()
+            .expect("left native anchor");
+        assert_eq!(
+            left_native["pullRequestThreadContext"]["trackingCriteria"]["origLeftFileStart"]["line"],
+            5
+        );
+        assert_eq!(
+            left_native["pullRequestThreadContext"]["trackingCriteria"]["futureTrackingField"],
+            "retained"
+        );
+        assert_eq!(
+            left_native["pullRequestThreadContext"]["iterationContext"]["futureIterationField"],
+            "retained"
+        );
 
         let general = threads.iter().find(|t| t.id == "103").expect("thread 103");
         assert_eq!(general.path, "");
         assert_eq!(general.line, None);
         assert!(general.is_resolved);
+        assert!(general.provider_native_anchor.is_none());
+
+        let reversed = threads.iter().find(|t| t.id == "105").expect("thread 105");
+        assert_eq!(reversed.line, Some(12));
+        assert!(reversed.range.is_none());
+        assert!(reversed.is_outdated);
+        assert_eq!(
+            reversed
+                .provider_native_anchor
+                .as_ref()
+                .expect("reversed native anchor")["threadContext"]["rightFileEnd"]["line"],
+            10
+        );
+
+        let tracking_only = threads.iter().find(|t| t.id == "106").expect("thread 106");
+        assert_eq!(tracking_only.line, Some(8));
+        assert!(tracking_only.is_outdated);
+        assert_eq!(
+            tracking_only
+                .provider_native_anchor
+                .as_ref()
+                .expect("tracking-only native anchor")["pullRequestThreadContext"]["trackingCriteria"]
+                ["secondComparingIteration"],
+            1
+        );
+
+        let untracked = threads.iter().find(|t| t.id == "107").expect("thread 107");
+        assert_eq!(untracked.line, Some(20));
+        assert!(!untracked.is_outdated);
+        assert_eq!(
+            untracked
+                .provider_native_anchor
+                .as_ref()
+                .expect("untracked native anchor")["pullRequestThreadContext"]["trackingCriteria"]
+                ["secondComparingIteration"],
+            0
+        );
     });
 }
 
@@ -567,11 +658,14 @@ fn should_create_thread_as_a_standalone_operation_independent_of_create_review()
             right_file_start: Some(crate::forge::azure::models::AdoCommentPosition {
                 line: 20,
                 offset: 5,
+                extra: serde_json::Map::new(),
             }),
             right_file_end: Some(crate::forge::azure::models::AdoCommentPosition {
                 line: 22,
                 offset: 13,
+                extra: serde_json::Map::new(),
             }),
+            extra: serde_json::Map::new(),
         };
 
         let thread_id = backend
