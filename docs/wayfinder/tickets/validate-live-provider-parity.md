@@ -107,6 +107,24 @@ Observed failures and gaps:
 Sanitized evidence:
 `artifacts/validation/2026-08-25-wsl-azure-devops/`.
 
+### Azure native-anchor rerun — 2026-08-25
+
+The tracked `preserve-azure-native-anchors` implementation at `c3d6dde`
+passed a second approved disposable draft-PR run. Azure's current and shifted
+thread payloads retained `threadContext` and
+`pullRequestThreadContext`; the shifted thread remained explicitly outdated.
+The native payload survived ReviewStore save/reload, and repeat import merged
+by provider thread ID without duplication. Root/reply and fixed/active
+transitions also passed. Cleanup deleted the synthetic comments, abandoned
+the PR, and deleted the exact branch; reviewer count and vote remained zero.
+
+The TUI could open the abandoned PR from a sparse matching checkout, proving
+the Azure local-diff prerequisite, but cleanup had already deleted the
+synthetic comment. Therefore TUI rendering is not claimed and
+`preserve-azure-native-anchors` remains open for one TUI-before-cleanup rerun.
+Draft vote parity and two-PR pagination also remain open. Sanitized evidence:
+`artifacts/validation/2026-08-25-wsl-azure-devops-native-anchor/`.
+
 ### Live GitLab 19.2.1 result — 2026-08-11
 
 Approved disposable target:

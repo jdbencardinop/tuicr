@@ -32,3 +32,14 @@ The 2026-08-25 live adapter run correctly classified the shifted thread as
 outdated but returned no provider-native anchor despite Azure supplying thread
 and iteration context. Sanitized evidence:
 `../../../../artifacts/validation/2026-08-25-wsl-azure-devops/`.
+
+The implementation landed as `c3d6dde`. A second disposable draft-PR run
+proved inline root/reply creation, fixed/active transitions, current and stale
+adapter conversion, native iteration/tracking retention, ReviewStore
+save/reload, and duplicate-free repeat import. The synthetic comments were
+deleted, the PR abandoned, and the exact branch deleted with zero reviewers
+and zero vote. The real TUI opened the abandoned PR from an isolated sparse
+checkout only after cleanup, so its synthetic comment had already been
+deleted; TUI rendering remains the sole completion blocker. Sanitized
+evidence:
+`../../../../artifacts/validation/2026-08-25-wsl-azure-devops-native-anchor/`.

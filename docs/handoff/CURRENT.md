@@ -4,8 +4,9 @@
 
 Exploration, offline implementation, the real Ubuntu/WSL baseline, local
 anchor relocation, and disposable GitLab/GitHub/Azure DevOps runs are
-complete. Release and upstream submission remain blocked on GitHub
-live-parity fixes, Azure native-anchor preservation, a non-draft vote target,
+complete. Azure native-anchor preservation now passes the live adapter and
+durable-store path. Release and upstream submission remain blocked on GitHub
+live-parity fixes, an Azure TUI-before-cleanup rerun, a non-draft vote target,
 and explicit disposition
 of the remaining WSL caveats recorded below.
 
@@ -39,6 +40,10 @@ Full decision text: `docs/fork/DECISIONS.md`.
 - GitLab durable TUI publication: `9330ee0`, `e6d6d80` — `:submit comment`
   previews and checkpoints durable roots, replies, resolve, and reopen;
   provider-ID re-import reconciliation and retry planning prevent duplicates.
+- Azure native-anchor preservation: `c3d6dde` — selected-side ranges and
+  provider-native thread/iteration/tracking context survive live adapter
+  conversion, stale classification, ReviewStore reload, and duplicate-free
+  repeat import.
 - Latest build exercised on WSL reports
   `tuicr 0.19.1-offline-candidate.1+c2a7554`; later validation/tracker commits
   only change documentation and have not been rebuilt separately. The
@@ -64,8 +69,8 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Fix the GitHub durable-publication/head-refresh failures and Azure
-   native-anchor loss, then execute their remaining live parity —
+1. Fix the GitHub durable-publication/head-refresh failures and rerun Azure
+   with TUI inspection before cleanup, then execute remaining live parity —
    `docs/wayfinder/tickets/validate-live-provider-parity.md`.
 2. Explicitly accept or fix the WSL TUI-clipboard boundary —
    `docs/wayfinder/tickets/decide-wsl-clipboard-boundary.md`.
@@ -102,7 +107,7 @@ self-hosted provider run is complete with the gaps noted above.
 ## Remaining evidence gaps
 
 - GitHub durable TUI publication and post-head-update rendering;
-- Azure DevOps iteration/native-anchor preservation;
+- Azure DevOps TUI rendering before synthetic-thread cleanup;
 - an approved non-draft disposable Azure DevOps vote target;
 - independent GitHub review-state validation with a second standard identity;
 - multi-review daily-use observation.
