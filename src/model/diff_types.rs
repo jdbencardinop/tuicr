@@ -4,6 +4,7 @@ use std::{collections::HashMap, path::PathBuf};
 
 use crate::hash::Fnv1aHasher;
 use crate::model::comment::LineSide;
+use crate::model::thread::AnchorContext;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -82,6 +83,101 @@ impl DiffHunk {
 }
 
 impl DiffFile {
+    /// Capture bounded, contiguous context for an inclusive anchor range on
+    /// one exact side of this displayed diff.
+    pub fn anchor_context(
+        &self,
+        side: LineSide,
+        start: u32,
+        end: u32,
+        window: usize,
+    ) -> Option<AnchorContext> {
+        if start == 0 || end < start {
+            return None;
+        }
+
+        let mut side_lines = HashMap::new();
+        for line in self.hunks.iter().flat_map(|hunk| &hunk.lines) {
+            let line_number = match side {
+                LineSide::Old => line.old_lineno,
+                LineSide::New => line.new_lineno,
+            };
+            if let Some(line_number) = line_number {
+                side_lines
+                    .entry(line_number)
+                    .or_insert_with(|| line.content.clone());
+            }
+        }
+
+        let selected = (start..=end)
+            .map(|line| side_lines.get(&line).cloned())
+            .collect::<Option<Vec<_>>>()?;
+
+        let mut before = Vec::new();
+        let mut line = start;
+        for _ in 0..window {
+            let Some(previous) = line.checked_sub(1).filter(|line| *line > 0) else {
+                break;
+            };
+            let Some(content) = side_lines.get(&previous) else {
+                break;
+            };
+            before.push(content.clone());
+            line = previous;
+        }
+        before.reverse();
+
+        let mut after = Vec::new();
+        let mut line = end;
+        for _ in 0..window {
+            let Some(next) = line.checked_add(1) else {
+                break;
+            };
+            let Some(content) = side_lines.get(&next) else {
+                break;
+            };
+            after.push(content.clone());
+            line = next;
+        }
+
+        Some(AnchorContext {
+            before,
+            selected,
+            after,
+        })
+    }
+
+    /// Materialize the displayed lines for one side at their absolute line
+    /// numbers. Missing hunk gaps use a sentinel that cannot match displayed
+    /// content, so relocation may conservatively become stale but can never
+    /// invent adjacency across unrelated hunks.
+    pub fn side_content_for_relocation(&self, side: LineSide) -> Vec<String> {
+        let numbered: Vec<(u32, &str)> = self
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter_map(|line| {
+                let line_number = match side {
+                    LineSide::Old => line.old_lineno,
+                    LineSide::New => line.new_lineno,
+                }?;
+                Some((line_number, line.content.as_str()))
+            })
+            .collect();
+        let Some(max_line) = numbered.iter().map(|(line, _)| *line).max() else {
+            return Vec::new();
+        };
+        let mut sentinel = "\0tuicr-unavailable-context\0".to_string();
+        while numbered.iter().any(|(_, content)| *content == sentinel) {
+            sentinel.push('\0');
+        }
+        let mut content = vec![sentinel; max_line as usize];
+        for (line, value) in numbered {
+            content[line as usize - 1] = value.to_string();
+        }
+        content
+    }
+
     /// Stable key for a reviewed hunk.
     ///
     /// Unique hunk content ignores hunk header line numbers so unrelated
@@ -223,5 +319,89 @@ fn write_hunk_content_hash(hasher: &mut Fnv1aHasher, lines: &[DiffLine]) {
         });
         hasher.write(line.content.as_bytes());
         hasher.write(b"\n");
+    }
+}
+
+#[cfg(test)]
+mod anchor_context_tests {
+    use super::*;
+
+    fn line(
+        origin: LineOrigin,
+        content: &str,
+        old_lineno: Option<u32>,
+        new_lineno: Option<u32>,
+    ) -> DiffLine {
+        DiffLine {
+            origin,
+            content: content.to_string(),
+            old_lineno,
+            new_lineno,
+            highlighted_spans: None,
+        }
+    }
+
+    fn changed_file() -> DiffFile {
+        let lines = vec![
+            line(LineOrigin::Context, "before", Some(9), Some(9)),
+            line(LineOrigin::Deletion, "old selected", Some(10), None),
+            line(LineOrigin::Addition, "new selected", None, Some(10)),
+            line(LineOrigin::Context, "after", Some(11), Some(11)),
+            line(LineOrigin::Context, "range end", Some(12), Some(12)),
+        ];
+        let hunks = vec![DiffHunk {
+            header: "@@ -9,4 +9,4 @@".to_string(),
+            lines,
+            old_start: 9,
+            old_count: 4,
+            new_start: 9,
+            new_count: 4,
+        }];
+        DiffFile {
+            old_path: Some(PathBuf::from("old.rs")),
+            new_path: Some(PathBuf::from("new.rs")),
+            status: FileStatus::Modified,
+            content_hash: DiffFile::compute_content_hash(&hunks),
+            hunks,
+            is_binary: false,
+            is_too_large: false,
+            is_commit_message: false,
+        }
+    }
+
+    #[test]
+    fn should_capture_context_from_the_exact_requested_side() {
+        let file = changed_file();
+
+        let old = file.anchor_context(LineSide::Old, 10, 10, 2).unwrap();
+        let new = file.anchor_context(LineSide::New, 10, 10, 2).unwrap();
+
+        assert_eq!(old.selected, vec!["old selected"]);
+        assert_eq!(new.selected, vec!["new selected"]);
+        assert_eq!(old.before, vec!["before"]);
+        assert_eq!(new.after, vec!["after", "range end"]);
+    }
+
+    #[test]
+    fn should_capture_complete_contiguous_range_or_return_none() {
+        let file = changed_file();
+
+        let context = file.anchor_context(LineSide::New, 10, 12, 2).unwrap();
+
+        assert_eq!(context.selected, vec!["new selected", "after", "range end"]);
+        assert!(file.anchor_context(LineSide::New, 10, 13, 2).is_none());
+    }
+
+    #[test]
+    fn should_preserve_absolute_side_lines_without_joining_hunk_gaps() {
+        let file = changed_file();
+
+        let old = file.side_content_for_relocation(LineSide::Old);
+        let new = file.side_content_for_relocation(LineSide::New);
+
+        assert_eq!(old[9], "old selected");
+        assert_eq!(new[9], "new selected");
+        assert_ne!(old[7], "before");
+        assert_ne!(new[7], "before");
     }
 }

@@ -13,7 +13,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
-use crate::forge::traits::{ForgeBackend, ForgeFileLinesRequest, ForgeRepository, PrSessionKey};
+use crate::forge::traits::{
+    ForgeBackend, ForgeFileLinesRequest, ForgeFileSide, ForgeRepository, PrSessionKey,
+};
+use crate::model::comment::LineSide;
 use crate::model::{DiffLine, FileStatus};
 use crate::vcs::VcsBackend;
 
@@ -41,6 +44,30 @@ pub trait ContextProvider {
         new_path: Option<&PathBuf>,
         file_status: FileStatus,
     ) -> Result<u32>;
+
+    fn fetch_context_lines_for_side(
+        &self,
+        old_path: Option<&PathBuf>,
+        new_path: Option<&PathBuf>,
+        file_status: FileStatus,
+        side: LineSide,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<Vec<DiffLine>> {
+        let _ = side;
+        self.fetch_context_lines(old_path, new_path, file_status, start_line, end_line)
+    }
+
+    fn file_line_count_for_side(
+        &self,
+        old_path: Option<&PathBuf>,
+        new_path: Option<&PathBuf>,
+        file_status: FileStatus,
+        side: LineSide,
+    ) -> Result<u32> {
+        let _ = side;
+        self.file_line_count(old_path, new_path, file_status)
+    }
 }
 
 /// Adapter over a `VcsBackend`. Picks the appropriate display path (new on
@@ -48,6 +75,9 @@ pub trait ContextProvider {
 pub struct VcsContextProvider<'a> {
     pub vcs: &'a dyn VcsBackend,
     pub ref_commit: Option<String>,
+    pub old_ref_commit: Option<String>,
+    pub old_side_available: bool,
+    pub new_side_available: bool,
 }
 
 impl ContextProvider for VcsContextProvider<'_> {
@@ -87,6 +117,63 @@ impl ContextProvider for VcsContextProvider<'_> {
         };
         self.vcs
             .file_line_count(path, file_status, self.ref_commit.as_deref())
+    }
+
+    fn fetch_context_lines_for_side(
+        &self,
+        old_path: Option<&PathBuf>,
+        new_path: Option<&PathBuf>,
+        file_status: FileStatus,
+        side: LineSide,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<Vec<DiffLine>> {
+        if (side == LineSide::Old && !self.old_side_available)
+            || (side == LineSide::New && !self.new_side_available)
+        {
+            return Err(crate::error::TuicrError::UnsupportedOperation(format!(
+                "{side:?} side content is unavailable for this diff source"
+            )));
+        }
+        let path: &Path = match side {
+            LineSide::Old => old_path.or(new_path),
+            LineSide::New => new_path.or(old_path),
+        }
+        .map(PathBuf::as_path)
+        .ok_or_else(|| crate::error::TuicrError::InvalidInput("diff path is missing".into()))?;
+        let revision = match side {
+            LineSide::Old => self.old_ref_commit.as_deref(),
+            LineSide::New => self.ref_commit.as_deref(),
+        };
+        self.vcs
+            .fetch_context_lines(path, file_status, revision, start_line, end_line)
+    }
+
+    fn file_line_count_for_side(
+        &self,
+        old_path: Option<&PathBuf>,
+        new_path: Option<&PathBuf>,
+        file_status: FileStatus,
+        side: LineSide,
+    ) -> Result<u32> {
+        if (side == LineSide::Old && !self.old_side_available)
+            || (side == LineSide::New && !self.new_side_available)
+        {
+            return Err(crate::error::TuicrError::UnsupportedOperation(format!(
+                "{side:?} side content is unavailable for this diff source"
+            )));
+        }
+        let path: &Path = match side {
+            LineSide::Old => old_path.or(new_path),
+            LineSide::New => new_path.or(old_path),
+        }
+        .map(PathBuf::as_path)
+        .ok_or_else(|| crate::error::TuicrError::InvalidInput("diff path is missing".into()))?;
+        let revision = match side {
+            LineSide::Old => self.old_ref_commit.as_deref(),
+            LineSide::New => self.ref_commit.as_deref(),
+        };
+        self.vcs.file_line_count(path, file_status, revision)
     }
 }
 
@@ -164,6 +251,60 @@ impl ContextProvider for ForgeContextProvider<'_> {
             end_line: 0,
         };
         self.forge.file_line_count(request)
+    }
+
+    fn fetch_context_lines_for_side(
+        &self,
+        old_path: Option<&PathBuf>,
+        new_path: Option<&PathBuf>,
+        file_status: FileStatus,
+        side: LineSide,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<Vec<DiffLine>> {
+        let side = match side {
+            LineSide::Old => ForgeFileSide::Base,
+            LineSide::New => ForgeFileSide::Head,
+        };
+        let Some(path) = ForgeFileLinesRequest::path_for_side(side, old_path, new_path) else {
+            return Ok(Vec::new());
+        };
+        self.forge.fetch_file_lines(ForgeFileLinesRequest {
+            repository: self.repository.clone(),
+            base_sha: self.base_sha.clone(),
+            head_sha: self.head_sha.clone(),
+            path,
+            status: file_status,
+            side,
+            start_line,
+            end_line,
+        })
+    }
+
+    fn file_line_count_for_side(
+        &self,
+        old_path: Option<&PathBuf>,
+        new_path: Option<&PathBuf>,
+        file_status: FileStatus,
+        side: LineSide,
+    ) -> Result<u32> {
+        let side = match side {
+            LineSide::Old => ForgeFileSide::Base,
+            LineSide::New => ForgeFileSide::Head,
+        };
+        let Some(path) = ForgeFileLinesRequest::path_for_side(side, old_path, new_path) else {
+            return Ok(0);
+        };
+        self.forge.file_line_count(ForgeFileLinesRequest {
+            repository: self.repository.clone(),
+            base_sha: self.base_sha.clone(),
+            head_sha: self.head_sha.clone(),
+            path,
+            status: file_status,
+            side,
+            start_line: 0,
+            end_line: 0,
+        })
     }
 }
 

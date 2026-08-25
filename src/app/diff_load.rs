@@ -429,6 +429,7 @@ impl App {
         self.clear_expanded_gaps();
         self.sort_files_by_directory(true);
         self.expand_all_dirs();
+        self.refresh_thread_anchors_after_diff_change()?;
         self.rebuild_annotations();
 
         Ok(())
@@ -464,6 +465,7 @@ impl App {
         self.clear_expanded_gaps();
         self.sort_files_by_directory(true);
         self.expand_all_dirs();
+        self.refresh_thread_anchors_after_diff_change()?;
         self.rebuild_annotations();
 
         Ok(())
@@ -499,6 +501,7 @@ impl App {
         self.clear_expanded_gaps();
         self.sort_files_by_directory(true);
         self.expand_all_dirs();
+        self.refresh_thread_anchors_after_diff_change()?;
         self.rebuild_annotations();
 
         Ok(())
@@ -579,6 +582,7 @@ impl App {
         }
 
         self.diff_files = diff_files;
+        self.refresh_thread_anchors_after_diff_change()?;
         self.clear_expanded_gaps();
 
         self.sort_files_by_directory(false);
@@ -691,6 +695,7 @@ impl App {
             self.insert_commit_message_if_single();
             self.sort_files_by_directory(true);
             self.expand_all_dirs();
+            self.refresh_thread_anchors_after_diff_change()?;
             self.rebuild_annotations();
         }
         Ok(())

@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "feature": "capture-provider-neutral-context-for-local-line-and-range",
+  "current_generation": 1,
+  "generations": [
+    {
+      "generation": 1,
+      "generation_id": "pg_ad2ac0066e38",
+      "kind": "record",
+      "patch_sha256": "e267f2df141305fde494d9ac8403e8ce3ff0154c7225583b7c30460242d9f92c",
+      "git_patch_id": "d6eacb34e917e4dbd91af5c030978e38b05e0acd",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "9c4556d4eebfe9b065245f5dc9ce31fc4bcee90eca05ec53a9c781376ddea074",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/001-record.patch",
+      "base_commit": "c40f55201bc606e0a5dfd97336fafa7a74bf8f62",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "docs/wayfinder/tickets/classify-local-anchor-shifts.md",
+        "src/app/diff_load.rs",
+        "src/app/gaps.rs",
+        "src/app/init.rs",
+        "src/app/pr.rs",
+        "src/app/tests/thread_navigator_tests.rs",
+        "src/app/threads.rs",
+        "src/forge/context.rs",
+        "src/model/diff_types.rs",
+        "src/model/review.rs",
+        "src/model/thread.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    }
+  ]
+}

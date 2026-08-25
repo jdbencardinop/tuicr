@@ -494,6 +494,36 @@ impl Anchor {
         self.state == AnchorState::Ambiguous
     }
 
+    pub fn has_context(&self) -> bool {
+        self.context.is_some()
+    }
+
+    /// Attach creation-time context to a context-free line/range anchor.
+    pub fn attach_context(&mut self, context: AnchorContext) -> Result<()> {
+        if self.context.is_some() {
+            return Err(TuicrError::InvalidInput(
+                "anchor already has relocation context".to_string(),
+            ));
+        }
+        let expected_span = match &self.target {
+            AnchorTarget::Line { .. } => 1,
+            AnchorTarget::Range { start, end, .. } => (end - start + 1) as usize,
+            AnchorTarget::Review | AnchorTarget::File { .. } => {
+                return Err(TuicrError::InvalidInput(
+                    "review and file anchors do not accept relocation context".to_string(),
+                ));
+            }
+        };
+        if context.selected.len() != expected_span {
+            return Err(TuicrError::InvalidInput(format!(
+                "anchor spans {expected_span} line(s) but context captured {} selected line(s)",
+                context.selected.len()
+            )));
+        }
+        self.context = Some(context);
+        Ok(())
+    }
+
     /// Monotonically apply a provider's explicit stale/outdated signal.
     ///
     /// Only a still-current anchor changes. Existing local `Stale` or
@@ -753,6 +783,10 @@ impl Thread {
 
     pub fn anchor(&self) -> &Anchor {
         &self.anchor
+    }
+
+    pub fn attach_anchor_context(&mut self, context: AnchorContext) -> Result<()> {
+        self.anchor.attach_context(context)
     }
 
     /// All comments in the thread, root first, then replies in append

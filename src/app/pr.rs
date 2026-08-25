@@ -549,7 +549,7 @@ impl App {
             let backend = create_forge_backend(&request.repository, local_checkout.clone());
             let previous_message = self.message.clone();
             self.enter_pr_diff_mode(backend, opened)?;
-            self.refresh_thread_anchors_after_head_advance();
+            self.refresh_thread_anchors_after_head_advance()?;
             self.spawn_pr_threads_fetch(&details_for_threads, local_checkout);
             if self.message == previous_message {
                 self.set_message("Reloaded PR at new head".to_string());
@@ -631,7 +631,7 @@ impl App {
             let details_for_threads = opened.details.clone();
             let opened = self.opened_pr_with_new_head_session(opened)?;
             self.enter_pr_diff_mode(backend, opened)?;
-            self.refresh_thread_anchors_after_head_advance();
+            self.refresh_thread_anchors_after_head_advance()?;
             // Fetch remote threads against the new head. Local threads
             // carried forward from the old head (see
             // `reviewed_state_carried_forward`) are never dropped here —

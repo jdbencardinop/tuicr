@@ -568,6 +568,7 @@ impl App {
         app.sort_files_by_directory(true);
         app.expand_all_dirs();
         app.populate_file_line_count_cache();
+        app.refresh_thread_anchors_after_diff_change()?;
         app.rebuild_annotations();
         app.detect_forge_repository();
         Ok(app)

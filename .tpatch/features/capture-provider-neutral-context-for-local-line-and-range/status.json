@@ -1,0 +1,23 @@
+{
+  "id": "capture-provider-neutral-context-for-local-line-and-range",
+  "slug": "capture-provider-neutral-context-for-local-line-and-range",
+  "title": "Capture provider-neutral context for local line and range anchors, relocate them uniquely on diff/head refresh, and mark zero/multiple matches stale or ambiguous without nearest-line guessing.",
+  "state": "applied",
+  "compatibility": "unknown",
+  "requested_at": "2026-08-25T01:13:27Z",
+  "updated_at": "2026-08-25T01:55:47Z",
+  "last_command": "record",
+  "notes": "landed at 2026-08-25T01:55:47Z",
+  "apply": {
+    "completed_at": "2026-08-25T01:54:59Z",
+    "base_commit": "c40f55201bc606e0a5dfd97336fafa7a74bf8f62",
+    "has_patch": true
+  },
+  "reconcile": {},
+  "verify": {
+    "verified_at": "2026-08-25T01:55:09Z",
+    "passed": true,
+    "recipe_hash_at_verify": "9c4556d4eebfe9b065245f5dc9ce31fc4bcee90eca05ec53a9c781376ddea074",
+    "patch_hash_at_verify": "e267f2df141305fde494d9ac8403e8ce3ff0154c7225583b7c30460242d9f92c"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "slug": "capture-provider-neutral-context-for-local-line-and-range",
+  "completed_at": "2026-08-25T01:54:59Z",
+  "base_commit": "c40f55201bc606e0a5dfd97336fafa7a74bf8f62",
+  "has_patch": true,
+  "validation_status": "passed",
+  "validation_notes": "tpatch test — command: cargo fmt --all --check \u0026\u0026 cargo clippy --all-targets --all-features -- -D warnings \u0026\u0026 cargo test --locked --lib -- --skip should_discover_worktree_with_relativeworktrees_extension --skip default_preference_routes_reftable_repo_to_cli"
+}

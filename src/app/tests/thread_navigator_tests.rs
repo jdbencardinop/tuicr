@@ -10,9 +10,69 @@ use crate::app::*;
 use crate::model::{DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin};
 use crate::review_store::{AddCommentRequest, CommentTarget, add_comment_to_session};
 use crate::vcs::traits::VcsType;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 struct DummyVcs {
     info: VcsInfo,
+}
+
+struct ReloadVcs {
+    info: VcsInfo,
+    reloaded_files: Vec<DiffFile>,
+    initial_content: Vec<String>,
+    reloaded_content: Vec<String>,
+    reloaded: AtomicBool,
+}
+
+impl VcsBackend for ReloadVcs {
+    fn info(&self) -> &VcsInfo {
+        &self.info
+    }
+
+    fn get_working_tree_diff(&self, _highlighter: &SyntaxHighlighter) -> Result<Vec<DiffFile>> {
+        self.reloaded.store(true, Ordering::SeqCst);
+        Ok(self.reloaded_files.clone())
+    }
+
+    fn fetch_context_lines(
+        &self,
+        _file_path: &Path,
+        _file_status: FileStatus,
+        _ref_commit: Option<&str>,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<Vec<DiffLine>> {
+        let content = if self.reloaded.load(Ordering::SeqCst) {
+            &self.reloaded_content
+        } else {
+            &self.initial_content
+        };
+        Ok((start_line..=end_line)
+            .filter_map(|line| {
+                content.get(line as usize - 1).map(|content| DiffLine {
+                    origin: LineOrigin::Context,
+                    content: content.clone(),
+                    old_lineno: Some(line),
+                    new_lineno: Some(line),
+                    highlighted_spans: None,
+                })
+            })
+            .collect())
+    }
+
+    fn file_line_count(
+        &self,
+        _file_path: &Path,
+        _file_status: FileStatus,
+        _ref_commit: Option<&str>,
+    ) -> Result<u32> {
+        let content = if self.reloaded.load(Ordering::SeqCst) {
+            &self.reloaded_content
+        } else {
+            &self.initial_content
+        };
+        Ok(content.len() as u32)
+    }
 }
 
 impl VcsBackend for DummyVcs {
@@ -85,6 +145,7 @@ fn make_hunk(new_start: u32, new_count: u32) -> DiffHunk {
             highlighted_spans: None,
         });
     }
+
     DiffHunk {
         header: format!("@@ -{new_start},{new_count} +{new_start},{new_count} @@"),
         lines,
@@ -93,6 +154,194 @@ fn make_hunk(new_start: u32, new_count: u32) -> DiffHunk {
         new_start,
         new_count,
     }
+}
+
+fn full_context_file(path: &str, content: &[String]) -> DiffFile {
+    let lines: Vec<_> = content
+        .iter()
+        .enumerate()
+        .map(|(index, content)| DiffLine {
+            origin: LineOrigin::Context,
+            content: content.clone(),
+            old_lineno: Some(index as u32 + 1),
+            new_lineno: Some(index as u32 + 1),
+            highlighted_spans: None,
+        })
+        .collect();
+    let hunks = vec![DiffHunk {
+        header: format!("@@ -1,{} +1,{} @@", lines.len(), lines.len()),
+        lines,
+        old_start: 1,
+        old_count: content.len() as u32,
+        new_start: 1,
+        new_count: content.len() as u32,
+    }];
+    DiffFile {
+        old_path: Some(PathBuf::from(path)),
+        new_path: Some(PathBuf::from(path)),
+        status: FileStatus::Modified,
+        content_hash: DiffFile::compute_content_hash(&hunks),
+        hunks,
+        is_binary: false,
+        is_too_large: false,
+        is_commit_message: false,
+    }
+}
+
+#[test]
+fn should_capture_new_comment_context_and_move_visible_annotation_on_local_reload() {
+    let path = PathBuf::from("src/review-policy.ts");
+    let original: Vec<String> = (1..=80).map(|line| format!("line_{line}")).collect();
+    let original_file = full_context_file(path.to_str().unwrap(), &original);
+    let mut updated: Vec<String> = (1..=5).map(|line| format!("inserted_{line}")).collect();
+    updated.extend(original.clone());
+    let updated_file = full_context_file(path.to_str().unwrap(), &updated);
+    let vcs_info = VcsInfo {
+        root_path: PathBuf::from("/tmp"),
+        head_commit: "head".to_string(),
+        branch_name: Some("main".to_string()),
+        vcs_type: VcsType::Git,
+    };
+    let mut session = ReviewSession::new(
+        vcs_info.root_path.clone(),
+        vcs_info.head_commit.clone(),
+        vcs_info.branch_name.clone(),
+        SessionDiffSource::WorkingTree,
+    );
+    session.add_diff_file(&original_file);
+    let mut app = App::build(
+        Box::new(ReloadVcs {
+            info: vcs_info.clone(),
+            reloaded_files: vec![updated_file],
+            initial_content: original,
+            reloaded_content: updated,
+            reloaded: AtomicBool::new(false),
+        }),
+        vcs_info,
+        Theme::dark(),
+        None,
+        false,
+        vec![original_file],
+        session,
+        DiffSource::WorkingTree,
+        InputMode::Normal,
+        Vec::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    add_comment_to_session(
+        &mut app.session,
+        AddCommentRequest {
+            target: CommentTarget::Line {
+                path: path.clone(),
+                line: 42,
+                side: LineSide::New,
+            },
+            content: "follow this line".to_string(),
+            comment_type: CommentType::None,
+            author: "reviewer".to_string(),
+            commit_id: None,
+        },
+    )
+    .unwrap();
+    app.mirror_new_comments_as_threads();
+    assert!(app.session.threads()[0].thread.anchor().has_context());
+
+    app.reload_diff_files().unwrap();
+
+    assert!(
+        app.session.files[&path].line_comments.contains_key(&47),
+        "legacy rendering shadow should follow the canonical durable anchor"
+    );
+    assert!(app.line_annotations.iter().any(|annotation| matches!(
+        annotation,
+        AnnotatedLine::LineComment {
+            line: 47,
+            side: LineSide::New,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn should_relocate_persisted_context_anchor_during_cold_app_build() {
+    let path = PathBuf::from("src/review-policy.ts");
+    let original: Vec<String> = (1..=80).map(|line| format!("line_{line}")).collect();
+    let original_file = full_context_file(path.to_str().unwrap(), &original);
+    let mut updated: Vec<String> = (1..=5).map(|line| format!("inserted_{line}")).collect();
+    updated.extend(original.clone());
+    let updated_file = full_context_file(path.to_str().unwrap(), &updated);
+    let vcs_info = VcsInfo {
+        root_path: PathBuf::from("/tmp"),
+        head_commit: "head".to_string(),
+        branch_name: Some("main".to_string()),
+        vcs_type: VcsType::Git,
+    };
+    let mut session = ReviewSession::new(
+        vcs_info.root_path.clone(),
+        vcs_info.head_commit.clone(),
+        vcs_info.branch_name.clone(),
+        SessionDiffSource::WorkingTree,
+    );
+    session.add_diff_file(&original_file);
+    add_comment_to_session(
+        &mut session,
+        AddCommentRequest {
+            target: CommentTarget::Line {
+                path: path.clone(),
+                line: 42,
+                side: LineSide::New,
+            },
+            content: "persisted note".to_string(),
+            comment_type: CommentType::None,
+            author: "reviewer".to_string(),
+            commit_id: None,
+        },
+    )
+    .unwrap();
+    session.migrate_legacy_comments_to_threads();
+    let refs: Vec<&str> = original.iter().map(String::as_str).collect();
+    let thread_id = session.threads()[0].id().clone();
+    session
+        .find_thread_mut(&thread_id)
+        .unwrap()
+        .thread
+        .attach_anchor_context(crate::model::AnchorContext::capture(&refs, 41, 41, 2).unwrap())
+        .unwrap();
+    session.add_diff_file(&updated_file);
+
+    let app = App::build(
+        Box::new(ReloadVcs {
+            info: vcs_info.clone(),
+            reloaded_files: vec![updated_file.clone()],
+            initial_content: updated.clone(),
+            reloaded_content: updated,
+            reloaded: AtomicBool::new(true),
+        }),
+        vcs_info,
+        Theme::dark(),
+        None,
+        false,
+        vec![updated_file],
+        session,
+        DiffSource::WorkingTree,
+        InputMode::Normal,
+        Vec::new(),
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert!(app.session.files[&path].line_comments.contains_key(&47));
+    assert!(app.line_annotations.iter().any(|annotation| matches!(
+        annotation,
+        AnnotatedLine::LineComment {
+            line: 47,
+            side: LineSide::New,
+            ..
+        }
+    )));
 }
 
 fn make_file(path: &str, hunks: Vec<DiffHunk>) -> DiffFile {

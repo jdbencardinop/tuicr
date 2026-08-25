@@ -1,0 +1,1389 @@
+diff --git a/docs/wayfinder/tickets/classify-local-anchor-shifts.md b/docs/wayfinder/tickets/classify-local-anchor-shifts.md
+index 3b4c36a..6bd1237 100644
+--- a/docs/wayfinder/tickets/classify-local-anchor-shifts.md
++++ b/docs/wayfinder/tickets/classify-local-anchor-shifts.md
+@@ -3,8 +3,8 @@ id: classify-local-anchor-shifts
+ title: Classify local anchors after head shifts
+ type: prototype
+ mode: AFK
+-status: open
+-owner:
++status: closed
++owner: copilot
+ blocked_by: []
+ ---
+ 
+@@ -26,3 +26,34 @@ tests, and the fixed behavior is rerun in the real WSL TUI.
+ The 2026-08-11 WSL run observed both upstream and the fork rendering the saved
+ line-42 comment on `policy_rule_037` after `policy_rule_042` moved to line 47.
+ See `validate-wsl-baseline.md`.
++
++## Resolution
++
++**Closed 2026-08-25 — pass.** TUI-created local line/range threads now capture
++bounded provider-neutral context from the exact displayed old/new side.
++Startup, local `:e`, source-selection changes, and PR head advances re-evaluate
++context-bearing anchors against trustworthy side content. One exact match
++relocates the complete anchor; zero or multiple matches retain the last known
++legacy row with the existing stale/ambiguous status, never a nearest-line
++guess.
++
++Durable threads remain canonical, while uniquely relocated current anchors
++re-key their legacy compatibility shadows so rendering, navigation, CLI
++inspection, and persistence agree. Migration recognizes the immutable root
++comment ID before the line-derived legacy thread ID, preventing a relocated
++shadow from creating a duplicate thread on the next load.
++
++Focused regressions cover file, line, range, old/new side, 42-to-47 movement,
++zero/multiple matches, cold startup, local reload, visible annotations,
++persistence, and repeat migration. Formatting, clippy with warnings denied,
++and the 1,666-test locked library suite supported by Ubuntu Git 2.43 passed;
++the only excluded tests are the two already-documented Git 2.48 fixtures.
++
++The real Ubuntu 24.04/WSL2 TUI rerun used the public synthetic fixture and
++isolated XDG state. After a TUI-authored comment on
++`policy_rule_042` at line 42, the five-line shift plus `:e` showed
++`policy_rule_037` unannotated at line 42 and the comment attached to
++`policy_rule_042` at line 47. After exit, `review comments` and
++`review thread list` each reported line 47 with one open thread. Raw local
++output remains only under the ignored
++`artifacts/raw/local-anchor-20260825/` superproject path.
+diff --git a/src/app/diff_load.rs b/src/app/diff_load.rs
+index 52066e0..20e6a0c 100644
+--- a/src/app/diff_load.rs
++++ b/src/app/diff_load.rs
+@@ -429,6 +429,7 @@ impl App {
+         self.clear_expanded_gaps();
+         self.sort_files_by_directory(true);
+         self.expand_all_dirs();
++        self.refresh_thread_anchors_after_diff_change()?;
+         self.rebuild_annotations();
+ 
+         Ok(())
+@@ -464,6 +465,7 @@ impl App {
+         self.clear_expanded_gaps();
+         self.sort_files_by_directory(true);
+         self.expand_all_dirs();
++        self.refresh_thread_anchors_after_diff_change()?;
+         self.rebuild_annotations();
+ 
+         Ok(())
+@@ -499,6 +501,7 @@ impl App {
+         self.clear_expanded_gaps();
+         self.sort_files_by_directory(true);
+         self.expand_all_dirs();
++        self.refresh_thread_anchors_after_diff_change()?;
+         self.rebuild_annotations();
+ 
+         Ok(())
+@@ -579,6 +582,7 @@ impl App {
+         }
+ 
+         self.diff_files = diff_files;
++        self.refresh_thread_anchors_after_diff_change()?;
+         self.clear_expanded_gaps();
+ 
+         self.sort_files_by_directory(false);
+@@ -691,6 +695,7 @@ impl App {
+             self.insert_commit_message_if_single();
+             self.sort_files_by_directory(true);
+             self.expand_all_dirs();
++            self.refresh_thread_anchors_after_diff_change()?;
+             self.rebuild_annotations();
+         }
+         Ok(())
+diff --git a/src/app/gaps.rs b/src/app/gaps.rs
+index 798a049..cfcee58 100644
+--- a/src/app/gaps.rs
++++ b/src/app/gaps.rs
+@@ -352,9 +352,17 @@ impl App {
+                 head_sha: pr.key.head_sha.clone(),
+             })
+         } else {
++            let old_side_available = matches!(
++                self.diff_source,
++                DiffSource::WorkingTree | DiffSource::Staged | DiffSource::StagedAndUnstaged
++            );
++            let new_side_available = !matches!(self.diff_source, DiffSource::Staged);
+             Box::new(VcsContextProvider {
+                 vcs: self.vcs.as_ref(),
+                 ref_commit: self.ref_commit().map(|s| s.to_string()),
++                old_ref_commit: old_side_available.then(|| self.vcs_info.head_commit.clone()),
++                old_side_available,
++                new_side_available,
+             })
+         }
+     }
+diff --git a/src/app/init.rs b/src/app/init.rs
+index a384a5f..94d1149 100644
+--- a/src/app/init.rs
++++ b/src/app/init.rs
+@@ -568,6 +568,7 @@ impl App {
+         app.sort_files_by_directory(true);
+         app.expand_all_dirs();
+         app.populate_file_line_count_cache();
++        app.refresh_thread_anchors_after_diff_change()?;
+         app.rebuild_annotations();
+         app.detect_forge_repository();
+         Ok(app)
+diff --git a/src/app/pr.rs b/src/app/pr.rs
+index c20ce23..b10c827 100644
+--- a/src/app/pr.rs
++++ b/src/app/pr.rs
+@@ -549,7 +549,7 @@ impl App {
+             let backend = create_forge_backend(&request.repository, local_checkout.clone());
+             let previous_message = self.message.clone();
+             self.enter_pr_diff_mode(backend, opened)?;
+-            self.refresh_thread_anchors_after_head_advance();
++            self.refresh_thread_anchors_after_head_advance()?;
+             self.spawn_pr_threads_fetch(&details_for_threads, local_checkout);
+             if self.message == previous_message {
+                 self.set_message("Reloaded PR at new head".to_string());
+@@ -631,7 +631,7 @@ impl App {
+             let details_for_threads = opened.details.clone();
+             let opened = self.opened_pr_with_new_head_session(opened)?;
+             self.enter_pr_diff_mode(backend, opened)?;
+-            self.refresh_thread_anchors_after_head_advance();
++            self.refresh_thread_anchors_after_head_advance()?;
+             // Fetch remote threads against the new head. Local threads
+             // carried forward from the old head (see
+             // `reviewed_state_carried_forward`) are never dropped here —
+diff --git a/src/app/tests/thread_navigator_tests.rs b/src/app/tests/thread_navigator_tests.rs
+index 890cbe7..2412ff2 100644
+--- a/src/app/tests/thread_navigator_tests.rs
++++ b/src/app/tests/thread_navigator_tests.rs
+@@ -10,11 +10,71 @@ use crate::app::*;
+ use crate::model::{DiffFile, DiffHunk, DiffLine, FileStatus, LineOrigin};
+ use crate::review_store::{AddCommentRequest, CommentTarget, add_comment_to_session};
+ use crate::vcs::traits::VcsType;
++use std::sync::atomic::{AtomicBool, Ordering};
+ 
+ struct DummyVcs {
+     info: VcsInfo,
+ }
+ 
++struct ReloadVcs {
++    info: VcsInfo,
++    reloaded_files: Vec<DiffFile>,
++    initial_content: Vec<String>,
++    reloaded_content: Vec<String>,
++    reloaded: AtomicBool,
++}
++
++impl VcsBackend for ReloadVcs {
++    fn info(&self) -> &VcsInfo {
++        &self.info
++    }
++
++    fn get_working_tree_diff(&self, _highlighter: &SyntaxHighlighter) -> Result<Vec<DiffFile>> {
++        self.reloaded.store(true, Ordering::SeqCst);
++        Ok(self.reloaded_files.clone())
++    }
++
++    fn fetch_context_lines(
++        &self,
++        _file_path: &Path,
++        _file_status: FileStatus,
++        _ref_commit: Option<&str>,
++        start_line: u32,
++        end_line: u32,
++    ) -> Result<Vec<DiffLine>> {
++        let content = if self.reloaded.load(Ordering::SeqCst) {
++            &self.reloaded_content
++        } else {
++            &self.initial_content
++        };
++        Ok((start_line..=end_line)
++            .filter_map(|line| {
++                content.get(line as usize - 1).map(|content| DiffLine {
++                    origin: LineOrigin::Context,
++                    content: content.clone(),
++                    old_lineno: Some(line),
++                    new_lineno: Some(line),
++                    highlighted_spans: None,
++                })
++            })
++            .collect())
++    }
++
++    fn file_line_count(
++        &self,
++        _file_path: &Path,
++        _file_status: FileStatus,
++        _ref_commit: Option<&str>,
++    ) -> Result<u32> {
++        let content = if self.reloaded.load(Ordering::SeqCst) {
++            &self.reloaded_content
++        } else {
++            &self.initial_content
++        };
++        Ok(content.len() as u32)
++    }
++}
++
+ impl VcsBackend for DummyVcs {
+     fn info(&self) -> &VcsInfo {
+         &self.info
+@@ -85,6 +145,7 @@ fn make_hunk(new_start: u32, new_count: u32) -> DiffHunk {
+             highlighted_spans: None,
+         });
+     }
++
+     DiffHunk {
+         header: format!("@@ -{new_start},{new_count} +{new_start},{new_count} @@"),
+         lines,
+@@ -95,6 +156,194 @@ fn make_hunk(new_start: u32, new_count: u32) -> DiffHunk {
+     }
+ }
+ 
++fn full_context_file(path: &str, content: &[String]) -> DiffFile {
++    let lines: Vec<_> = content
++        .iter()
++        .enumerate()
++        .map(|(index, content)| DiffLine {
++            origin: LineOrigin::Context,
++            content: content.clone(),
++            old_lineno: Some(index as u32 + 1),
++            new_lineno: Some(index as u32 + 1),
++            highlighted_spans: None,
++        })
++        .collect();
++    let hunks = vec![DiffHunk {
++        header: format!("@@ -1,{} +1,{} @@", lines.len(), lines.len()),
++        lines,
++        old_start: 1,
++        old_count: content.len() as u32,
++        new_start: 1,
++        new_count: content.len() as u32,
++    }];
++    DiffFile {
++        old_path: Some(PathBuf::from(path)),
++        new_path: Some(PathBuf::from(path)),
++        status: FileStatus::Modified,
++        content_hash: DiffFile::compute_content_hash(&hunks),
++        hunks,
++        is_binary: false,
++        is_too_large: false,
++        is_commit_message: false,
++    }
++}
++
++#[test]
++fn should_capture_new_comment_context_and_move_visible_annotation_on_local_reload() {
++    let path = PathBuf::from("src/review-policy.ts");
++    let original: Vec<String> = (1..=80).map(|line| format!("line_{line}")).collect();
++    let original_file = full_context_file(path.to_str().unwrap(), &original);
++    let mut updated: Vec<String> = (1..=5).map(|line| format!("inserted_{line}")).collect();
++    updated.extend(original.clone());
++    let updated_file = full_context_file(path.to_str().unwrap(), &updated);
++    let vcs_info = VcsInfo {
++        root_path: PathBuf::from("/tmp"),
++        head_commit: "head".to_string(),
++        branch_name: Some("main".to_string()),
++        vcs_type: VcsType::Git,
++    };
++    let mut session = ReviewSession::new(
++        vcs_info.root_path.clone(),
++        vcs_info.head_commit.clone(),
++        vcs_info.branch_name.clone(),
++        SessionDiffSource::WorkingTree,
++    );
++    session.add_diff_file(&original_file);
++    let mut app = App::build(
++        Box::new(ReloadVcs {
++            info: vcs_info.clone(),
++            reloaded_files: vec![updated_file],
++            initial_content: original,
++            reloaded_content: updated,
++            reloaded: AtomicBool::new(false),
++        }),
++        vcs_info,
++        Theme::dark(),
++        None,
++        false,
++        vec![original_file],
++        session,
++        DiffSource::WorkingTree,
++        InputMode::Normal,
++        Vec::new(),
++        None,
++        None,
++    )
++    .unwrap();
++    add_comment_to_session(
++        &mut app.session,
++        AddCommentRequest {
++            target: CommentTarget::Line {
++                path: path.clone(),
++                line: 42,
++                side: LineSide::New,
++            },
++            content: "follow this line".to_string(),
++            comment_type: CommentType::None,
++            author: "reviewer".to_string(),
++            commit_id: None,
++        },
++    )
++    .unwrap();
++    app.mirror_new_comments_as_threads();
++    assert!(app.session.threads()[0].thread.anchor().has_context());
++
++    app.reload_diff_files().unwrap();
++
++    assert!(
++        app.session.files[&path].line_comments.contains_key(&47),
++        "legacy rendering shadow should follow the canonical durable anchor"
++    );
++    assert!(app.line_annotations.iter().any(|annotation| matches!(
++        annotation,
++        AnnotatedLine::LineComment {
++            line: 47,
++            side: LineSide::New,
++            ..
++        }
++    )));
++}
++
++#[test]
++fn should_relocate_persisted_context_anchor_during_cold_app_build() {
++    let path = PathBuf::from("src/review-policy.ts");
++    let original: Vec<String> = (1..=80).map(|line| format!("line_{line}")).collect();
++    let original_file = full_context_file(path.to_str().unwrap(), &original);
++    let mut updated: Vec<String> = (1..=5).map(|line| format!("inserted_{line}")).collect();
++    updated.extend(original.clone());
++    let updated_file = full_context_file(path.to_str().unwrap(), &updated);
++    let vcs_info = VcsInfo {
++        root_path: PathBuf::from("/tmp"),
++        head_commit: "head".to_string(),
++        branch_name: Some("main".to_string()),
++        vcs_type: VcsType::Git,
++    };
++    let mut session = ReviewSession::new(
++        vcs_info.root_path.clone(),
++        vcs_info.head_commit.clone(),
++        vcs_info.branch_name.clone(),
++        SessionDiffSource::WorkingTree,
++    );
++    session.add_diff_file(&original_file);
++    add_comment_to_session(
++        &mut session,
++        AddCommentRequest {
++            target: CommentTarget::Line {
++                path: path.clone(),
++                line: 42,
++                side: LineSide::New,
++            },
++            content: "persisted note".to_string(),
++            comment_type: CommentType::None,
++            author: "reviewer".to_string(),
++            commit_id: None,
++        },
++    )
++    .unwrap();
++    session.migrate_legacy_comments_to_threads();
++    let refs: Vec<&str> = original.iter().map(String::as_str).collect();
++    let thread_id = session.threads()[0].id().clone();
++    session
++        .find_thread_mut(&thread_id)
++        .unwrap()
++        .thread
++        .attach_anchor_context(crate::model::AnchorContext::capture(&refs, 41, 41, 2).unwrap())
++        .unwrap();
++    session.add_diff_file(&updated_file);
++
++    let app = App::build(
++        Box::new(ReloadVcs {
++            info: vcs_info.clone(),
++            reloaded_files: vec![updated_file.clone()],
++            initial_content: updated.clone(),
++            reloaded_content: updated,
++            reloaded: AtomicBool::new(true),
++        }),
++        vcs_info,
++        Theme::dark(),
++        None,
++        false,
++        vec![updated_file],
++        session,
++        DiffSource::WorkingTree,
++        InputMode::Normal,
++        Vec::new(),
++        None,
++        None,
++    )
++    .unwrap();
++
++    assert!(app.session.files[&path].line_comments.contains_key(&47));
++    assert!(app.line_annotations.iter().any(|annotation| matches!(
++        annotation,
++        AnnotatedLine::LineComment {
++            line: 47,
++            side: LineSide::New,
++            ..
++        }
++    )));
++}
++
+ fn make_file(path: &str, hunks: Vec<DiffHunk>) -> DiffFile {
+     let content_hash = DiffFile::compute_content_hash(&hunks);
+     DiffFile {
+diff --git a/src/app/threads.rs b/src/app/threads.rs
+index 2fe9e2d..2e2f9e3 100644
+--- a/src/app/threads.rs
++++ b/src/app/threads.rs
+@@ -5,7 +5,11 @@
+ 
+ use super::*;
+ use crate::forge::context::ContextProvider;
+-use crate::model::thread::{AuthorKind, ThreadAuthor, ThreadComment, ThreadId, ThreadStatus};
++use crate::model::comment::LineSide;
++use crate::model::thread::{
++    AnchorContext, AnchorSide, AnchorTarget, AuthorKind, ThreadAuthor, ThreadComment, ThreadId,
++    ThreadStatus,
++};
+ 
+ impl App {
+     /// Mint a canonical [`crate::model::thread::Thread`] mirroring every
+@@ -27,7 +31,70 @@ impl App {
+     /// (root + replies) instead of one-thread-per-comment, so calling it
+     /// after every save is safe and cheap for interactive TUI use.
+     pub(in crate::app) fn mirror_new_comments_as_threads(&mut self) {
++        let existing: HashSet<ThreadId> = self
++            .session
++            .threads()
++            .iter()
++            .map(|thread| thread.id().clone())
++            .collect();
+         self.session.migrate_legacy_comments_to_threads();
++
++        let candidates: Vec<(ThreadId, PathBuf, AnchorSide, u32, u32)> = self
++            .session
++            .threads()
++            .iter()
++            .filter(|thread| !existing.contains(thread.id()))
++            .filter_map(|thread| {
++                let (path, side, start, end) = match thread.thread.anchor().target() {
++                    AnchorTarget::Line { path, side, line } => (path, *side, *line, *line),
++                    AnchorTarget::Range {
++                        path,
++                        side,
++                        start,
++                        end,
++                    } => (path, *side, *start, *end),
++                    AnchorTarget::Review | AnchorTarget::File { .. } => return None,
++                };
++                Some((thread.id().clone(), PathBuf::from(path), side, start, end))
++            })
++            .collect();
++
++        let contexts: Vec<(ThreadId, AnchorContext)> = {
++            let provider = self.context_provider();
++            candidates
++                .into_iter()
++                .filter_map(|(thread_id, path, anchor_side, start, end)| {
++                    let side = match anchor_side {
++                        AnchorSide::Old => LineSide::Old,
++                        AnchorSide::New => LineSide::New,
++                        AnchorSide::Both => return None,
++                    };
++                    let file = self
++                        .diff_files
++                        .iter()
++                        .find(|file| file.display_path() == &path)?;
++                    let context = Self::fetch_full_file_lines(provider.as_ref(), file, anchor_side)
++                        .ok()
++                        .and_then(|lines| {
++                            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
++                            let start_idx = usize::try_from(start).ok()?.checked_sub(1)?;
++                            let end_idx = usize::try_from(end).ok()?.checked_sub(1)?;
++                            AnchorContext::capture(&refs, start_idx, end_idx, 2).ok()
++                        })
++                        .or_else(|| file.anchor_context(side, start, end, 2))?;
++                    Some((thread_id, context))
++                })
++                .collect()
++        };
++
++        for (thread_id, context) in contexts {
++            self.session
++                .find_thread_mut(&thread_id)
++                .expect("newly migrated thread remains in the session")
++                .thread
++                .attach_anchor_context(context)
++                .expect("displayed anchor context matches the migrated target");
++        }
+     }
+ 
+     /// Re-run anchor relocation for every carried-forward thread whose
+@@ -43,83 +110,119 @@ impl App {
+     /// `ThreadAnchorRefresh::Frozen`), so this walks every thread rather
+     /// than pre-filtering by status.
+     ///
+-    /// Called only where an `App` instance (and therefore a
+-    /// `context_provider()`) already exists — i.e. the already-running PR
+-    /// reload paths (`finish_pr_reload`, `reload_pull_request_with_backend`).
+-    /// The cold-start path (`opened_pr_with_persisted_session`, run before
+-    /// an `App` exists) still carries every thread forward via
+-    /// `reviewed_state_carried_forward` but cannot refresh anchors yet —
+-    /// an acknowledged, honest limitation: no thread is ever lost, but its
+-    /// anchor state may be momentarily stale until the next call here.
+-    pub(in crate::app) fn refresh_thread_anchors_after_head_advance(&mut self) {
++    pub(in crate::app) fn refresh_thread_anchors_after_head_advance(&mut self) -> Result<bool> {
++        self.refresh_thread_anchors_after_diff_change()
++    }
++
++    pub(in crate::app) fn refresh_thread_anchors_after_diff_change(&mut self) -> Result<bool> {
+         if self.session.threads.is_empty() {
+-            return;
++            return Ok(false);
+         }
++        let before_threads = self.session.threads.clone();
+ 
+-        let mut content_by_path: HashMap<PathBuf, Vec<String>> = HashMap::new();
++        let mut content_by_anchor: HashMap<(PathBuf, AnchorSide), Vec<String>> = HashMap::new();
+         {
+             let file_by_path: HashMap<PathBuf, &DiffFile> = self
+                 .diff_files
+                 .iter()
+                 .map(|file| (file.display_path().clone(), file))
+                 .collect();
+-            let referenced_paths: std::collections::BTreeSet<PathBuf> = self
++            let referenced_anchors: HashSet<(PathBuf, AnchorSide)> = self
+                 .session
+                 .threads
+                 .iter()
+                 .filter_map(|persisted| {
+-                    persisted.thread.anchor().target().path().map(PathBuf::from)
++                    if !persisted.thread.anchor().has_context() {
++                        return None;
++                    }
++                    match persisted.thread.anchor().target() {
++                        AnchorTarget::Line { path, side, .. }
++                        | AnchorTarget::Range { path, side, .. } => {
++                            Some((PathBuf::from(path), *side))
++                        }
++                        AnchorTarget::Review | AnchorTarget::File { .. } => None,
++                    }
+                 })
+-                .filter(|path| file_by_path.contains_key(path))
++                .filter(|(path, _)| file_by_path.contains_key(path))
+                 .collect();
+ 
+             let provider = self.context_provider();
+-            for path in &referenced_paths {
++            for (path, side) in &referenced_anchors {
+                 let diff_file = file_by_path[path];
+-                if let Some(lines) = Self::fetch_full_file_lines(provider.as_ref(), diff_file) {
+-                    content_by_path.insert(path.clone(), lines);
+-                }
++                let lines = match Self::fetch_full_file_lines(provider.as_ref(), diff_file, *side) {
++                    Ok(lines) => lines,
++                    Err(TuicrError::UnsupportedOperation(_)) => {
++                        let side = match side {
++                            AnchorSide::Old => LineSide::Old,
++                            AnchorSide::New => LineSide::New,
++                            AnchorSide::Both => unreachable!(),
++                        };
++                        diff_file.side_content_for_relocation(side)
++                    }
++                    Err(_) => continue,
++                };
++                content_by_anchor.insert((path.clone(), *side), lines);
+             }
+         }
+ 
+         for persisted in self.session.threads.iter_mut() {
+-            let Some(path_str) = persisted.thread.anchor().target().path() else {
+-                continue;
++            let (path, side) = match persisted.thread.anchor().target() {
++                AnchorTarget::Line { path, side, .. } | AnchorTarget::Range { path, side, .. } => {
++                    (PathBuf::from(path), *side)
++                }
++                AnchorTarget::Review | AnchorTarget::File { .. } => continue,
+             };
+-            let path = PathBuf::from(path_str);
+-            let Some(lines) = content_by_path.get(&path) else {
++            let Some(lines) = content_by_anchor.get(&(path, side)) else {
+                 continue;
+             };
+             let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+-            let _ = persisted.refresh_anchor_with_remap(&refs, None);
++            persisted.refresh_anchor_with_remap(&refs, None)?;
++        }
++        let moved = self.session.sync_legacy_comment_locations_from_threads();
++        let changed = moved > 0 || self.session.threads != before_threads;
++        if changed {
++            self.save_current_session_merging_external()?;
+         }
++        Ok(changed)
+     }
+ 
+     /// Fetch every line of `diff_file` at the revision `provider` resolves
+     /// to (the new/head side for additions/modifications, the old/base
+     /// side for pure deletions — see `ContextProvider` implementations),
+     /// as plain strings suitable for `Anchor::relocate`/
+-    /// `refresh_anchor_with_remap`. Returns `None` if the fetch fails
+-    /// (e.g. transient network error against a forge); callers leave the
+-    /// affected threads' anchors untouched rather than treating a fetch
+-    /// failure as "file is empty" (which would falsely mark every anchor
+-    /// in it `Stale`).
++    /// `refresh_anchor_with_remap`. A source-specific
++    /// `UnsupportedOperation` lets callers fall back to exact displayed hunk
++    /// content; other failures leave anchors untouched.
+     fn fetch_full_file_lines(
+         provider: &dyn ContextProvider,
+         diff_file: &DiffFile,
+-    ) -> Option<Vec<String>> {
++        side: AnchorSide,
++    ) -> Result<Vec<String>> {
++        let side = match side {
++            AnchorSide::Old => LineSide::Old,
++            AnchorSide::New => LineSide::New,
++            AnchorSide::Both => {
++                return Err(TuicrError::UnsupportedOperation(
++                    "both-side anchor refresh is unavailable".to_string(),
++                ));
++            }
++        };
+         let old_path = diff_file.old_path.as_ref();
+         let new_path = diff_file.new_path.as_ref();
+-        let total = provider
+-            .file_line_count(old_path, new_path, diff_file.status)
+-            .ok()?;
++        let total =
++            provider.file_line_count_for_side(old_path, new_path, diff_file.status, side)?;
+         if total == 0 {
+-            return Some(Vec::new());
++            return Ok(Vec::new());
+         }
+-        let lines = provider
+-            .fetch_context_lines(old_path, new_path, diff_file.status, 1, total)
+-            .ok()?;
+-        Some(lines.into_iter().map(|line| line.content).collect())
++        let lines = provider.fetch_context_lines_for_side(
++            old_path,
++            new_path,
++            diff_file.status,
++            side,
++            1,
++            total,
++        )?;
++        Ok(lines.into_iter().map(|line| line.content).collect())
+     }
+ 
+     /// Resolve the durable thread under the cursor. Tries, in order:
+diff --git a/src/forge/context.rs b/src/forge/context.rs
+index 5339787..2b437c2 100644
+--- a/src/forge/context.rs
++++ b/src/forge/context.rs
+@@ -13,7 +13,10 @@
+ use std::path::{Path, PathBuf};
+ 
+ use crate::error::Result;
+-use crate::forge::traits::{ForgeBackend, ForgeFileLinesRequest, ForgeRepository, PrSessionKey};
++use crate::forge::traits::{
++    ForgeBackend, ForgeFileLinesRequest, ForgeFileSide, ForgeRepository, PrSessionKey,
++};
++use crate::model::comment::LineSide;
+ use crate::model::{DiffLine, FileStatus};
+ use crate::vcs::VcsBackend;
+ 
+@@ -41,6 +44,30 @@ pub trait ContextProvider {
+         new_path: Option<&PathBuf>,
+         file_status: FileStatus,
+     ) -> Result<u32>;
++
++    fn fetch_context_lines_for_side(
++        &self,
++        old_path: Option<&PathBuf>,
++        new_path: Option<&PathBuf>,
++        file_status: FileStatus,
++        side: LineSide,
++        start_line: u32,
++        end_line: u32,
++    ) -> Result<Vec<DiffLine>> {
++        let _ = side;
++        self.fetch_context_lines(old_path, new_path, file_status, start_line, end_line)
++    }
++
++    fn file_line_count_for_side(
++        &self,
++        old_path: Option<&PathBuf>,
++        new_path: Option<&PathBuf>,
++        file_status: FileStatus,
++        side: LineSide,
++    ) -> Result<u32> {
++        let _ = side;
++        self.file_line_count(old_path, new_path, file_status)
++    }
+ }
+ 
+ /// Adapter over a `VcsBackend`. Picks the appropriate display path (new on
+@@ -48,6 +75,9 @@ pub trait ContextProvider {
+ pub struct VcsContextProvider<'a> {
+     pub vcs: &'a dyn VcsBackend,
+     pub ref_commit: Option<String>,
++    pub old_ref_commit: Option<String>,
++    pub old_side_available: bool,
++    pub new_side_available: bool,
+ }
+ 
+ impl ContextProvider for VcsContextProvider<'_> {
+@@ -88,6 +118,63 @@ impl ContextProvider for VcsContextProvider<'_> {
+         self.vcs
+             .file_line_count(path, file_status, self.ref_commit.as_deref())
+     }
++
++    fn fetch_context_lines_for_side(
++        &self,
++        old_path: Option<&PathBuf>,
++        new_path: Option<&PathBuf>,
++        file_status: FileStatus,
++        side: LineSide,
++        start_line: u32,
++        end_line: u32,
++    ) -> Result<Vec<DiffLine>> {
++        if (side == LineSide::Old && !self.old_side_available)
++            || (side == LineSide::New && !self.new_side_available)
++        {
++            return Err(crate::error::TuicrError::UnsupportedOperation(format!(
++                "{side:?} side content is unavailable for this diff source"
++            )));
++        }
++        let path: &Path = match side {
++            LineSide::Old => old_path.or(new_path),
++            LineSide::New => new_path.or(old_path),
++        }
++        .map(PathBuf::as_path)
++        .ok_or_else(|| crate::error::TuicrError::InvalidInput("diff path is missing".into()))?;
++        let revision = match side {
++            LineSide::Old => self.old_ref_commit.as_deref(),
++            LineSide::New => self.ref_commit.as_deref(),
++        };
++        self.vcs
++            .fetch_context_lines(path, file_status, revision, start_line, end_line)
++    }
++
++    fn file_line_count_for_side(
++        &self,
++        old_path: Option<&PathBuf>,
++        new_path: Option<&PathBuf>,
++        file_status: FileStatus,
++        side: LineSide,
++    ) -> Result<u32> {
++        if (side == LineSide::Old && !self.old_side_available)
++            || (side == LineSide::New && !self.new_side_available)
++        {
++            return Err(crate::error::TuicrError::UnsupportedOperation(format!(
++                "{side:?} side content is unavailable for this diff source"
++            )));
++        }
++        let path: &Path = match side {
++            LineSide::Old => old_path.or(new_path),
++            LineSide::New => new_path.or(old_path),
++        }
++        .map(PathBuf::as_path)
++        .ok_or_else(|| crate::error::TuicrError::InvalidInput("diff path is missing".into()))?;
++        let revision = match side {
++            LineSide::Old => self.old_ref_commit.as_deref(),
++            LineSide::New => self.ref_commit.as_deref(),
++        };
++        self.vcs.file_line_count(path, file_status, revision)
++    }
+ }
+ 
+ /// Adapter over a `ForgeBackend` for PR review mode.
+@@ -165,6 +252,60 @@ impl ContextProvider for ForgeContextProvider<'_> {
+         };
+         self.forge.file_line_count(request)
+     }
++
++    fn fetch_context_lines_for_side(
++        &self,
++        old_path: Option<&PathBuf>,
++        new_path: Option<&PathBuf>,
++        file_status: FileStatus,
++        side: LineSide,
++        start_line: u32,
++        end_line: u32,
++    ) -> Result<Vec<DiffLine>> {
++        let side = match side {
++            LineSide::Old => ForgeFileSide::Base,
++            LineSide::New => ForgeFileSide::Head,
++        };
++        let Some(path) = ForgeFileLinesRequest::path_for_side(side, old_path, new_path) else {
++            return Ok(Vec::new());
++        };
++        self.forge.fetch_file_lines(ForgeFileLinesRequest {
++            repository: self.repository.clone(),
++            base_sha: self.base_sha.clone(),
++            head_sha: self.head_sha.clone(),
++            path,
++            status: file_status,
++            side,
++            start_line,
++            end_line,
++        })
++    }
++
++    fn file_line_count_for_side(
++        &self,
++        old_path: Option<&PathBuf>,
++        new_path: Option<&PathBuf>,
++        file_status: FileStatus,
++        side: LineSide,
++    ) -> Result<u32> {
++        let side = match side {
++            LineSide::Old => ForgeFileSide::Base,
++            LineSide::New => ForgeFileSide::Head,
++        };
++        let Some(path) = ForgeFileLinesRequest::path_for_side(side, old_path, new_path) else {
++            return Ok(0);
++        };
++        self.forge.file_line_count(ForgeFileLinesRequest {
++            repository: self.repository.clone(),
++            base_sha: self.base_sha.clone(),
++            head_sha: self.head_sha.clone(),
++            path,
++            status: file_status,
++            side,
++            start_line: 0,
++            end_line: 0,
++        })
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/src/model/diff_types.rs b/src/model/diff_types.rs
+index 61625c1..8647d74 100644
+--- a/src/model/diff_types.rs
++++ b/src/model/diff_types.rs
+@@ -4,6 +4,7 @@ use std::{collections::HashMap, path::PathBuf};
+ 
+ use crate::hash::Fnv1aHasher;
+ use crate::model::comment::LineSide;
++use crate::model::thread::AnchorContext;
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "lowercase")]
+@@ -82,6 +83,101 @@ impl DiffHunk {
+ }
+ 
+ impl DiffFile {
++    /// Capture bounded, contiguous context for an inclusive anchor range on
++    /// one exact side of this displayed diff.
++    pub fn anchor_context(
++        &self,
++        side: LineSide,
++        start: u32,
++        end: u32,
++        window: usize,
++    ) -> Option<AnchorContext> {
++        if start == 0 || end < start {
++            return None;
++        }
++
++        let mut side_lines = HashMap::new();
++        for line in self.hunks.iter().flat_map(|hunk| &hunk.lines) {
++            let line_number = match side {
++                LineSide::Old => line.old_lineno,
++                LineSide::New => line.new_lineno,
++            };
++            if let Some(line_number) = line_number {
++                side_lines
++                    .entry(line_number)
++                    .or_insert_with(|| line.content.clone());
++            }
++        }
++
++        let selected = (start..=end)
++            .map(|line| side_lines.get(&line).cloned())
++            .collect::<Option<Vec<_>>>()?;
++
++        let mut before = Vec::new();
++        let mut line = start;
++        for _ in 0..window {
++            let Some(previous) = line.checked_sub(1).filter(|line| *line > 0) else {
++                break;
++            };
++            let Some(content) = side_lines.get(&previous) else {
++                break;
++            };
++            before.push(content.clone());
++            line = previous;
++        }
++        before.reverse();
++
++        let mut after = Vec::new();
++        let mut line = end;
++        for _ in 0..window {
++            let Some(next) = line.checked_add(1) else {
++                break;
++            };
++            let Some(content) = side_lines.get(&next) else {
++                break;
++            };
++            after.push(content.clone());
++            line = next;
++        }
++
++        Some(AnchorContext {
++            before,
++            selected,
++            after,
++        })
++    }
++
++    /// Materialize the displayed lines for one side at their absolute line
++    /// numbers. Missing hunk gaps use a sentinel that cannot match displayed
++    /// content, so relocation may conservatively become stale but can never
++    /// invent adjacency across unrelated hunks.
++    pub fn side_content_for_relocation(&self, side: LineSide) -> Vec<String> {
++        let numbered: Vec<(u32, &str)> = self
++            .hunks
++            .iter()
++            .flat_map(|hunk| &hunk.lines)
++            .filter_map(|line| {
++                let line_number = match side {
++                    LineSide::Old => line.old_lineno,
++                    LineSide::New => line.new_lineno,
++                }?;
++                Some((line_number, line.content.as_str()))
++            })
++            .collect();
++        let Some(max_line) = numbered.iter().map(|(line, _)| *line).max() else {
++            return Vec::new();
++        };
++        let mut sentinel = "\0tuicr-unavailable-context\0".to_string();
++        while numbered.iter().any(|(_, content)| *content == sentinel) {
++            sentinel.push('\0');
++        }
++        let mut content = vec![sentinel; max_line as usize];
++        for (line, value) in numbered {
++            content[line as usize - 1] = value.to_string();
++        }
++        content
++    }
++
+     /// Stable key for a reviewed hunk.
+     ///
+     /// Unique hunk content ignores hunk header line numbers so unrelated
+@@ -225,3 +321,87 @@ fn write_hunk_content_hash(hasher: &mut Fnv1aHasher, lines: &[DiffLine]) {
+         hasher.write(b"\n");
+     }
+ }
++
++#[cfg(test)]
++mod anchor_context_tests {
++    use super::*;
++
++    fn line(
++        origin: LineOrigin,
++        content: &str,
++        old_lineno: Option<u32>,
++        new_lineno: Option<u32>,
++    ) -> DiffLine {
++        DiffLine {
++            origin,
++            content: content.to_string(),
++            old_lineno,
++            new_lineno,
++            highlighted_spans: None,
++        }
++    }
++
++    fn changed_file() -> DiffFile {
++        let lines = vec![
++            line(LineOrigin::Context, "before", Some(9), Some(9)),
++            line(LineOrigin::Deletion, "old selected", Some(10), None),
++            line(LineOrigin::Addition, "new selected", None, Some(10)),
++            line(LineOrigin::Context, "after", Some(11), Some(11)),
++            line(LineOrigin::Context, "range end", Some(12), Some(12)),
++        ];
++        let hunks = vec![DiffHunk {
++            header: "@@ -9,4 +9,4 @@".to_string(),
++            lines,
++            old_start: 9,
++            old_count: 4,
++            new_start: 9,
++            new_count: 4,
++        }];
++        DiffFile {
++            old_path: Some(PathBuf::from("old.rs")),
++            new_path: Some(PathBuf::from("new.rs")),
++            status: FileStatus::Modified,
++            content_hash: DiffFile::compute_content_hash(&hunks),
++            hunks,
++            is_binary: false,
++            is_too_large: false,
++            is_commit_message: false,
++        }
++    }
++
++    #[test]
++    fn should_capture_context_from_the_exact_requested_side() {
++        let file = changed_file();
++
++        let old = file.anchor_context(LineSide::Old, 10, 10, 2).unwrap();
++        let new = file.anchor_context(LineSide::New, 10, 10, 2).unwrap();
++
++        assert_eq!(old.selected, vec!["old selected"]);
++        assert_eq!(new.selected, vec!["new selected"]);
++        assert_eq!(old.before, vec!["before"]);
++        assert_eq!(new.after, vec!["after", "range end"]);
++    }
++
++    #[test]
++    fn should_capture_complete_contiguous_range_or_return_none() {
++        let file = changed_file();
++
++        let context = file.anchor_context(LineSide::New, 10, 12, 2).unwrap();
++
++        assert_eq!(context.selected, vec!["new selected", "after", "range end"]);
++        assert!(file.anchor_context(LineSide::New, 10, 13, 2).is_none());
++    }
++
++    #[test]
++    fn should_preserve_absolute_side_lines_without_joining_hunk_gaps() {
++        let file = changed_file();
++
++        let old = file.side_content_for_relocation(LineSide::Old);
++        let new = file.side_content_for_relocation(LineSide::New);
++
++        assert_eq!(old[9], "old selected");
++        assert_eq!(new[9], "new selected");
++        assert_ne!(old[7], "before");
++        assert_ne!(new[7], "before");
++    }
++}
+diff --git a/src/model/review.rs b/src/model/review.rs
+index 91b3b03..4dbcfd3 100644
+--- a/src/model/review.rs
++++ b/src/model/review.rs
+@@ -5,7 +5,7 @@ use std::path::PathBuf;
+ 
+ use super::comment::{Comment, LineRange};
+ use super::diff_types::{DiffFile, FileStatus};
+-use super::thread::{Anchor, AnchorSide, ThreadComment, ThreadId};
++use super::thread::{Anchor, AnchorSide, AnchorState, AnchorTarget, ThreadComment, ThreadId};
+ use super::thread_store::{self, CURRENT_SESSION_VERSION, PersistedThread};
+ use crate::forge::remote_comments::PrCommentsVisibility;
+ use crate::forge::traits::PrSessionKey;
+@@ -531,6 +531,114 @@ impl ReviewSession {
+         created
+     }
+ 
++    /// Move legacy line-comment shadows to the canonical location of their
++    /// uniquely current durable thread anchors.
++    pub fn sync_legacy_comment_locations_from_threads(&mut self) -> usize {
++        #[derive(Clone)]
++        struct Location {
++            path: PathBuf,
++            side: super::comment::LineSide,
++            range: LineRange,
++            is_range: bool,
++        }
++
++        let mut locations = HashMap::new();
++        for persisted in &self.threads {
++            if persisted.thread.anchor().state() != AnchorState::Current {
++                continue;
++            }
++            let location = match persisted.thread.anchor().target() {
++                AnchorTarget::Line { path, side, line } => {
++                    let side = match side {
++                        AnchorSide::Old => super::comment::LineSide::Old,
++                        AnchorSide::New => super::comment::LineSide::New,
++                        AnchorSide::Both => continue,
++                    };
++                    Location {
++                        path: PathBuf::from(path),
++                        side,
++                        range: LineRange::single(*line),
++                        is_range: false,
++                    }
++                }
++                AnchorTarget::Range {
++                    path,
++                    side,
++                    start,
++                    end,
++                } => {
++                    let side = match side {
++                        AnchorSide::Old => super::comment::LineSide::Old,
++                        AnchorSide::New => super::comment::LineSide::New,
++                        AnchorSide::Both => continue,
++                    };
++                    Location {
++                        path: PathBuf::from(path),
++                        side,
++                        range: LineRange::new(*start, *end),
++                        is_range: true,
++                    }
++                }
++                AnchorTarget::Review | AnchorTarget::File { .. } => continue,
++            };
++            for comment in persisted.thread.comments() {
++                locations.insert(comment.id().as_str().to_string(), location.clone());
++            }
++        }
++
++        let mut moved = 0;
++        for (path, file) in &mut self.files {
++            let mut buckets: Vec<_> = std::mem::take(&mut file.line_comments)
++                .into_iter()
++                .collect();
++            buckets.sort_by_key(|(line, _)| *line);
++            for (old_line, comments) in buckets {
++                for mut comment in comments {
++                    let destination = locations
++                        .get(&comment.id)
++                        .filter(|location| location.path == *path);
++                    let destination_line = destination
++                        .map(|location| location.range.end)
++                        .unwrap_or(old_line);
++                    if let Some(location) = destination.filter(|_| destination_line != old_line) {
++                        comment.side = Some(location.side);
++                        comment.line_range = location.is_range.then_some(location.range);
++                        if let Some(context) = &mut comment.line_context {
++                            match location.side {
++                                super::comment::LineSide::Old => {
++                                    context.old_line = Some(destination_line)
++                                }
++                                super::comment::LineSide::New => {
++                                    context.new_line = Some(destination_line)
++                                }
++                            }
++                        }
++                    }
++                    if destination_line != old_line {
++                        moved += 1;
++                    }
++                    file.line_comments
++                        .entry(destination_line)
++                        .or_default()
++                        .push(comment);
++                }
++            }
++        }
++        for file in self.files.values_mut() {
++            for comments in file.line_comments.values_mut() {
++                comments.sort_by(|left, right| {
++                    left.created_at
++                        .cmp(&right.created_at)
++                        .then_with(|| left.id.cmp(&right.id))
++                });
++            }
++        }
++        if moved > 0 {
++            self.updated_at = Utc::now();
++        }
++        moved
++    }
++
+     /// Idempotently ensure a single legacy comment with no reply concept
+     /// (`review_comments`/`file_comments`) is mirrored as its own thread.
+     /// Returns `1` if a new thread was created, `0` if a thread for this
+@@ -546,6 +654,14 @@ impl ReviewSession {
+         anchor: Anchor,
+         comment: &Comment,
+     ) -> usize {
++        if threads.iter().any(|thread| {
++            thread
++                .thread
++                .root()
++                .is_some_and(|root| root.id().as_str() == comment.id)
++        }) {
++            return 0;
++        }
+         let thread_id = thread_store::legacy_thread_id_for(&anchor, &comment.id);
+         if threads.iter().any(|thread| *thread.id() == thread_id) {
+             return 0;
+@@ -573,7 +689,13 @@ impl ReviewSession {
+     ) -> usize {
+         let thread_id = thread_store::legacy_thread_id_for(&anchor, &comments[0].id);
+ 
+-        if let Some(existing) = threads.iter_mut().find(|thread| *thread.id() == thread_id) {
++        if let Some(existing) = threads.iter_mut().find(|thread| {
++            *thread.id() == thread_id
++                || thread
++                    .thread
++                    .root()
++                    .is_some_and(|root| root.id().as_str() == comments[0].id)
++        }) {
+             let already_mirrored: std::collections::HashSet<&str> = existing
+                 .thread
+                 .comments()
+@@ -2283,5 +2405,120 @@ mod tests {
+                 "re-importing an unchanged remote thread twice must be a byte-identical no-op"
+             );
+         }
++
++        #[test]
++        fn should_move_legacy_shadow_from_line_42_to_47_after_unique_relocation() {
++            let mut session = test_session();
++            let path = PathBuf::from("src/review-policy.ts");
++            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
++            let comment = Comment::new("note".to_string(), CommentType::None, Some(LineSide::New));
++            let comment_id = comment.id.clone();
++            session
++                .get_file_mut(&path)
++                .unwrap()
++                .add_line_comment(42, comment);
++            session.migrate_legacy_comments_to_threads();
++
++            let original: Vec<String> = (1..=80).map(|line| format!("line_{line}")).collect();
++            let refs: Vec<&str> = original.iter().map(String::as_str).collect();
++            let context = crate::model::AnchorContext::capture(&refs, 41, 41, 2).unwrap();
++            session.threads[0]
++                .thread
++                .attach_anchor_context(context)
++                .unwrap();
++
++            let mut updated: Vec<String> = (1..=5).map(|line| format!("inserted_{line}")).collect();
++            updated.extend(original);
++            let refs: Vec<&str> = updated.iter().map(String::as_str).collect();
++            session.threads[0]
++                .refresh_anchor_with_remap(&refs, None)
++                .unwrap();
++
++            assert_eq!(session.sync_legacy_comment_locations_from_threads(), 1);
++            let review = session.files.get(&path).unwrap();
++            assert!(!review.line_comments.contains_key(&42));
++            assert_eq!(review.line_comments[&47][0].id, comment_id);
++            match session.threads()[0].thread.anchor().target() {
++                AnchorTarget::Line { line, .. } => assert_eq!(*line, 47),
++                other => panic!("expected line anchor, got {other:?}"),
++            }
++            assert_eq!(session.migrate_legacy_comments_to_threads(), 0);
++            assert_eq!(
++                session.threads().len(),
++                1,
++                "relocating the legacy shadow must not mint a second thread"
++            );
++        }
++
++        #[test]
++        fn should_leave_stale_legacy_shadow_at_last_known_line() {
++            let mut session = test_session();
++            let path = PathBuf::from("src/review-policy.ts");
++            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
++            session.get_file_mut(&path).unwrap().add_line_comment(
++                42,
++                Comment::new("note".to_string(), CommentType::None, Some(LineSide::New)),
++            );
++            session.migrate_legacy_comments_to_threads();
++
++            let original: Vec<String> = (1..=80).map(|line| format!("line_{line}")).collect();
++            let refs: Vec<&str> = original.iter().map(String::as_str).collect();
++            let context = crate::model::AnchorContext::capture(&refs, 41, 41, 2).unwrap();
++            session.threads[0]
++                .thread
++                .attach_anchor_context(context)
++                .unwrap();
++            session.threads[0]
++                .refresh_anchor_with_remap(&["different", "content"], None)
++                .unwrap();
++
++            assert_eq!(session.threads()[0].thread.status(), ThreadStatus::Stale);
++            assert_eq!(session.sync_legacy_comment_locations_from_threads(), 0);
++            assert!(
++                session
++                    .files
++                    .get(&path)
++                    .unwrap()
++                    .line_comments
++                    .contains_key(&42)
++            );
++        }
++
++        #[test]
++        fn should_move_range_shadow_and_preserve_inclusive_span() {
++            let mut session = test_session();
++            let path = PathBuf::from("src/catalog.ts");
++            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
++            let range = LineRange::new(30, 35);
++            session.get_file_mut(&path).unwrap().add_line_comment(
++                range.end,
++                Comment::new_with_range(
++                    "range note".to_string(),
++                    CommentType::None,
++                    Some(LineSide::Old),
++                    range,
++                ),
++            );
++            session.migrate_legacy_comments_to_threads();
++
++            let original: Vec<String> = (1..=80).map(|line| format!("line_{line}")).collect();
++            let refs: Vec<&str> = original.iter().map(String::as_str).collect();
++            let context = crate::model::AnchorContext::capture(&refs, 29, 34, 2).unwrap();
++            session.threads[0]
++                .thread
++                .attach_anchor_context(context)
++                .unwrap();
++            let mut updated = vec!["inserted_1".to_string(), "inserted_2".to_string()];
++            updated.extend(original);
++            let refs: Vec<&str> = updated.iter().map(String::as_str).collect();
++            session.threads[0]
++                .refresh_anchor_with_remap(&refs, None)
++                .unwrap();
++
++            assert_eq!(session.sync_legacy_comment_locations_from_threads(), 1);
++            let comment = &session.files.get(&path).unwrap().line_comments[&37][0];
++            assert_eq!(comment.line_range, Some(LineRange::new(32, 37)));
++            assert_eq!(comment.side, Some(LineSide::Old));
++        }
+     }
+ }
+diff --git a/src/model/thread.rs b/src/model/thread.rs
+index 43a21bb..20261b1 100644
+--- a/src/model/thread.rs
++++ b/src/model/thread.rs
+@@ -494,6 +494,36 @@ impl Anchor {
+         self.state == AnchorState::Ambiguous
+     }
+ 
++    pub fn has_context(&self) -> bool {
++        self.context.is_some()
++    }
++
++    /// Attach creation-time context to a context-free line/range anchor.
++    pub fn attach_context(&mut self, context: AnchorContext) -> Result<()> {
++        if self.context.is_some() {
++            return Err(TuicrError::InvalidInput(
++                "anchor already has relocation context".to_string(),
++            ));
++        }
++        let expected_span = match &self.target {
++            AnchorTarget::Line { .. } => 1,
++            AnchorTarget::Range { start, end, .. } => (end - start + 1) as usize,
++            AnchorTarget::Review | AnchorTarget::File { .. } => {
++                return Err(TuicrError::InvalidInput(
++                    "review and file anchors do not accept relocation context".to_string(),
++                ));
++            }
++        };
++        if context.selected.len() != expected_span {
++            return Err(TuicrError::InvalidInput(format!(
++                "anchor spans {expected_span} line(s) but context captured {} selected line(s)",
++                context.selected.len()
++            )));
++        }
++        self.context = Some(context);
++        Ok(())
++    }
++
+     /// Monotonically apply a provider's explicit stale/outdated signal.
+     ///
+     /// Only a still-current anchor changes. Existing local `Stale` or
+@@ -755,6 +785,10 @@ impl Thread {
+         &self.anchor
+     }
+ 
++    pub fn attach_anchor_context(&mut self, context: AnchorContext) -> Result<()> {
++        self.anchor.attach_context(context)
++    }
++
+     /// All comments in the thread, root first, then replies in append
+     /// order. Read-only: the only way to add to this list is
+     /// [`Self::reply`].

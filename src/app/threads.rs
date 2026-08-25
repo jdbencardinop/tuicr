@@ -5,7 +5,11 @@
 
 use super::*;
 use crate::forge::context::ContextProvider;
-use crate::model::thread::{AuthorKind, ThreadAuthor, ThreadComment, ThreadId, ThreadStatus};
+use crate::model::comment::LineSide;
+use crate::model::thread::{
+    AnchorContext, AnchorSide, AnchorTarget, AuthorKind, ThreadAuthor, ThreadComment, ThreadId,
+    ThreadStatus,
+};
 
 impl App {
     /// Mint a canonical [`crate::model::thread::Thread`] mirroring every
@@ -27,7 +31,70 @@ impl App {
     /// (root + replies) instead of one-thread-per-comment, so calling it
     /// after every save is safe and cheap for interactive TUI use.
     pub(in crate::app) fn mirror_new_comments_as_threads(&mut self) {
+        let existing: HashSet<ThreadId> = self
+            .session
+            .threads()
+            .iter()
+            .map(|thread| thread.id().clone())
+            .collect();
         self.session.migrate_legacy_comments_to_threads();
+
+        let candidates: Vec<(ThreadId, PathBuf, AnchorSide, u32, u32)> = self
+            .session
+            .threads()
+            .iter()
+            .filter(|thread| !existing.contains(thread.id()))
+            .filter_map(|thread| {
+                let (path, side, start, end) = match thread.thread.anchor().target() {
+                    AnchorTarget::Line { path, side, line } => (path, *side, *line, *line),
+                    AnchorTarget::Range {
+                        path,
+                        side,
+                        start,
+                        end,
+                    } => (path, *side, *start, *end),
+                    AnchorTarget::Review | AnchorTarget::File { .. } => return None,
+                };
+                Some((thread.id().clone(), PathBuf::from(path), side, start, end))
+            })
+            .collect();
+
+        let contexts: Vec<(ThreadId, AnchorContext)> = {
+            let provider = self.context_provider();
+            candidates
+                .into_iter()
+                .filter_map(|(thread_id, path, anchor_side, start, end)| {
+                    let side = match anchor_side {
+                        AnchorSide::Old => LineSide::Old,
+                        AnchorSide::New => LineSide::New,
+                        AnchorSide::Both => return None,
+                    };
+                    let file = self
+                        .diff_files
+                        .iter()
+                        .find(|file| file.display_path() == &path)?;
+                    let context = Self::fetch_full_file_lines(provider.as_ref(), file, anchor_side)
+                        .ok()
+                        .and_then(|lines| {
+                            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+                            let start_idx = usize::try_from(start).ok()?.checked_sub(1)?;
+                            let end_idx = usize::try_from(end).ok()?.checked_sub(1)?;
+                            AnchorContext::capture(&refs, start_idx, end_idx, 2).ok()
+                        })
+                        .or_else(|| file.anchor_context(side, start, end, 2))?;
+                    Some((thread_id, context))
+                })
+                .collect()
+        };
+
+        for (thread_id, context) in contexts {
+            self.session
+                .find_thread_mut(&thread_id)
+                .expect("newly migrated thread remains in the session")
+                .thread
+                .attach_anchor_context(context)
+                .expect("displayed anchor context matches the migrated target");
+        }
     }
 
     /// Re-run anchor relocation for every carried-forward thread whose
@@ -43,83 +110,119 @@ impl App {
     /// `ThreadAnchorRefresh::Frozen`), so this walks every thread rather
     /// than pre-filtering by status.
     ///
-    /// Called only where an `App` instance (and therefore a
-    /// `context_provider()`) already exists — i.e. the already-running PR
-    /// reload paths (`finish_pr_reload`, `reload_pull_request_with_backend`).
-    /// The cold-start path (`opened_pr_with_persisted_session`, run before
-    /// an `App` exists) still carries every thread forward via
-    /// `reviewed_state_carried_forward` but cannot refresh anchors yet —
-    /// an acknowledged, honest limitation: no thread is ever lost, but its
-    /// anchor state may be momentarily stale until the next call here.
-    pub(in crate::app) fn refresh_thread_anchors_after_head_advance(&mut self) {
-        if self.session.threads.is_empty() {
-            return;
-        }
+    pub(in crate::app) fn refresh_thread_anchors_after_head_advance(&mut self) -> Result<bool> {
+        self.refresh_thread_anchors_after_diff_change()
+    }
 
-        let mut content_by_path: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    pub(in crate::app) fn refresh_thread_anchors_after_diff_change(&mut self) -> Result<bool> {
+        if self.session.threads.is_empty() {
+            return Ok(false);
+        }
+        let before_threads = self.session.threads.clone();
+
+        let mut content_by_anchor: HashMap<(PathBuf, AnchorSide), Vec<String>> = HashMap::new();
         {
             let file_by_path: HashMap<PathBuf, &DiffFile> = self
                 .diff_files
                 .iter()
                 .map(|file| (file.display_path().clone(), file))
                 .collect();
-            let referenced_paths: std::collections::BTreeSet<PathBuf> = self
+            let referenced_anchors: HashSet<(PathBuf, AnchorSide)> = self
                 .session
                 .threads
                 .iter()
                 .filter_map(|persisted| {
-                    persisted.thread.anchor().target().path().map(PathBuf::from)
+                    if !persisted.thread.anchor().has_context() {
+                        return None;
+                    }
+                    match persisted.thread.anchor().target() {
+                        AnchorTarget::Line { path, side, .. }
+                        | AnchorTarget::Range { path, side, .. } => {
+                            Some((PathBuf::from(path), *side))
+                        }
+                        AnchorTarget::Review | AnchorTarget::File { .. } => None,
+                    }
                 })
-                .filter(|path| file_by_path.contains_key(path))
+                .filter(|(path, _)| file_by_path.contains_key(path))
                 .collect();
 
             let provider = self.context_provider();
-            for path in &referenced_paths {
+            for (path, side) in &referenced_anchors {
                 let diff_file = file_by_path[path];
-                if let Some(lines) = Self::fetch_full_file_lines(provider.as_ref(), diff_file) {
-                    content_by_path.insert(path.clone(), lines);
-                }
+                let lines = match Self::fetch_full_file_lines(provider.as_ref(), diff_file, *side) {
+                    Ok(lines) => lines,
+                    Err(TuicrError::UnsupportedOperation(_)) => {
+                        let side = match side {
+                            AnchorSide::Old => LineSide::Old,
+                            AnchorSide::New => LineSide::New,
+                            AnchorSide::Both => unreachable!(),
+                        };
+                        diff_file.side_content_for_relocation(side)
+                    }
+                    Err(_) => continue,
+                };
+                content_by_anchor.insert((path.clone(), *side), lines);
             }
         }
 
         for persisted in self.session.threads.iter_mut() {
-            let Some(path_str) = persisted.thread.anchor().target().path() else {
-                continue;
+            let (path, side) = match persisted.thread.anchor().target() {
+                AnchorTarget::Line { path, side, .. } | AnchorTarget::Range { path, side, .. } => {
+                    (PathBuf::from(path), *side)
+                }
+                AnchorTarget::Review | AnchorTarget::File { .. } => continue,
             };
-            let path = PathBuf::from(path_str);
-            let Some(lines) = content_by_path.get(&path) else {
+            let Some(lines) = content_by_anchor.get(&(path, side)) else {
                 continue;
             };
             let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-            let _ = persisted.refresh_anchor_with_remap(&refs, None);
+            persisted.refresh_anchor_with_remap(&refs, None)?;
         }
+        let moved = self.session.sync_legacy_comment_locations_from_threads();
+        let changed = moved > 0 || self.session.threads != before_threads;
+        if changed {
+            self.save_current_session_merging_external()?;
+        }
+        Ok(changed)
     }
 
     /// Fetch every line of `diff_file` at the revision `provider` resolves
     /// to (the new/head side for additions/modifications, the old/base
     /// side for pure deletions — see `ContextProvider` implementations),
     /// as plain strings suitable for `Anchor::relocate`/
-    /// `refresh_anchor_with_remap`. Returns `None` if the fetch fails
-    /// (e.g. transient network error against a forge); callers leave the
-    /// affected threads' anchors untouched rather than treating a fetch
-    /// failure as "file is empty" (which would falsely mark every anchor
-    /// in it `Stale`).
+    /// `refresh_anchor_with_remap`. A source-specific
+    /// `UnsupportedOperation` lets callers fall back to exact displayed hunk
+    /// content; other failures leave anchors untouched.
     fn fetch_full_file_lines(
         provider: &dyn ContextProvider,
         diff_file: &DiffFile,
-    ) -> Option<Vec<String>> {
+        side: AnchorSide,
+    ) -> Result<Vec<String>> {
+        let side = match side {
+            AnchorSide::Old => LineSide::Old,
+            AnchorSide::New => LineSide::New,
+            AnchorSide::Both => {
+                return Err(TuicrError::UnsupportedOperation(
+                    "both-side anchor refresh is unavailable".to_string(),
+                ));
+            }
+        };
         let old_path = diff_file.old_path.as_ref();
         let new_path = diff_file.new_path.as_ref();
-        let total = provider
-            .file_line_count(old_path, new_path, diff_file.status)
-            .ok()?;
+        let total =
+            provider.file_line_count_for_side(old_path, new_path, diff_file.status, side)?;
         if total == 0 {
-            return Some(Vec::new());
+            return Ok(Vec::new());
         }
-        let lines = provider
-            .fetch_context_lines(old_path, new_path, diff_file.status, 1, total)
-            .ok()?;
-        Some(lines.into_iter().map(|line| line.content).collect())
+        let lines = provider.fetch_context_lines_for_side(
+            old_path,
+            new_path,
+            diff_file.status,
+            side,
+            1,
+            total,
+        )?;
+        Ok(lines.into_iter().map(|line| line.content).collect())
     }
 
     /// Resolve the durable thread under the cursor. Tries, in order:

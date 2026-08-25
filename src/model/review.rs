@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use super::comment::{Comment, LineRange};
 use super::diff_types::{DiffFile, FileStatus};
-use super::thread::{Anchor, AnchorSide, ThreadComment, ThreadId};
+use super::thread::{Anchor, AnchorSide, AnchorState, AnchorTarget, ThreadComment, ThreadId};
 use super::thread_store::{self, CURRENT_SESSION_VERSION, PersistedThread};
 use crate::forge::remote_comments::PrCommentsVisibility;
 use crate::forge::traits::PrSessionKey;
@@ -531,6 +531,114 @@ impl ReviewSession {
         created
     }
 
+    /// Move legacy line-comment shadows to the canonical location of their
+    /// uniquely current durable thread anchors.
+    pub fn sync_legacy_comment_locations_from_threads(&mut self) -> usize {
+        #[derive(Clone)]
+        struct Location {
+            path: PathBuf,
+            side: super::comment::LineSide,
+            range: LineRange,
+            is_range: bool,
+        }
+
+        let mut locations = HashMap::new();
+        for persisted in &self.threads {
+            if persisted.thread.anchor().state() != AnchorState::Current {
+                continue;
+            }
+            let location = match persisted.thread.anchor().target() {
+                AnchorTarget::Line { path, side, line } => {
+                    let side = match side {
+                        AnchorSide::Old => super::comment::LineSide::Old,
+                        AnchorSide::New => super::comment::LineSide::New,
+                        AnchorSide::Both => continue,
+                    };
+                    Location {
+                        path: PathBuf::from(path),
+                        side,
+                        range: LineRange::single(*line),
+                        is_range: false,
+                    }
+                }
+                AnchorTarget::Range {
+                    path,
+                    side,
+                    start,
+                    end,
+                } => {
+                    let side = match side {
+                        AnchorSide::Old => super::comment::LineSide::Old,
+                        AnchorSide::New => super::comment::LineSide::New,
+                        AnchorSide::Both => continue,
+                    };
+                    Location {
+                        path: PathBuf::from(path),
+                        side,
+                        range: LineRange::new(*start, *end),
+                        is_range: true,
+                    }
+                }
+                AnchorTarget::Review | AnchorTarget::File { .. } => continue,
+            };
+            for comment in persisted.thread.comments() {
+                locations.insert(comment.id().as_str().to_string(), location.clone());
+            }
+        }
+
+        let mut moved = 0;
+        for (path, file) in &mut self.files {
+            let mut buckets: Vec<_> = std::mem::take(&mut file.line_comments)
+                .into_iter()
+                .collect();
+            buckets.sort_by_key(|(line, _)| *line);
+            for (old_line, comments) in buckets {
+                for mut comment in comments {
+                    let destination = locations
+                        .get(&comment.id)
+                        .filter(|location| location.path == *path);
+                    let destination_line = destination
+                        .map(|location| location.range.end)
+                        .unwrap_or(old_line);
+                    if let Some(location) = destination.filter(|_| destination_line != old_line) {
+                        comment.side = Some(location.side);
+                        comment.line_range = location.is_range.then_some(location.range);
+                        if let Some(context) = &mut comment.line_context {
+                            match location.side {
+                                super::comment::LineSide::Old => {
+                                    context.old_line = Some(destination_line)
+                                }
+                                super::comment::LineSide::New => {
+                                    context.new_line = Some(destination_line)
+                                }
+                            }
+                        }
+                    }
+                    if destination_line != old_line {
+                        moved += 1;
+                    }
+                    file.line_comments
+                        .entry(destination_line)
+                        .or_default()
+                        .push(comment);
+                }
+            }
+        }
+        for file in self.files.values_mut() {
+            for comments in file.line_comments.values_mut() {
+                comments.sort_by(|left, right| {
+                    left.created_at
+                        .cmp(&right.created_at)
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+            }
+        }
+        if moved > 0 {
+            self.updated_at = Utc::now();
+        }
+        moved
+    }
+
     /// Idempotently ensure a single legacy comment with no reply concept
     /// (`review_comments`/`file_comments`) is mirrored as its own thread.
     /// Returns `1` if a new thread was created, `0` if a thread for this
@@ -546,6 +654,14 @@ impl ReviewSession {
         anchor: Anchor,
         comment: &Comment,
     ) -> usize {
+        if threads.iter().any(|thread| {
+            thread
+                .thread
+                .root()
+                .is_some_and(|root| root.id().as_str() == comment.id)
+        }) {
+            return 0;
+        }
         let thread_id = thread_store::legacy_thread_id_for(&anchor, &comment.id);
         if threads.iter().any(|thread| *thread.id() == thread_id) {
             return 0;
@@ -573,7 +689,13 @@ impl ReviewSession {
     ) -> usize {
         let thread_id = thread_store::legacy_thread_id_for(&anchor, &comments[0].id);
 
-        if let Some(existing) = threads.iter_mut().find(|thread| *thread.id() == thread_id) {
+        if let Some(existing) = threads.iter_mut().find(|thread| {
+            *thread.id() == thread_id
+                || thread
+                    .thread
+                    .root()
+                    .is_some_and(|root| root.id().as_str() == comments[0].id)
+        }) {
             let already_mirrored: std::collections::HashSet<&str> = existing
                 .thread
                 .comments()
@@ -2282,6 +2404,121 @@ mod tests {
                 before, after,
                 "re-importing an unchanged remote thread twice must be a byte-identical no-op"
             );
+        }
+
+        #[test]
+        fn should_move_legacy_shadow_from_line_42_to_47_after_unique_relocation() {
+            let mut session = test_session();
+            let path = PathBuf::from("src/review-policy.ts");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+            let comment = Comment::new("note".to_string(), CommentType::None, Some(LineSide::New));
+            let comment_id = comment.id.clone();
+            session
+                .get_file_mut(&path)
+                .unwrap()
+                .add_line_comment(42, comment);
+            session.migrate_legacy_comments_to_threads();
+
+            let original: Vec<String> = (1..=80).map(|line| format!("line_{line}")).collect();
+            let refs: Vec<&str> = original.iter().map(String::as_str).collect();
+            let context = crate::model::AnchorContext::capture(&refs, 41, 41, 2).unwrap();
+            session.threads[0]
+                .thread
+                .attach_anchor_context(context)
+                .unwrap();
+
+            let mut updated: Vec<String> = (1..=5).map(|line| format!("inserted_{line}")).collect();
+            updated.extend(original);
+            let refs: Vec<&str> = updated.iter().map(String::as_str).collect();
+            session.threads[0]
+                .refresh_anchor_with_remap(&refs, None)
+                .unwrap();
+
+            assert_eq!(session.sync_legacy_comment_locations_from_threads(), 1);
+            let review = session.files.get(&path).unwrap();
+            assert!(!review.line_comments.contains_key(&42));
+            assert_eq!(review.line_comments[&47][0].id, comment_id);
+            match session.threads()[0].thread.anchor().target() {
+                AnchorTarget::Line { line, .. } => assert_eq!(*line, 47),
+                other => panic!("expected line anchor, got {other:?}"),
+            }
+            assert_eq!(session.migrate_legacy_comments_to_threads(), 0);
+            assert_eq!(
+                session.threads().len(),
+                1,
+                "relocating the legacy shadow must not mint a second thread"
+            );
+        }
+
+        #[test]
+        fn should_leave_stale_legacy_shadow_at_last_known_line() {
+            let mut session = test_session();
+            let path = PathBuf::from("src/review-policy.ts");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+            session.get_file_mut(&path).unwrap().add_line_comment(
+                42,
+                Comment::new("note".to_string(), CommentType::None, Some(LineSide::New)),
+            );
+            session.migrate_legacy_comments_to_threads();
+
+            let original: Vec<String> = (1..=80).map(|line| format!("line_{line}")).collect();
+            let refs: Vec<&str> = original.iter().map(String::as_str).collect();
+            let context = crate::model::AnchorContext::capture(&refs, 41, 41, 2).unwrap();
+            session.threads[0]
+                .thread
+                .attach_anchor_context(context)
+                .unwrap();
+            session.threads[0]
+                .refresh_anchor_with_remap(&["different", "content"], None)
+                .unwrap();
+
+            assert_eq!(session.threads()[0].thread.status(), ThreadStatus::Stale);
+            assert_eq!(session.sync_legacy_comment_locations_from_threads(), 0);
+            assert!(
+                session
+                    .files
+                    .get(&path)
+                    .unwrap()
+                    .line_comments
+                    .contains_key(&42)
+            );
+        }
+
+        #[test]
+        fn should_move_range_shadow_and_preserve_inclusive_span() {
+            let mut session = test_session();
+            let path = PathBuf::from("src/catalog.ts");
+            session.add_file(path.clone(), FileStatus::Modified, SOME_HASH);
+            let range = LineRange::new(30, 35);
+            session.get_file_mut(&path).unwrap().add_line_comment(
+                range.end,
+                Comment::new_with_range(
+                    "range note".to_string(),
+                    CommentType::None,
+                    Some(LineSide::Old),
+                    range,
+                ),
+            );
+            session.migrate_legacy_comments_to_threads();
+
+            let original: Vec<String> = (1..=80).map(|line| format!("line_{line}")).collect();
+            let refs: Vec<&str> = original.iter().map(String::as_str).collect();
+            let context = crate::model::AnchorContext::capture(&refs, 29, 34, 2).unwrap();
+            session.threads[0]
+                .thread
+                .attach_anchor_context(context)
+                .unwrap();
+            let mut updated = vec!["inserted_1".to_string(), "inserted_2".to_string()];
+            updated.extend(original);
+            let refs: Vec<&str> = updated.iter().map(String::as_str).collect();
+            session.threads[0]
+                .refresh_anchor_with_remap(&refs, None)
+                .unwrap();
+
+            assert_eq!(session.sync_legacy_comment_locations_from_threads(), 1);
+            let comment = &session.files.get(&path).unwrap().line_comments[&37][0];
+            assert_eq!(comment.line_range, Some(LineRange::new(32, 37)));
+            assert_eq!(comment.side, Some(LineSide::Old));
         }
     }
 }

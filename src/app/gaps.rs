@@ -352,9 +352,17 @@ impl App {
                 head_sha: pr.key.head_sha.clone(),
             })
         } else {
+            let old_side_available = matches!(
+                self.diff_source,
+                DiffSource::WorkingTree | DiffSource::Staged | DiffSource::StagedAndUnstaged
+            );
+            let new_side_available = !matches!(self.diff_source, DiffSource::Staged);
             Box::new(VcsContextProvider {
                 vcs: self.vcs.as_ref(),
                 ref_commit: self.ref_commit().map(|s| s.to_string()),
+                old_ref_commit: old_side_available.then(|| self.vcs_info.head_commit.clone()),
+                old_side_available,
+                new_side_available,
             })
         }
     }

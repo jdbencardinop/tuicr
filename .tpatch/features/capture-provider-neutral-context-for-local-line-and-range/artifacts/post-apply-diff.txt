@@ -1,0 +1,13 @@
+ .tpatch/FEATURES.md                                |   1 +
+ .../tickets/classify-local-anchor-shifts.md        |  35 ++-
+ src/app/diff_load.rs                               |   5 +
+ src/app/gaps.rs                                    |   8 +
+ src/app/init.rs                                    |   1 +
+ src/app/pr.rs                                      |   4 +-
+ src/app/tests/thread_navigator_tests.rs            | 249 +++++++++++++++++++++
+ src/app/threads.rs                                 | 179 +++++++++++----
+ src/forge/context.rs                               | 143 +++++++++++-
+ src/model/diff_types.rs                            | 180 +++++++++++++++
+ src/model/review.rs                                | 241 +++++++++++++++++++-
+ src/model/thread.rs                                |  34 +++
+ 12 files changed, 1035 insertions(+), 45 deletions(-)
