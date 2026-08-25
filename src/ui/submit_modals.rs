@@ -205,7 +205,54 @@ pub fn render_submit_confirm(frame: &mut Frame, app: &App) {
         )));
     }
 
-    if app.has_unpublished_thread_activity() {
+    if let Some(plan) = app.submit_durable_plan.as_ref() {
+        use crate::forge::dryrun::OperationOutcome;
+
+        let count = |matches: fn(&OperationOutcome) -> bool| {
+            plan.operations
+                .iter()
+                .filter(|operation| matches(&operation.outcome))
+                .count()
+        };
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("Durable GitLab operations: {}", plan.operations.len()),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!(
+            "Planned: {}  Emulated: {}",
+            count(|outcome| matches!(outcome, OperationOutcome::Planned)),
+            count(|outcome| matches!(outcome, OperationOutcome::Emulated { .. })),
+        )));
+        lines.push(Line::from(format!(
+            "Unsupported: {}  Stale: {}  Conflict: {}  Invalid: {}",
+            count(|outcome| matches!(outcome, OperationOutcome::Unsupported { .. })),
+            count(|outcome| matches!(outcome, OperationOutcome::Stale { .. })),
+            count(|outcome| matches!(outcome, OperationOutcome::Conflict { .. })),
+            count(|outcome| matches!(outcome, OperationOutcome::Invalid { .. })),
+        )));
+        if plan
+            .operations
+            .iter()
+            .any(|operation| matches!(operation.outcome, OperationOutcome::Emulated { .. }))
+        {
+            lines.push(Line::from(Span::styled(
+                "Emulated operations use the provider substitute shown by the capability profile.",
+                Style::default().fg(theme.pending),
+            )));
+        }
+        if plan.operations.iter().any(|operation| {
+            !matches!(
+                operation.outcome,
+                OperationOutcome::Planned | OperationOutcome::Emulated { .. }
+            )
+        }) {
+            lines.push(Line::from(Span::styled(
+                "Unsupported or unsafe operations will be skipped; supported operations still publish.",
+                Style::default().fg(theme.pending),
+            )));
+        }
+    } else if app.has_unpublished_thread_activity() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Note: thread replies/resolve/dismiss are local-only.",

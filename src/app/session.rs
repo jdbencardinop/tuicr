@@ -325,6 +325,65 @@ impl App {
             }
         }
 
+        // Provider mappings are publication checkpoints, not editable thread
+        // content. Merge externally changed mapping keys even when another
+        // local field on the same thread also changed; otherwise a local
+        // reply can make the whole-object merge above reject a freshly
+        // persisted provider ID and a retry can duplicate the remote write.
+        for (id, latest_thread) in &latest_threads {
+            let Some(current_thread) = current
+                .threads
+                .iter_mut()
+                .find(|thread| thread.id().as_str() == id)
+            else {
+                continue;
+            };
+            let base_mappings = base_threads.get(id).map(|thread| &thread.provider_mappings);
+            for (provider, latest_mapping) in &latest_thread.provider_mappings {
+                if provider.ends_with(":replies")
+                    && let Some(latest_replies) = latest_mapping.as_object()
+                {
+                    let base_replies = base_mappings
+                        .and_then(|mappings| mappings.get(provider))
+                        .and_then(|mapping| mapping.as_object());
+                    let mut merged = current_thread
+                        .provider_mappings
+                        .get(provider)
+                        .and_then(|mapping| mapping.as_object())
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut ledger_changed = false;
+                    for (comment_id, remote_id) in latest_replies {
+                        if base_replies.and_then(|replies| replies.get(comment_id))
+                            != Some(remote_id)
+                            && merged.get(comment_id) != Some(remote_id)
+                        {
+                            merged.insert(comment_id.clone(), remote_id.clone());
+                            ledger_changed = true;
+                            changed += 1;
+                        }
+                    }
+                    if ledger_changed {
+                        current_thread
+                            .provider_mappings
+                            .insert(provider.clone(), serde_json::Value::Object(merged));
+                    }
+                    continue;
+                }
+                let unchanged_externally = base_mappings
+                    .and_then(|mappings| mappings.get(provider))
+                    == Some(latest_mapping);
+                if !unchanged_externally
+                    && current_thread.provider_mappings.get(provider) != Some(latest_mapping)
+                {
+                    current_thread
+                        .provider_mappings
+                        .insert(provider.clone(), latest_mapping.clone());
+                    changed += 1;
+                }
+            }
+        }
+
         changed
     }
 

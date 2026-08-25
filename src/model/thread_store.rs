@@ -54,6 +54,12 @@ impl PersistedThread {
         self.thread.id()
     }
 
+    /// Legacy migrations use a stable, namespaced ID rather than a random
+    /// thread UUID. The prefix remains valid after anchor relocation.
+    pub fn is_legacy_mirror(&self) -> bool {
+        self.id().as_str().starts_with("legacy-thread:")
+    }
+
     /// Insert or overwrite this thread's mapping for `provider`. Calling
     /// this repeatedly with the same `provider` key is idempotent: the
     /// previous payload is replaced, never duplicated.

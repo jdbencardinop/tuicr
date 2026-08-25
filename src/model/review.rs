@@ -401,11 +401,9 @@ impl ReviewSession {
                 continue;
             }
             let persisted = thread_store::thread_from_remote(provider, remote);
-            match self
-                .threads
-                .iter()
-                .position(|existing| existing.id() == persisted.id())
-            {
+            match self.threads.iter().position(|existing| {
+                existing.id() == persisted.id() || existing.has_provider_id(provider, &remote.id)
+            }) {
                 Some(index) => {
                     thread_store::merge_remote_thread_into_existing(
                         &mut self.threads[index],
@@ -2042,12 +2040,50 @@ mod tests {
                     assert_eq!(path, "src/lib.rs");
                     assert_eq!(*line, 42);
                 }
+
                 other => panic!("expected a line anchor, got {other:?}"),
             }
 
             assert!(
                 session.threads()[0].has_provider_id("github", "R_1"),
                 "provider mapping must record the remote thread id"
+            );
+        }
+
+        #[test]
+        fn should_reconcile_remote_import_into_locally_published_thread_by_provider_id() {
+            let mut session = test_session();
+            let comment = Comment::new(
+                "published locally".to_string(),
+                crate::model::comment::CommentType::None,
+                Some(crate::model::comment::LineSide::New),
+            );
+            let anchor = Anchor::line("src/lib.rs", AnchorSide::New, 42);
+            let mut published = thread_store::thread_from_legacy_comment(anchor, &comment);
+            let published_id = published.id().clone();
+            published.upsert_provider_mapping(
+                "gitlab",
+                serde_json::json!({"id": "discussion-1", "is_resolved": false}),
+            );
+            session.threads.push(published);
+            let remote = remote_thread(
+                "discussion-1",
+                "src/lib.rs",
+                Some(42),
+                false,
+                false,
+                &[("alice", "published locally")],
+            );
+
+            let created =
+                session.import_remote_review_threads("gitlab", std::slice::from_ref(&remote));
+
+            assert_eq!(created, 0);
+            assert_eq!(session.threads.len(), 1);
+            assert_eq!(session.threads[0].id(), &published_id);
+            assert_eq!(
+                session.threads[0].thread.root().unwrap().author.kind,
+                AuthorKind::Remote
             );
         }
 

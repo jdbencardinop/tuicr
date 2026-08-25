@@ -271,6 +271,72 @@ fn should_not_resurrect_a_locally_deleted_thread_when_disk_is_unchanged() {
 }
 
 #[test]
+fn should_merge_publication_mapping_with_concurrent_local_reply() {
+    let mut base = test_session();
+    let thread = open_review_thread("alice", "root");
+    let thread_id = thread.id().clone();
+    base.threads.push(thread);
+    let mut current = base.clone();
+    let mut latest = base.clone();
+
+    current
+        .find_thread_mut(&thread_id)
+        .unwrap()
+        .thread
+        .reply(ThreadComment::new(
+            ThreadAuthor::human("alice"),
+            "local reply",
+        ));
+    latest
+        .find_thread_mut(&thread_id)
+        .unwrap()
+        .upsert_provider_mapping("gitlab", serde_json::json!({"id": "discussion-1"}));
+
+    App::merge_external_session_changes(&mut current, &base, &latest);
+
+    let merged = current.find_thread(&thread_id).unwrap();
+    assert_eq!(merged.thread.replies().count(), 1);
+    assert_eq!(
+        merged
+            .provider_mapping("gitlab")
+            .and_then(|mapping| mapping.get("id"))
+            .and_then(|id| id.as_str()),
+        Some("discussion-1")
+    );
+}
+
+#[test]
+fn should_union_concurrent_publication_reply_ledgers() {
+    let mut base = test_session();
+    let thread = open_review_thread("alice", "root");
+    let thread_id = thread.id().clone();
+    base.threads.push(thread);
+    let mut current = base.clone();
+    let mut latest = base.clone();
+
+    current
+        .find_thread_mut(&thread_id)
+        .unwrap()
+        .record_published_reply("gitlab", "local-a", "note-a");
+    latest
+        .find_thread_mut(&thread_id)
+        .unwrap()
+        .record_published_reply("gitlab", "local-b", "note-b");
+
+    App::merge_external_session_changes(&mut current, &base, &latest);
+
+    let merged = current.find_thread(&thread_id).unwrap();
+    assert_eq!(
+        merged.published_reply_id("gitlab", "local-a"),
+        Some("note-a")
+    );
+    assert_eq!(
+        merged.published_reply_id("gitlab", "local-b"),
+        Some("note-b")
+    );
+}
+
+#[test]
 fn should_reload_persisted_session_and_surface_external_thread_activity() {
     // End-to-end (not just the pure merge function): a poll/reload must
     // both merge the thread into `self.session` *and* report a non-zero

@@ -893,6 +893,9 @@ pub struct SubmitInFlightState {
     /// Source `Comment.id`s of review-level comments that were rendered into
     /// the review body.
     pub review_comment_ids: Vec<String>,
+    /// GitLab comments sent through the review call because their hidden
+    /// grouped root was outside the active commit selection.
+    pub legacy_fallback_comment_ids: Vec<String>,
     /// Display count of moved-to-summary items, used only by the success
     /// message (kept separate from `summary_comment_ids` so message wording
     /// doesn't accidentally drift if the id list is empty).
@@ -900,11 +903,22 @@ pub struct SubmitInFlightState {
     /// Head SHA at preflight — used as `commit_id` in the GitHub payload and
     /// to discard stale results if the user reloaded the PR mid-submit.
     pub head_sha_snapshot: String,
+    /// Cumulative provider head at dispatch, distinct from a strict commit
+    /// selector's inline-comment commit SHA.
+    pub pr_head_snapshot: String,
     /// Repository + PR identity. Lets the stale-result guard verify the
     /// result still applies to the same PR session.
     pub repository: crate::forge::traits::ForgeRepository,
     pub pr_number: u64,
     pub started_at: Instant,
+}
+
+/// Durable GitLab worker state returned to the main thread.
+#[derive(Debug)]
+pub struct DurableSubmitOutcome {
+    pub session: crate::model::review::ReviewSession,
+    pub report: crate::forge::publish::PublishReport,
+    pub recovery: std::result::Result<(), String>,
 }
 
 /// Result delivered from the create-review background thread.
@@ -915,6 +929,12 @@ pub enum PrSubmitEvent {
         pr_number: u64,
         head_sha: String,
         result: std::result::Result<crate::forge::traits::GhCreateReviewResponse, String>,
+    },
+    DurableDone {
+        repository: crate::forge::traits::ForgeRepository,
+        pr_number: u64,
+        head_sha: String,
+        result: Box<std::result::Result<DurableSubmitOutcome, String>>,
     },
 }
 
@@ -1169,6 +1189,13 @@ pub struct App {
     /// In-flight `:submit*` state. `None` outside the resolver + confirmation
     /// modal flow; preflight populates it.
     pub submit_state: Option<SubmitState>,
+    /// Exact durable publication input for a pending non-draft GitLab submit.
+    pub submit_durable_session: Option<crate::model::review::ReviewSession>,
+    /// Capability-aware preview executed unchanged after confirmation.
+    pub submit_durable_plan: Option<crate::forge::dryrun::DryRunPlan>,
+    /// Legacy inline comments that cannot be represented independently by
+    /// the grouped durable thread selected for this submit.
+    pub submit_legacy_fallback_ids: Vec<String>,
     /// Cursor row inside the bare-`:submit` action picker modal. Only
     /// meaningful while `input_mode == SubmitActionPicker`.
     pub submit_picker_cursor: usize,

@@ -1,0 +1,8 @@
+{
+  "slug": "wire-gitlab-durable-tui-publication",
+  "completed_at": "2026-08-25T03:39:51Z",
+  "base_commit": "5886486963db963affdaa69fa59626e1d4980366",
+  "has_patch": true,
+  "validation_status": "passed",
+  "validation_notes": "tpatch test — command: cargo test --locked --lib --no-fail-fast -- --skip should_discover_worktree_with_relativeworktrees_extension --skip default_preference_routes_reftable_repo_to_cli"
+}

@@ -22,12 +22,7 @@
 //! operation is naturally absent from that new plan, and nothing already
 //! published is ever resent.
 //!
-//! ## Explicitly not a live-publication entry point
-//!
-//! This module is reachable only from library code and tests — no CLI/TUI
-//! command wires it to a real transport in this change. Live validation
-//! against real GitHub/GitLab accounts remains a separate, still-blocked
-//! task (gated on approved sandbox provisioning).
+//! The TUI uses checkpointed execution for non-draft GitLab publication.
 
 use crate::error::{Result, TuicrError};
 use crate::forge::dryrun::{OperationKind, OperationOutcome, PlannedOperation};
@@ -63,6 +58,8 @@ pub struct PublishReport {
     /// Operations after the failure that were never attempted at all.
     /// Empty when `failed` is `None` (every operation was attempted).
     pub remaining: Vec<PlannedOperation>,
+    /// Response from the review-level operation, when one was executed.
+    pub review_response: Option<crate::forge::traits::GhCreateReviewResponse>,
 }
 
 impl PublishReport {
@@ -83,9 +80,10 @@ impl PublishReport {
 /// threads in place as each operation succeeds. `submit_body` is the
 /// review-level summary text used only for the plan's (at most one)
 /// `SubmitReview` operation — every per-thread comment was already posted
-/// individually via `CreateThread`/`Reply`, so the review submitted here
-/// carries no batched comments of its own (preserving the legacy `:submit`
-/// request shape otherwise unchanged; see [`ForgeBackend::create_review`]).
+/// individually via `CreateThread`/`Reply`. The standard entry point carries
+/// no batched comments; the checkpointed TUI variant may include a narrowly
+/// selected legacy fallback when a grouped durable root is outside the active
+/// commit selection.
 ///
 /// Stops at the first operation whose backend call returns `Err`, leaving
 /// every already-completed operation's state durably persisted in
@@ -100,6 +98,49 @@ pub fn execute_plan(
     plan: &crate::forge::dryrun::DryRunPlan,
     submit_body: &str,
 ) -> PublishReport {
+    execute_plan_with_checkpoint_and_comments(
+        backend,
+        pr,
+        session,
+        plan,
+        submit_body,
+        &[],
+        |_, _| Ok(()),
+    )
+}
+
+/// Execute `plan` and checkpoint the updated session after every successful
+/// operation before advancing to the next provider mutation.
+pub fn execute_plan_with_checkpoint(
+    backend: &dyn ForgeBackend,
+    pr: &PullRequestDetails,
+    session: &mut ReviewSession,
+    plan: &crate::forge::dryrun::DryRunPlan,
+    submit_body: &str,
+    checkpoint: impl FnMut(&ReviewSession, &PlannedOperation) -> Result<()>,
+) -> PublishReport {
+    execute_plan_with_checkpoint_and_comments(
+        backend,
+        pr,
+        session,
+        plan,
+        submit_body,
+        &[],
+        checkpoint,
+    )
+}
+
+/// Checkpointed execution variant that carries selected legacy inline
+/// fallbacks on the review-level operation.
+pub fn execute_plan_with_checkpoint_and_comments(
+    backend: &dyn ForgeBackend,
+    pr: &PullRequestDetails,
+    session: &mut ReviewSession,
+    plan: &crate::forge::dryrun::DryRunPlan,
+    submit_body: &str,
+    submit_comments: &[crate::forge::submit::InlineComment],
+    mut checkpoint: impl FnMut(&ReviewSession, &PlannedOperation) -> Result<()>,
+) -> PublishReport {
     let provider = plan.provider.provider_key();
     let mut report = PublishReport::default();
 
@@ -112,11 +153,28 @@ pub fn execute_plan(
             continue;
         }
 
-        let outcome = execute_one(backend, pr, session, provider, op, submit_body);
-        match outcome {
-            Ok(()) => report
-                .results
-                .push(ExecutedOperation::Completed(op.clone())),
+        match execute_one(
+            backend,
+            pr,
+            session,
+            provider,
+            op,
+            submit_body,
+            submit_comments,
+        ) {
+            Ok(response) => {
+                if response.is_some() {
+                    report.review_response = response;
+                }
+                report
+                    .results
+                    .push(ExecutedOperation::Completed(op.clone()));
+                if let Err(error) = checkpoint(session, op) {
+                    report.failed = Some((op.clone(), error.to_string()));
+                    report.remaining = plan.operations[index + 1..].to_vec();
+                    return report;
+                }
+            }
             Err(err) => {
                 report.failed = Some((op.clone(), err.to_string()));
                 report.remaining = plan.operations[index + 1..].to_vec();
@@ -135,7 +193,8 @@ fn execute_one(
     provider: &str,
     op: &PlannedOperation,
     submit_body: &str,
-) -> Result<()> {
+    submit_comments: &[crate::forge::submit::InlineComment],
+) -> Result<Option<crate::forge::traits::GhCreateReviewResponse>> {
     match &op.op {
         OperationKind::CreateThread => {
             let thread_id = op
@@ -147,7 +206,7 @@ fn execute_one(
             let response = backend.create_thread(pr, request)?;
             persisted.upsert_provider_mapping(provider, response.mapping);
             persisted.record_root_comment_id(provider, response.root_comment_id);
-            Ok(())
+            Ok(None)
         }
         OperationKind::Reply { comment_id } => {
             let thread_id = op
@@ -190,7 +249,7 @@ fn execute_one(
             }
             let response = backend.reply_to_thread(pr, &mapping, &body)?;
             persisted.record_published_reply(provider, comment_id.as_str(), response.comment_id);
-            Ok(())
+            Ok(None)
         }
         OperationKind::Resolve | OperationKind::Reopen | OperationKind::Dismiss => {
             let thread_id = op.thread_id.as_deref().ok_or_else(|| {
@@ -217,20 +276,20 @@ fn execute_one(
             let resolved = !matches!(op.op, OperationKind::Reopen);
             let updated_mapping = backend.set_thread_resolution(pr, &mapping, resolved)?;
             persisted.upsert_provider_mapping(provider, updated_mapping);
-            Ok(())
+            Ok(None)
         }
         OperationKind::SubmitReview { event } => {
             let event = parse_submit_event(event)?;
-            backend.create_review(
+            let response = backend.create_review(
                 pr,
                 CreateReviewRequest {
                     event,
                     commit_id: pr.head_sha.as_str(),
                     body: submit_body,
-                    comments: &[],
+                    comments: submit_comments,
                 },
             )?;
-            Ok(())
+            Ok(Some(response))
         }
     }
 }
@@ -508,6 +567,80 @@ mod tests {
         assert_eq!(
             persisted.published_reply_id("github", reply_id.as_str()),
             Some("222")
+        );
+    }
+
+    #[test]
+    fn should_checkpoint_each_success_before_advancing() {
+        let runner = ScriptedGhRunner::default()
+            .queue(GH_CREATE_COMMENT)
+            .queue(GH_THREAD_LOOKUP)
+            .queue(GH_REPLY);
+        let backend = GitHubGhBackend::with_runner(None, runner);
+        let pr = pr(ForgeKind::GitHub);
+        let mut thread = open_local_thread();
+        let reply_id = thread
+            .thread
+            .reply(ThreadComment::new(ThreadAuthor::human("bob"), "reply"));
+        let mut session = session_with_thread(thread);
+        let plan = plan_publication(&session, &capabilities::github(), None);
+        let mut checkpoints = Vec::new();
+
+        let report = execute_plan_with_checkpoint(
+            &backend,
+            &pr,
+            &mut session,
+            &plan,
+            "",
+            |checkpointed, operation| {
+                let persisted = &checkpointed.threads[0];
+                match &operation.op {
+                    OperationKind::CreateThread => {
+                        assert!(persisted.provider_mapping("github").is_some());
+                        assert!(persisted.root_comment_id("github").is_some());
+                        checkpoints.push("root");
+                    }
+                    OperationKind::Reply { .. } => {
+                        assert!(
+                            persisted
+                                .published_reply_id("github", reply_id.as_str())
+                                .is_some()
+                        );
+                        checkpoints.push("reply");
+                    }
+                    _ => {}
+                }
+                Ok(())
+            },
+        );
+
+        assert!(report.is_success(), "{report:?}");
+        assert_eq!(checkpoints, vec!["root", "reply"]);
+    }
+
+    #[test]
+    fn should_replan_without_duplicate_after_checkpoint_failure() {
+        let runner = ScriptedGhRunner::default()
+            .queue(GH_CREATE_COMMENT)
+            .queue(GH_THREAD_LOOKUP);
+        let backend = GitHubGhBackend::with_runner(None, runner);
+        let pr = pr(ForgeKind::GitHub);
+        let mut session = session_with_thread(open_local_thread());
+        let plan = plan_publication(&session, &capabilities::github(), None);
+
+        let report =
+            execute_plan_with_checkpoint(&backend, &pr, &mut session, &plan, "", |_, _| {
+                Err(TuicrError::Forge("checkpoint failed".to_string()))
+            });
+
+        assert!(!report.is_success());
+        assert!(session.threads[0].provider_mapping("github").is_some());
+        let retry = plan_publication(&session, &capabilities::github(), None);
+        assert!(
+            !retry
+                .operations
+                .iter()
+                .any(|operation| matches!(operation.op, OperationKind::CreateThread))
         );
     }
 

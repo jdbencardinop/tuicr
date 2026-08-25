@@ -804,6 +804,19 @@ impl Thread {
         self.comments.iter().skip(1)
     }
 
+    /// Keep the root and only replies accepted by `keep`.
+    pub(crate) fn retain_replies(&mut self, mut keep: impl FnMut(&ThreadComment) -> bool) {
+        let mut is_root = true;
+        self.comments.retain(|comment| {
+            if is_root {
+                is_root = false;
+                true
+            } else {
+                keep(comment)
+            }
+        });
+    }
+
     /// Append a reply, returning its immutable ID.
     pub fn reply(&mut self, comment: ThreadComment) -> CommentId {
         let id = comment.id().clone();

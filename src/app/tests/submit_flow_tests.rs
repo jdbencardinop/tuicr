@@ -121,6 +121,16 @@ fn make_pr_app_with_single_modified_file(file_path: &str) -> App {
     app
 }
 
+fn make_gitlab_app_with_single_modified_file(file_path: &str) -> App {
+    let mut app = make_pr_app_with_single_modified_file(file_path);
+    let DiffSource::PullRequest(pr) = &mut app.diff_source else {
+        unreachable!()
+    };
+    pr.key.repository = ForgeRepository::gitlab("gitlab.example", "fixture", "review");
+    pr.url = "https://gitlab.example/fixture/review/-/merge_requests/125".to_string();
+    app
+}
+
 fn line_comment(side: LineSide, new: Option<u32>, old: Option<u32>) -> Comment {
     let mut c = Comment::new(
         "body".to_string(),
@@ -139,6 +149,183 @@ fn add_line_comment(app: &mut App, path: &str, line: u32, comment: Comment) {
     let pb = PathBuf::from(path);
     let review = app.session.get_file_mut(&pb).expect("file in session");
     review.line_comments.entry(line).or_default().push(comment);
+}
+
+#[test]
+fn should_prepare_exact_durable_plan_for_non_draft_gitlab_submit() {
+    use crate::forge::dryrun::OperationKind;
+
+    let mut app = make_gitlab_app_with_single_modified_file("src/lib.rs");
+    add_line_comment(
+        &mut app,
+        "src/lib.rs",
+        11,
+        line_comment(LineSide::New, Some(11), None),
+    );
+    app.session.migrate_legacy_comments_to_threads();
+
+    app.start_submit(SubmitEvent::Comment);
+
+    let plan = app
+        .submit_durable_plan
+        .as_ref()
+        .expect("GitLab durable plan");
+    assert_eq!(
+        plan.operations
+            .iter()
+            .filter(|operation| matches!(operation.op, OperationKind::CreateThread))
+            .count(),
+        1
+    );
+    assert!(
+        !plan
+            .operations
+            .iter()
+            .any(|operation| matches!(operation.op, OperationKind::SubmitReview { .. }))
+    );
+}
+
+#[test]
+fn should_keep_gitlab_draft_and_github_on_legacy_submit_path() {
+    let mut gitlab = make_gitlab_app_with_single_modified_file("src/lib.rs");
+    add_line_comment(
+        &mut gitlab,
+        "src/lib.rs",
+        11,
+        line_comment(LineSide::New, Some(11), None),
+    );
+    gitlab.session.migrate_legacy_comments_to_threads();
+    gitlab.start_submit(SubmitEvent::Draft);
+    assert!(gitlab.submit_durable_plan.is_none());
+
+    let mut github = make_pr_app_with_single_modified_file("src/lib.rs");
+    add_line_comment(
+        &mut github,
+        "src/lib.rs",
+        11,
+        line_comment(LineSide::New, Some(11), None),
+    );
+    github.session.migrate_legacy_comments_to_threads();
+    github.start_submit(SubmitEvent::Comment);
+    assert!(github.submit_durable_plan.is_none());
+}
+
+#[test]
+fn should_remove_unselected_grouped_legacy_reply_from_gitlab_plan() {
+    use crate::forge::dryrun::OperationKind;
+
+    let mut app = make_gitlab_app_with_single_modified_file("src/lib.rs");
+    add_line_comment(
+        &mut app,
+        "src/lib.rs",
+        11,
+        line_comment(LineSide::New, Some(11), None),
+    );
+    add_line_comment(
+        &mut app,
+        "src/lib.rs",
+        11,
+        line_comment(LineSide::New, Some(11), None),
+    );
+    app.session.migrate_legacy_comments_to_threads();
+    app.start_submit(SubmitEvent::Comment);
+    let selected = vec![
+        app.submit_state
+            .as_ref()
+            .unwrap()
+            .mappable
+            .first()
+            .unwrap()
+            .clone(),
+    ];
+
+    let (_, plan, fallback) = App::build_gitlab_publication(&app.session, &selected).unwrap();
+    assert!(fallback.is_empty());
+
+    assert_eq!(
+        plan.operations
+            .iter()
+            .filter(|operation| matches!(operation.op, OperationKind::CreateThread))
+            .count(),
+        1
+    );
+    assert!(
+        !plan
+            .operations
+            .iter()
+            .any(|operation| { matches!(operation.op, OperationKind::Reply { .. }) })
+    );
+}
+
+#[test]
+fn should_fallback_when_selected_grouped_reply_has_hidden_root() {
+    use crate::forge::dryrun::OperationKind;
+
+    let mut app = make_gitlab_app_with_single_modified_file("src/lib.rs");
+    add_line_comment(
+        &mut app,
+        "src/lib.rs",
+        11,
+        line_comment(LineSide::New, Some(11), None),
+    );
+    add_line_comment(
+        &mut app,
+        "src/lib.rs",
+        11,
+        line_comment(LineSide::New, Some(11), None),
+    );
+    app.session.migrate_legacy_comments_to_threads();
+    app.start_submit(SubmitEvent::Comment);
+    let selected = vec![
+        app.submit_state
+            .as_ref()
+            .unwrap()
+            .mappable
+            .get(1)
+            .unwrap()
+            .clone(),
+    ];
+    let selected_id = selected[0].comment_id.clone();
+
+    let (_, plan, fallback) = App::build_gitlab_publication(&app.session, &selected).unwrap();
+
+    assert_eq!(fallback, vec![selected_id]);
+    assert!(!plan.operations.iter().any(|operation| {
+        matches!(
+            operation.op,
+            OperationKind::CreateThread | OperationKind::Reply { .. }
+        )
+    }));
+}
+
+#[test]
+fn should_not_republish_orphaned_legacy_mirror_as_thread_native() {
+    use crate::forge::dryrun::OperationKind;
+
+    let mut app = make_gitlab_app_with_single_modified_file("src/lib.rs");
+    add_line_comment(
+        &mut app,
+        "src/lib.rs",
+        11,
+        line_comment(LineSide::New, Some(11), None),
+    );
+    app.session.migrate_legacy_comments_to_threads();
+    app.session
+        .files
+        .get_mut(&PathBuf::from("src/lib.rs"))
+        .unwrap()
+        .line_comments
+        .clear();
+
+    let (_, plan, fallback) = App::build_gitlab_publication(&app.session, &[]).unwrap();
+    assert!(fallback.is_empty());
+
+    assert!(!plan.operations.iter().any(|operation| {
+        matches!(
+            operation.op,
+            OperationKind::CreateThread | OperationKind::Reply { .. }
+        )
+    }));
 }
 
 fn deliver_matching_pr_threads_event(
@@ -632,8 +819,10 @@ fn make_in_flight(
         mappable,
         summary_comment_ids: Vec::new(),
         review_comment_ids: Vec::new(),
+        legacy_fallback_comment_ids: Vec::new(),
         moved_to_summary_count,
         head_sha_snapshot: head_sha.to_string(),
+        pr_head_snapshot: "abcdef0123".to_string(),
         repository: ForgeRepository::github("github.com", "agavra", "tuicr"),
         pr_number: 125,
         started_at: Instant::now(),

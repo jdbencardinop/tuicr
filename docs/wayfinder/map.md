@@ -57,6 +57,9 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
   — TUI-created line/range anchors capture exact-side context, relocate only
   on one exact match, persist legacy shadows at the canonical row, and expose
   zero/multiple matches as stale/ambiguous.
+- [Publish durable GitLab threads from the TUI](tickets/wire-gitlab-durable-publication.md)
+  — `:submit comment` checkpoints roots, replies, resolve, and reopen;
+  provider-ID reconciliation and retry planning prevent duplicates.
 
 Historical patch/commit index (which `tpatch` feature produced which commits,
 and what each still needs before it can go upstream):
@@ -67,8 +70,6 @@ and what each still needs before it can go upstream):
 - Whether upstream Tuicr will accept the durable-thread/provider-adapter
   changes, and in what split — gated on
   [upstream-and-reconcile](tickets/upstream-and-reconcile.md).
-- GitLab durable TUI publication — gated on
-  [wire-gitlab-durable-publication](tickets/wire-gitlab-durable-publication.md).
 - Live GitHub/Azure DevOps mutation behavior against real targets —
   gated on
   [provision-provider-sandboxes](tickets/provision-provider-sandboxes.md)

@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "feature": "wire-gitlab-durable-tui-publication",
+  "current_generation": 2,
+  "generations": [
+    {
+      "generation": 1,
+      "generation_id": "pg_8792d4dae176",
+      "kind": "record",
+      "patch_sha256": "0f99682a728e94ff308723e76402814756f539d1a5cbbc9260ce43c6ca3fee87",
+      "git_patch_id": "bedd933c22f59ebbcbb09512a7de05069fbb7ef2",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "320b77b8f549c10862ab595619c28310f86d500cc8c5dc7303ff4d4979895513",
+      "canonical_patch": "",
+      "audit_patch": "patches/001-record.patch",
+      "base_commit": "5886486963db963affdaa69fa59626e1d4980366",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "docs/wayfinder/tickets/wire-gitlab-durable-publication.md",
+        "src/app/init.rs",
+        "src/app/mod.rs",
+        "src/app/session.rs",
+        "src/app/submit.rs",
+        "src/app/tests/persistence_merge_tests.rs",
+        "src/app/tests/submit_flow_tests.rs",
+        "src/forge/publish.rs",
+        "src/model/review.rs",
+        "src/model/thread.rs",
+        "src/model/thread_store.rs",
+        "src/ui/submit_modals.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    },
+    {
+      "generation": 2,
+      "generation_id": "pg_a1c710ee8da5",
+      "kind": "amend-refresh",
+      "patch_sha256": "3a3ed6a28ca84f1a7ecfb2bf5344d9ab0b17b9bf4d94cb7dd39862805a889bf2",
+      "git_patch_id": "b91f3069c4c85ddf6ded5b088e3b4755be887c78",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "320b77b8f549c10862ab595619c28310f86d500cc8c5dc7303ff4d4979895513",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/002-record.patch",
+      "base_commit": "5886486963db963affdaa69fa59626e1d4980366",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "docs/wayfinder/map.md",
+        "docs/wayfinder/tickets/wire-gitlab-durable-publication.md",
+        "src/app/init.rs",
+        "src/app/mod.rs",
+        "src/app/session.rs",
+        "src/app/submit.rs",
+        "src/app/tests/persistence_merge_tests.rs",
+        "src/app/tests/submit_flow_tests.rs",
+        "src/forge/publish.rs",
+        "src/model/review.rs",
+        "src/model/thread.rs",
+        "src/model/thread_store.rs",
+        "src/ui/submit_modals.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    }
+  ]
+}

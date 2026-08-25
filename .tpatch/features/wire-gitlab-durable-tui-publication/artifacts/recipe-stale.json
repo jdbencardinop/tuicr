@@ -1,0 +1,5 @@
+{
+  "stale": true,
+  "reason": "patch touches files absent from recipe: docs/wayfinder/map.md",
+  "detected_at": "2026-08-25T03:41:01Z"
+}
