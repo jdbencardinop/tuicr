@@ -3,7 +3,7 @@ id: provision-provider-sandboxes
 title: Provision approved provider sandboxes
 type: task
 mode: HITL
-status: blocked
+status: closed
 owner: copilot
 blocked_by: []
 ---
@@ -28,8 +28,10 @@ source, and explicit permission for automated comment/review writes.
   deployed on the remote VM behind loopback + SSH/Azure Bastion forwarding,
   exercised with disposable one-day credentials and the public fixture, then
   fully torn down.
-- **Open/HITL-blocked:** disposable **GitHub** and **Azure DevOps**
-  sandboxes. No mutation approval has been given for either.
+- **Done:** disposable **GitHub** and **Azure DevOps** targets were explicitly
+  approved, exercised with synthetic-only changes, and torn down on
+  2026-08-25. Their live implementation gaps are tracked by
+  `validate-live-provider-parity`.
 
 ### GitLab self-hosted result — 2026-08-11
 
@@ -91,8 +93,10 @@ downstream:
 - `docs/wayfinder/tickets/release-cross-platform-fork.md` (a release needs
   the above closed first).
 
-## Unblock condition
+## Resolution
 
-Explicit approval plus minimum-scope, teardown-documented disposable GitHub
-and Azure DevOps targets. GitLab provisioning is complete and rerunnable with
-the exact image/scopes/topology/teardown contract above.
+All required provider target types have now been provisioned and torn down.
+GitHub used a disposable public repository. Azure DevOps used a disposable
+draft PR and temporary branch containing only a synthetic file in an approved
+directory; it retained zero reviewers and was abandoned before exact branch
+deletion. Remaining blockers are adapter/TUI behavior, not target access.

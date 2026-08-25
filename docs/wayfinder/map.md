@@ -61,6 +61,12 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
 - [Publish durable GitLab threads from the TUI](tickets/wire-gitlab-durable-publication.md)
   — `:submit comment` checkpoints roots, replies, resolve, and reopen;
   provider-ID reconciliation and retry planning prevent duplicates.
+- [Provision provider sandboxes](tickets/provision-provider-sandboxes.md) —
+  Disposable GitHub, GitLab, and Azure DevOps targets were approved,
+  exercised with synthetic-only data, and fully torn down.
+- [Fix Azure Connection Data version](tickets/fix-azure-connection-data-version.md)
+  — The documented `7.1-preview.1` endpoint now resolves the live viewer ID;
+  all Git endpoints remain on stable 7.1.
 
 Historical patch/commit index (which `tpatch` feature produced which commits,
 and what each still needs before it can go upstream):
@@ -75,8 +81,9 @@ and what each still needs before it can go upstream):
   [wire-github-durable-publication](tickets/wire-github-durable-publication.md).
 - GitHub diff/comment preservation across a head update —
   [fix-github-head-refresh](tickets/fix-github-head-refresh.md).
-- Azure DevOps mutation behavior against a real target — gated on
-  [provision-provider-sandboxes](tickets/provision-provider-sandboxes.md) and
+- Azure DevOps iteration/native-anchor preservation —
+  [preserve-azure-native-anchors](tickets/preserve-azure-native-anchors.md).
+- Remaining Azure DevOps TUI/durable/vote parity —
   [validate-live-provider-parity](tickets/validate-live-provider-parity.md).
 - Whether WSL TUI clipboard support is required for release or the verified
   stdout/`clip.exe` workaround is accepted — gated on

@@ -5,7 +5,7 @@ type: prototype
 mode: HITL
 status: blocked
 owner: copilot
-blocked_by: [provision-provider-sandboxes, classify-gitlab-range-anchors, wire-gitlab-durable-publication, wire-github-durable-publication, fix-github-head-refresh]
+blocked_by: [provision-provider-sandboxes, classify-gitlab-range-anchors, wire-gitlab-durable-publication, wire-github-durable-publication, fix-github-head-refresh, preserve-azure-native-anchors]
 ---
 
 ## Question
@@ -27,8 +27,9 @@ behavior.
 ## Status
 
 GitLab is live-tested. GitHub has a completed one-identity live run with two
-implementation blockers. Azure DevOps remains live-blocked pending an
-explicitly selected draft PR target:
+implementation blockers. Azure DevOps has a completed partial live run with
+one fixed API-version defect, one native-anchor blocker, and draft-only vote
+limitations:
 
 - GitHub/GitLab offline/mock parity is complete (durable create/reply/resolve,
   REST/GraphQL ID mapping, partial-resume/idempotency, head-update handling,
@@ -76,6 +77,35 @@ Observed failures and evidence gaps:
 
 Sanitized evidence:
 `artifacts/validation/2026-08-25-wsl-github/`.
+
+### Live Azure DevOps result — 2026-08-25
+
+An approved single-identity disposable draft PR changed only a 200-line
+synthetic file in the approved repository directory. It had zero reviewers
+throughout.
+
+Observed passes:
+
+- Adapter-driven inline thread creation, reply, fixed/active status
+  transitions, and read round-trip passed.
+- A live Connection Data version failure was fixed at `50c4580`; the rerun
+  resolved the viewer identity and reached the reviewer vote endpoint.
+- After five synthetic lines were inserted before the anchor, the adapter
+  classified the original thread as outdated.
+- Cleanup deleted both temporary threads/comments, abandoned the draft PR,
+  and deleted the exact temporary branch. Initial and final votes were zero.
+
+Observed failures and gaps:
+
+- Azure DevOps forbids voting on draft PRs, so approve/wait/reject/reset
+  remains untested.
+- Azure returned thread and iteration context after the head update, but the
+  adapter dropped it from `provider_native_anchor`.
+- TUI/ReviewStore publication, checkpoint resume, duplicate prevention, and
+  two-PR pagination were not run after the native-anchor failure.
+
+Sanitized evidence:
+`artifacts/validation/2026-08-25-wsl-azure-devops/`.
 
 ### Live GitLab 19.2.1 result — 2026-08-11
 
@@ -134,6 +164,7 @@ gap.
 
 ## Unblock condition
 
-Close `wire-github-durable-publication` and `fix-github-head-refresh`, rerun
-the disposable GitHub lifecycle, and validate an explicitly approved Azure
-DevOps target. Record each remaining pass/fail delta directly in this ticket.
+Close `wire-github-durable-publication`, `fix-github-head-refresh`, and
+`preserve-azure-native-anchors`; rerun the disposable GitHub and Azure DevOps
+lifecycles. Azure vote parity additionally requires an approved non-draft
+disposable PR. Record each remaining pass/fail delta directly in this ticket.

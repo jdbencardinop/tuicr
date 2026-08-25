@@ -3,16 +3,13 @@
 //! just curl).
 //!
 //! These are `#[ignore]`d by default — they never run under a plain
-//! `cargo test`, and this task never runs them: no live external Azure
-//! DevOps organization is approved (see
-//! `docs/follow-on-map/tickets/12-implement-azure-adapter.md`'s "Official
-//! evidence" constraint and its sibling
-//! `04-provision-provider-sandboxes.md`, which is itself open/blocked on
-//! sandbox provisioning). This module exists purely as the harness a
-//! future, explicitly-approved sandbox run would use — mirroring
-//! `crate::forge::giteafj::live_tests`'s same env-var-gated shape — not as
-//! evidence this adapter has ever been exercised against a real
-//! organization.
+//! `cargo test`. A bounded adapter-driven lifecycle was exercised on
+//! 2026-08-25 against an explicitly approved disposable draft PR; it found
+//! the Connection Data API-version defect fixed by the tracked
+//! `fix-azure-connection-data-version` feature and the native-anchor gap
+//! tracked by `preserve-azure-native-anchors`. This committed harness still
+//! requires an explicitly approved non-draft disposable target because it
+//! posts a thread and casts a vote without reversible cleanup.
 //!
 //! They only activate when a caller (a shell harness that has already
 //! provisioned a disposable Azure DevOps organization/project, with a
@@ -82,9 +79,8 @@ fn repository(env: &LiveEnv) -> ForgeRepository {
 /// review-history metadata) rather than asserting behavior this adapter
 /// never claimed to support.
 #[test]
-#[ignore = "requires a live, explicitly-approved disposable Azure DevOps organization; \
-            never run for this task (see module docs) — no live sandbox is currently \
-            approved (docs/follow-on-map/tickets/04-provision-provider-sandboxes.md)"]
+#[ignore = "requires an explicitly approved non-draft disposable Azure DevOps PR; \
+            posts a thread and vote without reversible cleanup"]
 fn should_drive_full_review_lifecycle_against_live_instance() {
     let Some(env) = live_env() else {
         eprintln!("skipping: TUICR_LIVE_AZURE_* env vars not set");
