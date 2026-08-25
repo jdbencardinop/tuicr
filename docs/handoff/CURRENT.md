@@ -5,7 +5,7 @@
 Exploration, offline implementation, the real Ubuntu/WSL baseline, local
 anchor relocation, and a disposable self-hosted GitLab run are complete.
 Release and upstream submission remain blocked on approved GitHub/Azure
-DevOps sandboxes, GitLab durable-publication gaps, and explicit disposition
+DevOps sandboxes and explicit disposition
 of the remaining WSL caveats recorded below.
 
 ## Decision
@@ -35,6 +35,9 @@ Full decision text: `docs/fork/DECISIONS.md`.
   anchors capture exact-side context, relocate only on a unique match, persist
   the canonical row across reload/reopen, and become stale/ambiguous without
   nearest-line guessing.
+- GitLab durable TUI publication: `9330ee0`, `e6d6d80` — `:submit comment`
+  previews and checkpoints durable roots, replies, resolve, and reopen;
+  provider-ID re-import reconciliation and retry planning prevent duplicates.
 - Latest build exercised on WSL reports
   `tuicr 0.19.1-offline-candidate.1+c2a7554`; later validation/tracker commits
   only change documentation and have not been rebuilt separately. The
@@ -47,9 +50,9 @@ Full decision text: `docs/fork/DECISIONS.md`.
 - Real Ubuntu 24.04 under WSL2: **pass with caveats** for upstream `v0.19.1`
   and fork tip `c2a7554`; see
   `docs/wayfinder/tickets/validate-wsl-baseline.md`.
-- Self-hosted GitLab 19.2.1: legacy comment/approve/request-changes, direct
-  durable adapter operations, and stale-range classification live-pass;
-  durable TUI publication remains a gap.
+- Self-hosted GitLab 19.2.1: legacy comment/approve/request-changes,
+  stale-range classification, and durable TUI root/reply/resolve/reopen
+  publication live-pass.
   See
   `docs/wayfinder/tickets/validate-live-provider-parity.md`.
 
@@ -60,21 +63,19 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Wire and retest GitLab durable TUI publication —
-   `docs/wayfinder/tickets/wire-gitlab-durable-publication.md`.
-2. Approve/provision disposable GitHub and Azure DevOps sandboxes, then
+1. Approve/provision disposable GitHub and Azure DevOps sandboxes, then
    execute their remaining live parity —
    `docs/wayfinder/tickets/provision-provider-sandboxes.md` and
    `docs/wayfinder/tickets/validate-live-provider-parity.md`.
-3. Explicitly accept or fix the WSL TUI-clipboard boundary —
+2. Explicitly accept or fix the WSL TUI-clipboard boundary —
    `docs/wayfinder/tickets/decide-wsl-clipboard-boundary.md`.
-4. Add arm64, signing/notarization, package-manager distribution, and cut an
+3. Add arm64, signing/notarization, package-manager distribution, and cut an
    actual tagged/pushed release — depends on 1–3;
    `docs/wayfinder/tickets/release-cross-platform-fork.md`.
-5. Post the one ready upstream patch (comment-author JSON) once approved, and
+4. Post the one ready upstream patch (comment-author JSON) once approved, and
    reconcile the rest after the release interface stabilizes —
    `docs/wayfinder/tickets/upstream-and-reconcile.md`.
-6. Update the teaching package only after a real release interface is fixed —
+5. Update the teaching package only after a real release interface is fixed —
    depends on step 4; not tracked as its own ticket here since it strictly
    follows that release.
 
@@ -101,7 +102,6 @@ self-hosted provider run is complete with the gaps noted above.
 ## Remaining evidence gaps
 
 - approved GitHub/Azure DevOps mutation sandboxes;
-- GitLab TUI durable publication;
 - multi-review daily-use observation.
 
 The approved disposable GitLab target was mutated and fully torn down. Three
