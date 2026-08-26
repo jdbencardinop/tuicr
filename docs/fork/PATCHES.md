@@ -45,7 +45,7 @@ is not reachable from this branch's history, only the reconciled range is.
 | `gitea-forgejo-adapter` | `795f2bc..7a61137` (4 commits) | `b61bdbb` | Inspected in sibling worktree `gitea-forgejo-adapter`: `state: applied`, last `verify` passed | Live-verified against disposable local **Gitea 1.24** and **Forgejo 16**; reply/resolve/edit routes confirmed unsupported (405 on stable Swagger) | Not proposed; new adapter, candidate after thread contract stabilizes |
 | `azure-devops-adapter-offline` | **Source** (sibling repo, not on this branch): `db10560..50eaad5` (4 commits, branch `azure-adapter-offline`). **Reconciled onto this lineage**: `7ee96d2..7078b82` (4 commits, same messages/order, different hashes) | `7a61137` | Inspected in sibling worktree `azure-adapter-offline`: `state: applied` (local/uncommitted; disappears if that worktree is removed) | Offline/mock-verified; live create/reply/status and stale classification pass, with native-anchor preservation supplied by the later tracked feature | Not proposed; remaining live gap is TUI inspection before cleanup |
 | `fix-azure-connection-data-version` | `50c4580` | `50c4580` | `tpatch verify` exact landing evidence | Focused Azure suite: 60 passed, 1 ignored; live viewer lookup reached the vote endpoint | Candidate for the Azure adapter upstream split; preserves stable 7.1 on all Git endpoints |
-| `preserve-azure-native-anchors` | `c3d6dde` | `44f5576` | Tracked feature: `state: applied`; landing evidence exact at `c3d6dde` | Live adapter/ReviewStore pass: current and stale native context persists across reload and duplicate-free repeat import; real TUI rendering remains unproven because cleanup preceded inspection | Candidate for the Azure adapter upstream split; one TUI-before-cleanup rerun remains |
+| `preserve-azure-native-anchors` | `c3d6dde` | `44f5576` | Tracked feature: `state: applied`; landing evidence exact at `c3d6dde` | Live-complete for anchors: current and stale native context persists across ReviewStore reload/re-import, and the real TUI renders the shifted root/reply as `outdated · locally stale` | Candidate for the Azure adapter upstream split |
 | `tui-thread-integration` | `732745c..9a965a2` (5 commits) | `7a61137` | not (re)inspected this pass | Implemented; canonical durable-thread TUI rendering, remote-overlay, reply-splice ordering, race-condition fix | Fork-only; TUI rendering is fork-specific by nature |
 | `github-gitlab-thread-parity-offline` | `cc38057..7b086df` (3 commits) | `9a965a2` | not (re)inspected this pass | Offline/mock parity complete (durable create/reply/resolve, REST/GraphQL ID mapping, resume/idempotency, head-update handling); GitLab live-passes, while GitHub live validation found durable TUI publication and post-head-update rendering failures | N/A — parity work on existing adapters, not a new upstream-proposable feature; see `docs/wayfinder/tickets/validate-live-provider-parity.md` |
 | `offline-integration` | `1838181..d8b1f63` (2 commits) | `7078b82` | not (re)inspected this pass | Complete — integrates the Azure reconciliation and the five-provider offline source into one lineage | N/A — integration glue, not an upstream-proposable feature |
@@ -99,8 +99,8 @@ This repo's own `.tpatch/` workspace was bootstrapped by
 `fork-tpatch-bootstrap` at `24376a6`; `classify-gitlab-range-anchors` and
 `capture-provider-neutral-context-for-local-line-and-range` and
 `wire-gitlab-durable-tui-publication` are complete tracked customizations.
-`preserve-azure-native-anchors` is also landed and tracked; its adapter and
-durable-store path is live-proven while its TUI rendering check remains open.
+`preserve-azure-native-anchors` is also landed, tracked, and live-proven
+through the adapter, durable store, and real TUI.
 See
 [`../../.tpatch/README.md`](../../.tpatch/README.md) for why historical
 trailers are not backfilled and for the lifecycle every new patch-bearing

@@ -3,7 +3,7 @@ id: preserve-azure-native-anchors
 title: Preserve Azure DevOps iteration-native anchors
 type: implementation
 mode: autonomous
-status: in-progress
+status: closed
 owner: copilot
 blocked_by: []
 ---
@@ -40,6 +40,18 @@ save/reload, and duplicate-free repeat import. The synthetic comments were
 deleted, the PR abandoned, and the exact branch deleted with zero reviewers
 and zero vote. The real TUI opened the abandoned PR from an isolated sparse
 checkout only after cleanup, so its synthetic comment had already been
-deleted; TUI rendering remains the sole completion blocker. Sanitized
+deleted; at that checkpoint TUI rendering remained the sole completion
+blocker. Sanitized
 evidence:
 `../../../../artifacts/validation/2026-08-25-wsl-azure-devops-native-anchor/`.
+
+## Resolution
+
+The 2026-08-26 draft rerun completed the missing real-TUI check before
+cleanup. The adapter and ReviewStore again retained the current and shifted
+native anchors without duplication. After the five-line shift, the real TUI
+rendered the synthetic root and reply at line 60 with
+`outdated · locally stale`. Cleanup then deleted the exact synthetic
+comments, abandoned the PR, and deleted the branch with zero reviewers and
+zero vote. Sanitized evidence:
+`../../../../artifacts/validation/2026-08-26-wsl-azure-devops-tui-anchor/`.

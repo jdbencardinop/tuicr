@@ -4,10 +4,10 @@
 
 Exploration, offline implementation, the real Ubuntu/WSL baseline, local
 anchor relocation, and disposable GitLab/GitHub/Azure DevOps runs are
-complete. Azure native-anchor preservation now passes the live adapter and
-durable-store path. Release and upstream submission remain blocked on GitHub
-live-parity fixes, an Azure TUI-before-cleanup rerun, a non-draft vote target,
-and explicit disposition
+complete. Azure native-anchor preservation now passes the live adapter,
+durable-store, and real-TUI paths. Release and upstream submission remain
+blocked on GitHub live-parity fixes, a policy-free non-draft Azure vote
+target, and explicit disposition
 of the remaining WSL caveats recorded below.
 
 ## Decision
@@ -69,8 +69,8 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Fix the GitHub durable-publication/head-refresh failures and rerun Azure
-   with TUI inspection before cleanup, then execute remaining live parity —
+1. Fix the GitHub durable-publication/head-refresh failures and obtain a
+   policy-free Azure vote target, then execute remaining live parity —
    `docs/wayfinder/tickets/validate-live-provider-parity.md`.
 2. Explicitly accept or fix the WSL TUI-clipboard boundary —
    `docs/wayfinder/tickets/decide-wsl-clipboard-boundary.md`.
@@ -107,7 +107,6 @@ self-hosted provider run is complete with the gaps noted above.
 ## Remaining evidence gaps
 
 - GitHub durable TUI publication and post-head-update rendering;
-- Azure DevOps TUI rendering before synthetic-thread cleanup;
 - an approved non-draft disposable Azure DevOps vote target;
 - independent GitHub review-state validation with a second standard identity;
 - multi-review daily-use observation.

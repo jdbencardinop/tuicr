@@ -5,7 +5,7 @@ type: prototype
 mode: HITL
 status: blocked
 owner: copilot
-blocked_by: [provision-provider-sandboxes, classify-gitlab-range-anchors, wire-gitlab-durable-publication, wire-github-durable-publication, fix-github-head-refresh, preserve-azure-native-anchors]
+blocked_by: [provision-provider-sandboxes, classify-gitlab-range-anchors, wire-gitlab-durable-publication, wire-github-durable-publication, fix-github-head-refresh]
 ---
 
 ## Question
@@ -27,9 +27,9 @@ behavior.
 ## Status
 
 GitLab is live-tested. GitHub has a completed one-identity live run with two
-implementation blockers. Azure DevOps has a completed partial live run with
-one fixed API-version defect, one native-anchor blocker, and draft-only vote
-limitations:
+implementation blockers. Azure DevOps thread, stale-anchor, durable-store,
+and TUI behavior are live-tested; non-draft vote behavior remains blocked by
+reviewer-notification policies:
 
 - GitHub/GitLab offline/mock parity is complete (durable create/reply/resolve,
   REST/GraphQL ID mapping, partial-resume/idempotency, head-update handling,
@@ -40,8 +40,7 @@ limitations:
   tests across two audit-fix rounds) — `tpatch` feature
   `azure-devops-adapter-offline`, see `docs/fork/PATCHES.md`. An `#[ignore]`d
   live-sandbox harness (`src/forge/azure/live_tests.rs`, env-var gated) is
-  committed and compiles but has never been run.
-- **No live Azure DevOps target has been mutated.**
+  committed and has been run against approved disposable targets.
 
 ### Live GitHub result — 2026-08-25
 
@@ -121,9 +120,29 @@ the PR, and deleted the exact branch; reviewer count and vote remained zero.
 The TUI could open the abandoned PR from a sparse matching checkout, proving
 the Azure local-diff prerequisite, but cleanup had already deleted the
 synthetic comment. Therefore TUI rendering is not claimed and
-`preserve-azure-native-anchors` remains open for one TUI-before-cleanup rerun.
+at that checkpoint `preserve-azure-native-anchors` remained open for one
+TUI-before-cleanup rerun.
 Draft vote parity and two-PR pagination also remain open. Sanitized evidence:
 `artifacts/validation/2026-08-25-wsl-azure-devops-native-anchor/`.
+
+### Azure TUI native-anchor rerun — 2026-08-26
+
+An approved synthetic-only draft PR with zero reviewers completed the
+previously missing TUI-before-cleanup check. The current adapter/ReviewStore
+phase passed, then five synthetic lines were inserted before the anchor. The
+shifted adapter payload remained outdated with native iteration context,
+ReviewStore save/reload and repeat import remained duplicate-free, and the
+real TUI rendered the root and reply at line 60 with
+`outdated · locally stale`. The exact comments were deleted, the PR
+abandoned, and the branch deleted; reviewer count and vote remained zero.
+
+A separate synthetic non-draft attempt was stopped before comments or votes
+because Azure policy automatically added six reviewers. It was immediately
+abandoned and its branch deleted with vote zero. The linked production PR was
+never mutated. This establishes that vote parity needs a policy-free Azure
+DevOps sandbox rather than another enterprise-repository PR. Sanitized
+evidence:
+`artifacts/validation/2026-08-26-wsl-azure-devops-tui-anchor/`.
 
 ### Live GitLab 19.2.1 result — 2026-08-11
 
@@ -182,7 +201,7 @@ gap.
 
 ## Unblock condition
 
-Close `wire-github-durable-publication`, `fix-github-head-refresh`, and
-`preserve-azure-native-anchors`; rerun the disposable GitHub and Azure DevOps
-lifecycles. Azure vote parity additionally requires an approved non-draft
-disposable PR. Record each remaining pass/fail delta directly in this ticket.
+Close `wire-github-durable-publication` and `fix-github-head-refresh`, then
+rerun the disposable GitHub lifecycle. Azure vote parity additionally
+requires a policy-free non-draft disposable PR. Record each remaining
+pass/fail delta directly in this ticket.

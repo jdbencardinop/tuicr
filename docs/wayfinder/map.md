@@ -67,6 +67,9 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
 - [Fix Azure Connection Data version](tickets/fix-azure-connection-data-version.md)
   — The documented `7.1-preview.1` endpoint now resolves the live viewer ID;
   all Git endpoints remain on stable 7.1.
+- [Preserve Azure native anchors](tickets/preserve-azure-native-anchors.md)
+  — live adapter, ReviewStore, and TUI retain shifted iteration context and
+  expose the thread as outdated without guessing relocation.
 
 Historical patch/commit index (which `tpatch` feature produced which commits,
 and what each still needs before it can go upstream):
@@ -81,8 +84,6 @@ and what each still needs before it can go upstream):
   [wire-github-durable-publication](tickets/wire-github-durable-publication.md).
 - GitHub diff/comment preservation across a head update —
   [fix-github-head-refresh](tickets/fix-github-head-refresh.md).
-- Azure DevOps iteration/native-anchor preservation —
-  [preserve-azure-native-anchors](tickets/preserve-azure-native-anchors.md).
 - Remaining Azure DevOps TUI/durable/vote parity —
   [validate-live-provider-parity](tickets/validate-live-provider-parity.md).
 - Whether WSL TUI clipboard support is required for release or the verified
