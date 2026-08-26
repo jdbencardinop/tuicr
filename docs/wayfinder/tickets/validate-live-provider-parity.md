@@ -28,8 +28,8 @@ behavior.
 
 GitLab is live-tested. GitHub has a completed one-identity live run with two
 implementation blockers. Azure DevOps thread, stale-anchor, durable-store,
-and TUI behavior are live-tested; non-draft vote behavior remains blocked by
-reviewer-notification policies:
+TUI, and non-draft vote behavior are live-tested. Only two-PR pagination
+remains as an Azure-specific evidence gap:
 
 - GitHub/GitLab offline/mock parity is complete (durable create/reply/resolve,
   REST/GraphQL ID mapping, partial-resume/idempotency, head-update handling,
@@ -144,6 +144,26 @@ DevOps sandbox rather than another enterprise-repository PR. Sanitized
 evidence:
 `artifacts/validation/2026-08-26-wsl-azure-devops-tui-anchor/`.
 
+### Azure non-draft vote rerun — 2026-08-26
+
+The approved `personalplayground` wiki repository had no reviewer policy on
+`main`; its two enabled policies were status checks only. A temporary
+synthetic page under `/Juan-Diego` produced a non-draft PR with zero initial
+reviewers. The committed adapter endpoint then set and independently
+round-tripped every native vote state:
+
+- approved: `10`;
+- approved with suggestions: `5`;
+- waiting for author: `-5`;
+- rejected: `-10`;
+- reset: `0`.
+
+The final provider vote was zero. No review comment was posted. Cleanup
+abandoned the PR and deleted the exact branch and temporary page. This closes
+Azure approve/wait/reject/reset parity without involving the previously linked
+production PR. Sanitized evidence:
+`artifacts/validation/2026-08-26-wsl-azure-devops-vote-parity/`.
+
 ### Live GitLab 19.2.1 result — 2026-08-11
 
 Approved disposable target:
@@ -202,6 +222,5 @@ gap.
 ## Unblock condition
 
 Close `wire-github-durable-publication` and `fix-github-head-refresh`, then
-rerun the disposable GitHub lifecycle. Azure vote parity additionally
-requires a policy-free non-draft disposable PR. Record each remaining
-pass/fail delta directly in this ticket.
+rerun the disposable GitHub lifecycle. Record each remaining pass/fail delta
+directly in this ticket.

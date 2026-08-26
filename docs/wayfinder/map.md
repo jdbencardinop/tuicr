@@ -48,8 +48,8 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
   explicit caveats.
 - [Validate live GitLab transport](tickets/validate-live-provider-parity.md)
   — GitLab live-passes; GitHub legacy publication passes but durable TUI
-  publication and post-head-update rendering fail; Azure DevOps awaits an
-  approved target.
+  publication and post-head-update rendering fail; Azure DevOps thread,
+  native-anchor, TUI, and vote lifecycles live-pass.
 - [Classify GitLab range anchors](tickets/classify-gitlab-range-anchors.md)
   — live GitLab 19.2.1 now preserves native range 70-72 and marks either
   old-head or provider-terminal mismatches stale through backend, TUI reload,
@@ -84,8 +84,6 @@ and what each still needs before it can go upstream):
   [wire-github-durable-publication](tickets/wire-github-durable-publication.md).
 - GitHub diff/comment preservation across a head update —
   [fix-github-head-refresh](tickets/fix-github-head-refresh.md).
-- Remaining Azure DevOps TUI/durable/vote parity —
-  [validate-live-provider-parity](tickets/validate-live-provider-parity.md).
 - Whether WSL TUI clipboard support is required for release or the verified
   stdout/`clip.exe` workaround is accepted — gated on
   [decide-wsl-clipboard-boundary](tickets/decide-wsl-clipboard-boundary.md).

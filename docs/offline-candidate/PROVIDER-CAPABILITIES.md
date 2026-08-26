@@ -10,7 +10,7 @@ source disagree, the source wins.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | GitHub | Unified | single-side | same-side | Native | incremental | Native | Native | Thread (GraphQL) | Reads: yes (prior evaluation). Writes: offline/fixture only in this archive. |
 | GitLab | Version-pair | single-side | same-side | Native | Unsupported (no verified public object) | Emulated via `mergeRequestRequestChanges` (per-reviewer state, not review-level) | Native | Discussion | Reads: yes (prior evaluation). Writes: offline/fixture only in this archive. |
-| Azure DevOps | Iteration-pair | simultaneous both sides | dual-side offsets | Native | Unsupported | Vote-based | Native | Thread | Live create/reply/status/stale classification partial-pass; native-anchor preservation fails and draft targets cannot vote. |
+| Azure DevOps | Iteration-pair | simultaneous both sides | dual-side offsets | Native | Unsupported | Vote-based | Native | Thread | Live create/reply/status, native-anchor/TUI stale handling, and non-draft approve/suggestions/wait/reject/reset pass. |
 | Gitea (1.24.7 pin) | Unified | single-side | **None** (silently drops `extra_lines_count` rather than rejecting) | **Unsupported** | single-shot only | Native | **Unsupported** | **None** | Offline against a disposable local Gitea 1.24 instance. |
 | Forgejo (16.0.1 pin) | Unified | single-side | same-side | **Unsupported** | incremental | Native | **Unsupported** | **None** | Offline against a disposable local Forgejo 16 instance. |
 

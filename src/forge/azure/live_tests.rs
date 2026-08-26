@@ -382,3 +382,43 @@ fn should_preserve_native_anchor_through_durable_import() {
         remote.id, remote.is_outdated
     );
 }
+
+#[test]
+#[ignore = "requires an explicitly approved disposable non-draft Azure DevOps PR; \
+            changes and must restore the current viewer's vote"]
+fn should_set_requested_vote_on_live_instance() {
+    let Some(env) = live_env() else {
+        eprintln!("skipping: TUICR_LIVE_AZURE_* env vars not set");
+        return;
+    };
+    let vote_name = std::env::var("TUICR_LIVE_AZURE_VOTE")
+        .expect("TUICR_LIVE_AZURE_VOTE must name the requested vote");
+    let vote = match vote_name.as_str() {
+        "approved" => crate::forge::azure::models::AdoVote::Approved,
+        "approved-with-suggestions" => {
+            crate::forge::azure::models::AdoVote::ApprovedWithSuggestions
+        }
+        "waiting-for-author" => crate::forge::azure::models::AdoVote::WaitingForAuthor,
+        "rejected" => crate::forge::azure::models::AdoVote::Rejected,
+        "reset" => crate::forge::azure::models::AdoVote::NoVote,
+        _ => panic!("unsupported TUICR_LIVE_AZURE_VOTE value: {vote_name}"),
+    };
+    let repo = repository(&env);
+    let backend = AzureDevOpsBackend::new(Some(repo.clone()));
+    let target = PullRequestTarget::with_repository(
+        repo,
+        env.pr_number,
+        format!("{}/{}/pullrequest/{}", env.owner, env.repo, env.pr_number),
+    );
+    let pr = backend
+        .get_pull_request(target)
+        .expect("get_pull_request should succeed");
+    assert!(!pr.is_draft, "vote lifecycle requires a non-draft PR");
+    backend
+        .cast_vote(&pr, vote)
+        .expect("cast_vote should succeed");
+    println!(
+        "TUICR_LIVE_AZURE_VOTE={vote_name} wire_value={}",
+        vote.wire_value()
+    );
+}
