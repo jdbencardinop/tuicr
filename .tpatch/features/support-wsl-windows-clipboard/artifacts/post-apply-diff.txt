@@ -1,0 +1,3 @@
+ CHANGELOG.md           |   7 ++
+ src/output/markdown.rs | 294 +++++++++++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 281 insertions(+), 20 deletions(-)

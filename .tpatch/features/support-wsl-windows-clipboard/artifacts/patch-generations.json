@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "feature": "support-wsl-windows-clipboard",
+  "current_generation": 2,
+  "generations": [
+    {
+      "generation": 1,
+      "generation_id": "pg_45f7c074485b",
+      "kind": "record",
+      "patch_sha256": "d673e57034f29b8b1eefd0fd02ecfe97bb2acd75f11bc43372e42654b8c69266",
+      "git_patch_id": "28722b9140b7967cae6850f64f677b91ca0fb5c7",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "f5cde24829ed304cb633370dc0b183d287240fda0c217b2ec7885f2a54cd4c7a",
+      "canonical_patch": "",
+      "audit_patch": "patches/001-record.patch",
+      "base_commit": "5da2545fa37fe05ed24b014aceac263e5b55762f",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [
+          "CHANGELOG.md",
+          "src/output/markdown.rs"
+        ],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "CHANGELOG.md",
+        "src/output/markdown.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    },
+    {
+      "generation": 2,
+      "generation_id": "pg_875a44fc9523",
+      "kind": "amend-refresh",
+      "patch_sha256": "e313c34a9289fbadad38ee597219bed8d5857b1e07f126e1bec4f07af28fbd62",
+      "git_patch_id": "51417c4cbe1b718ffdeaab60f154659d11d25b7f",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "f5cde24829ed304cb633370dc0b183d287240fda0c217b2ec7885f2a54cd4c7a",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/004-record.patch",
+      "base_commit": "5da2545fa37fe05ed24b014aceac263e5b55762f",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [
+          "CHANGELOG.md",
+          "src/output/markdown.rs"
+        ],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "CHANGELOG.md",
+        "src/output/markdown.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    }
+  ]
+}

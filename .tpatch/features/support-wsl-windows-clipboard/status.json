@@ -1,0 +1,23 @@
+{
+  "id": "support-wsl-windows-clipboard",
+  "slug": "support-wsl-windows-clipboard",
+  "title": "On Linux under WSL with Windows interoperability available, copy review exports through clip.exe before tmux/OSC 52, X11, Wayland, or arboard. Preserve existing native macOS, native Linux, SSH, Zellij, and PowerShell-host behavior, fall back when clip.exe is unavailable or fails, and add regression tests for platform detection, routing order, exact stdin bytes, failure fallback, and non-WSL isolation.",
+  "state": "applied",
+  "compatibility": "unknown",
+  "requested_at": "2026-08-27T21:11:18Z",
+  "updated_at": "2026-08-27T21:31:55Z",
+  "last_command": "verify",
+  "notes": "landed at 2026-08-27T21:32:19Z",
+  "apply": {
+    "completed_at": "2026-08-27T21:31:55Z",
+    "base_commit": "5da2545fa37fe05ed24b014aceac263e5b55762f",
+    "has_patch": true
+  },
+  "reconcile": {},
+  "verify": {
+    "verified_at": "2026-08-27T21:31:55Z",
+    "passed": true,
+    "recipe_hash_at_verify": "f5cde24829ed304cb633370dc0b183d287240fda0c217b2ec7885f2a54cd4c7a",
+    "patch_hash_at_verify": "e313c34a9289fbadad38ee597219bed8d5857b1e07f126e1bec4f07af28fbd62"
+  }
+}

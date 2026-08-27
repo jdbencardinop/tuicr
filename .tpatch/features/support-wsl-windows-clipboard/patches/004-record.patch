@@ -1,0 +1,349 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index bc141c9..1bebe00 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,13 @@
+ 
+ All notable changes to this project will be documented in this file.
+ 
++## [Unreleased]
++
++### Bug Fixes
++
++- **clipboard:** Write WSL exports directly to Windows Clipboard through
++  `clip.exe` before terminal or Linux clipboard fallbacks.
++
+ ## [0.19.1] - 2026-07-13
+ 
+ ### Bug Fixes
+diff --git a/src/output/markdown.rs b/src/output/markdown.rs
+index 2b067bc..df44fd7 100644
+--- a/src/output/markdown.rs
++++ b/src/output/markdown.rs
+@@ -84,29 +84,128 @@ pub fn export_to_clipboard(
+ /// terminal-based fallback (tmux/OSC 52) was used, `Ok(false)` if the
+ /// platform clipboard handled it.
+ pub fn copy_text_to_clipboard(text: &str) -> Result<bool> {
+-    // On macOS, pbcopy writes straight to the system pasteboard and works even
+-    // inside tmux/SSH. OSC 52 (preferred below) instead relies on the outer
+-    // terminal honoring the escape, which Terminal.app does not, so the copy
+-    // would only reach the tmux buffer. Prefer pbcopy unconditionally here.
+-    if cfg!(target_os = "macos") && try_clipboard_cmd("pbcopy", &[], text) {
+-        return Ok(false);
+-    }
+-    if should_prefer_osc52() {
+-        copy_osc52(text)?;
+-        return Ok(true);
+-    }
+-    if try_copy_via_subprocess(text) {
+-        return Ok(false);
+-    }
+-    match Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+-        Ok(_) => Ok(false),
+-        Err(_) => {
++    let routes = clipboard_routes(ClipboardTarget::current(), &ClipboardEnvironment::current());
++    execute_clipboard_routes(&routes, text, |route, text| match route {
++        ClipboardRoute::Pbcopy => Ok(try_clipboard_cmd("pbcopy", &[], text).then_some(false)),
++        ClipboardRoute::WindowsInterop => {
++            Ok(
++                try_clipboard_cmd_bytes("clip.exe", &[], &windows_clipboard_bytes(text))
++                    .then_some(false),
++            )
++        }
++        ClipboardRoute::Terminal => {
+             copy_osc52(text)?;
+-            Ok(true)
++            Ok(Some(true))
++        }
++        ClipboardRoute::LinuxSession => Ok(try_copy_via_subprocess(text).then_some(false)),
++        ClipboardRoute::System => Ok(Clipboard::new()
++            .and_then(|mut cb| cb.set_text(text))
++            .is_ok()
++            .then_some(false)),
++    })
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum ClipboardTarget {
++    Linux,
++    MacOs,
++    Windows,
++    Other,
++}
++
++impl ClipboardTarget {
++    fn current() -> Self {
++        if cfg!(target_os = "linux") {
++            Self::Linux
++        } else if cfg!(target_os = "macos") {
++            Self::MacOs
++        } else if cfg!(target_os = "windows") {
++            Self::Windows
++        } else {
++            Self::Other
+         }
+     }
+ }
+ 
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++struct ClipboardEnvironment {
++    windows_interop: bool,
++    terminal_transport: bool,
++}
++
++impl ClipboardEnvironment {
++    fn current() -> Self {
++        Self {
++            windows_interop: env_var_is_nonempty("WSL_INTEROP"),
++            terminal_transport: should_prefer_osc52(),
++        }
++    }
++}
++
++fn env_var_is_nonempty(name: &str) -> bool {
++    std::env::var_os(name).is_some_and(|value| !value.is_empty())
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum ClipboardRoute {
++    Pbcopy,
++    WindowsInterop,
++    Terminal,
++    LinuxSession,
++    System,
++}
++
++fn clipboard_routes(
++    target: ClipboardTarget,
++    environment: &ClipboardEnvironment,
++) -> Vec<ClipboardRoute> {
++    let mut routes = Vec::with_capacity(4);
++
++    match target {
++        ClipboardTarget::MacOs => routes.push(ClipboardRoute::Pbcopy),
++        ClipboardTarget::Linux if environment.windows_interop => {
++            routes.push(ClipboardRoute::WindowsInterop);
++        }
++        ClipboardTarget::Linux | ClipboardTarget::Windows | ClipboardTarget::Other => {}
++    }
++
++    if environment.terminal_transport {
++        routes.push(ClipboardRoute::Terminal);
++        return routes;
++    }
++
++    if target == ClipboardTarget::Linux {
++        routes.push(ClipboardRoute::LinuxSession);
++    }
++    routes.push(ClipboardRoute::System);
++    routes.push(ClipboardRoute::Terminal);
++    routes
++}
++
++fn execute_clipboard_routes<F>(
++    routes: &[ClipboardRoute],
++    text: &str,
++    mut attempt: F,
++) -> Result<bool>
++where
++    F: FnMut(ClipboardRoute, &str) -> Result<Option<bool>>,
++{
++    for route in routes {
++        if let Some(via_terminal) = attempt(*route, text)? {
++            return Ok(via_terminal);
++        }
++    }
++    Err(TuicrError::Clipboard(
++        "No clipboard route succeeded".to_string(),
++    ))
++}
++
++fn windows_clipboard_bytes(text: &str) -> Vec<u8> {
++    text.encode_utf16()
++        .flat_map(|unit| unit.to_le_bytes())
++        .collect()
++}
++
+ /// Try xclip (X11) then wl-copy (Wayland). Returns true if either succeeds.
+ fn try_copy_via_subprocess(text: &str) -> bool {
+     let session = std::env::var("XDG_SESSION_TYPE");
+@@ -128,6 +227,10 @@ fn try_copy_via_subprocess(text: &str) -> bool {
+ /// Try copying via a CLI tool that forks into the background and holds
+ /// clipboard ownership beyond tuicr's process lifetime. Returns true on success.
+ fn try_clipboard_cmd(program: &str, args: &[&str], text: &str) -> bool {
++    try_clipboard_cmd_bytes(program, args, text.as_bytes())
++}
++
++fn try_clipboard_cmd_bytes(program: &str, args: &[&str], input: &[u8]) -> bool {
+     use std::process::{Command, Stdio};
+     let Ok(mut child) = Command::new(program)
+         .args(args)
+@@ -138,8 +241,13 @@ fn try_clipboard_cmd(program: &str, args: &[&str], text: &str) -> bool {
+     else {
+         return false;
+     };
+-    if let Some(mut stdin) = child.stdin.take() {
+-        let _ = std::io::Write::write_all(&mut stdin, text.as_bytes());
++    let write_succeeded = child
++        .stdin
++        .take()
++        .is_some_and(|mut stdin| std::io::Write::write_all(&mut stdin, input).is_ok());
++    if !write_succeeded {
++        let _ = child.wait();
++        return false;
+     }
+     matches!(child.wait(), Ok(s) if s.success())
+ }
+@@ -1705,6 +1813,152 @@ mod tests {
+         assert_eq!(decoded, markdown);
+     }
+ 
++    fn clipboard_environment(
++        windows_interop: bool,
++        terminal_transport: bool,
++    ) -> ClipboardEnvironment {
++        ClipboardEnvironment {
++            windows_interop,
++            terminal_transport,
++        }
++    }
++
++    #[test]
++    fn should_try_windows_interop_before_terminal_transport_on_wsl() {
++        let routes = clipboard_routes(ClipboardTarget::Linux, &clipboard_environment(true, true));
++
++        assert_eq!(
++            routes,
++            vec![ClipboardRoute::WindowsInterop, ClipboardRoute::Terminal]
++        );
++    }
++
++    #[test]
++    fn should_fall_back_when_windows_interop_command_is_unavailable() {
++        let routes = clipboard_routes(ClipboardTarget::Linux, &clipboard_environment(true, false));
++        let mut attempted = Vec::new();
++
++        let via_terminal = execute_clipboard_routes(&routes, "review", |route, _| {
++            attempted.push(route);
++            Ok(match route {
++                ClipboardRoute::WindowsInterop => None,
++                ClipboardRoute::LinuxSession => Some(false),
++                _ => panic!("unexpected route: {route:?}"),
++            })
++        })
++        .unwrap();
++
++        assert!(!via_terminal);
++        assert_eq!(
++            attempted,
++            vec![ClipboardRoute::WindowsInterop, ClipboardRoute::LinuxSession]
++        );
++    }
++
++    #[test]
++    fn should_not_select_windows_interop_on_native_linux() {
++        let routes = clipboard_routes(ClipboardTarget::Linux, &clipboard_environment(false, false));
++
++        assert_eq!(
++            routes,
++            vec![
++                ClipboardRoute::LinuxSession,
++                ClipboardRoute::System,
++                ClipboardRoute::Terminal
++            ]
++        );
++    }
++
++    #[test]
++    fn should_preserve_pbcopy_precedence_on_macos() {
++        let routes = clipboard_routes(ClipboardTarget::MacOs, &clipboard_environment(true, true));
++
++        assert_eq!(
++            routes,
++            vec![ClipboardRoute::Pbcopy, ClipboardRoute::Terminal]
++        );
++    }
++
++    #[test]
++    fn should_use_system_clipboard_for_native_windows_powershell() {
++        let routes = clipboard_routes(
++            ClipboardTarget::Windows,
++            &clipboard_environment(true, false),
++        );
++
++        assert_eq!(
++            routes,
++            vec![ClipboardRoute::System, ClipboardRoute::Terminal]
++        );
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn should_write_exact_multiline_unicode_bytes_to_clipboard_command() {
++        use std::os::unix::fs::PermissionsExt;
++
++        let dir = tempfile::tempdir().unwrap();
++        let command = dir.path().join("capture-clipboard");
++        let output = dir.path().join("clipboard.bin");
++        std::fs::write(&command, "#!/bin/sh\ncat > \"$1\"\n").unwrap();
++        let mut permissions = std::fs::metadata(&command).unwrap().permissions();
++        permissions.set_mode(0o700);
++        std::fs::set_permissions(&command, permissions).unwrap();
++        let text = "first line\nこんにちは 🦀\nlast line\n";
++
++        assert!(try_clipboard_cmd(
++            command.to_str().unwrap(),
++            &[output.to_str().unwrap()],
++            text
++        ));
++        assert_eq!(std::fs::read(output).unwrap(), text.as_bytes());
++    }
++
++    #[test]
++    fn should_encode_windows_clipboard_input_as_utf16_little_endian() {
++        assert_eq!(
++            windows_clipboard_bytes("A🦀"),
++            vec![0x41, 0x00, 0x3e, 0xd8, 0x80, 0xdd]
++        );
++    }
++
++    #[cfg(target_os = "linux")]
++    #[test]
++    #[ignore = "requires WSL interop and mutates Windows Clipboard"]
++    fn should_round_trip_multiline_unicode_through_live_wsl_clipboard() {
++        assert_eq!(
++            std::env::var("TUICR_WSL_CLIPBOARD_LIVE").as_deref(),
++            Ok("1"),
++            "set TUICR_WSL_CLIPBOARD_LIVE=1 only on an approved WSL host"
++        );
++        assert!(env_var_is_nonempty("WSL_INTEROP"));
++        let text = "tuicr WSL clipboard validation\nUnicode: こんにちは 🦀\nfinal line";
++
++        assert!(try_clipboard_cmd_bytes(
++            "clip.exe",
++            &[],
++            &windows_clipboard_bytes(text)
++        ));
++        assert!(!copy_text_to_clipboard(text).unwrap());
++
++        let script = concat!(
++            "$unicode = -join (0x3053,0x3093,0x306b,0x3061,0x306f | ",
++            "ForEach-Object { [char]$_ }); ",
++            "$crab = [char]::ConvertFromUtf32(0x1f980); ",
++            "$expected = \"tuicr WSL clipboard validation`r`nUnicode: ",
++            "$unicode $crab`r`nfinal line\"; ",
++            "if ((Get-Clipboard -Raw) -ceq $expected) { exit 0 } else { exit 1 }"
++        );
++        let status = std::process::Command::new("powershell.exe")
++            .args(["-NoProfile", "-NonInteractive", "-Command", script])
++            .stdout(std::process::Stdio::null())
++            .stderr(std::process::Stdio::null())
++            .status()
++            .unwrap();
++
++        assert!(status.success());
++    }
++
+     #[test]
+     fn should_export_single_line_range_as_single_line() {
+         // given - a comment with a single-line range should display as L42, not L42-L42

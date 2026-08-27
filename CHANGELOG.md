@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **clipboard:** Write WSL exports directly to Windows Clipboard through
+  `clip.exe` before terminal or Linux clipboard fallbacks.
+
 ## [0.19.1] - 2026-07-13
 
 ### Bug Fixes

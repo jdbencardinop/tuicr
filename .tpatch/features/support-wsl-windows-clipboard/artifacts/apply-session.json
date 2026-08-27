@@ -1,0 +1,8 @@
+{
+  "slug": "support-wsl-windows-clipboard",
+  "completed_at": "2026-08-27T21:31:55Z",
+  "base_commit": "5da2545fa37fe05ed24b014aceac263e5b55762f",
+  "has_patch": true,
+  "validation_status": "passed",
+  "validation_notes": "tpatch test — command: cargo test --locked --lib -- --skip vcs::git::libgit2::tests::should_discover_worktree_with_relativeworktrees_extension --skip vcs::git::tests::default_preference_routes_reftable_repo_to_cli"
+}

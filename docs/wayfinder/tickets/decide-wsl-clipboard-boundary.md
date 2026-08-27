@@ -3,8 +3,8 @@ id: decide-wsl-clipboard-boundary
 title: Decide the WSL clipboard release boundary
 type: grilling
 mode: HITL
-status: open
-owner:
+status: in-progress
+owner: copilot
 blocked_by: []
 ---
 
