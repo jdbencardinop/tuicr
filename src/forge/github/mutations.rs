@@ -23,10 +23,10 @@
 //!   comments outside a review (has no anchor and is not part of any
 //!   `reviewThreads` connection, so it cannot later be resolved):
 //!   <https://docs.github.com/en/rest/issues/comments?apiVersion=2022-11-28#create-an-issue-comment>.
-//! - `resolveReviewThread`/`unresolveReviewThread` GraphQL mutations, and
-//!   `PullRequestReviewComment.pullRequestReviewThread` (used to discover a
-//!   just-created comment's owning thread ID, which the REST create-comment
-//!   response does not include):
+//! - `resolveReviewThread`/`unresolveReviewThread` GraphQL mutations, plus
+//!   the pull request's paginated `reviewThreads` connection (used to
+//!   discover a just-created comment's owning thread ID, which the REST
+//!   create-comment response does not include):
 //!   <https://docs.github.com/en/graphql/reference/mutations#resolvereviewthread>,
 //!   <https://docs.github.com/en/graphql/reference/mutations#unresolvereviewthread>,
 //!   <https://docs.github.com/en/graphql/reference/objects#pullrequestreviewcomment>.
@@ -202,18 +202,28 @@ pub(crate) fn parse_create_comment_response(output: &str) -> Result<(u64, String
 /// response has no thread reference at all).
 pub(crate) fn build_thread_lookup_args(
     pr: &PullRequestDetails,
-    comment_node_id: &str,
+    cursor: Option<&str>,
 ) -> Vec<String> {
-    let query = "query($id: ID!) { node(id: $id) { ... on PullRequestReviewComment { \
-                 pullRequestReviewThread { id isResolved } } } }";
+    let query = "query($owner: String!, $name: String!, $number: Int!, $after: String) { \
+                 repository(owner: $owner, name: $name) { pullRequest(number: $number) { \
+                 reviewThreads(first: 100, after: $after) { nodes { id isResolved \
+                 comments(first: 1) { nodes { id } } } pageInfo { hasNextPage endCursor } } } } }";
     let mut args = vec![
         "api".to_string(),
         "graphql".to_string(),
         "-f".to_string(),
         format!("query={query}"),
-        "-f".to_string(),
-        format!("id={comment_node_id}"),
+        "-F".to_string(),
+        format!("owner={}", pr.repository.owner),
+        "-F".to_string(),
+        format!("name={}", pr.repository.name),
+        "-F".to_string(),
+        format!("number={}", pr.number),
     ];
+    if let Some(cursor) = cursor {
+        args.push("-F".to_string());
+        args.push(format!("after={cursor}"));
+    }
     if pr.repository.host != DEFAULT_GITHUB_HOST {
         args.push("--hostname".to_string());
         args.push(pr.repository.host.clone());
@@ -221,30 +231,73 @@ pub(crate) fn build_thread_lookup_args(
     args
 }
 
-/// Parse the thread-lookup GraphQL response. Returns `None` when the
-/// comment has no owning thread (the general/issue-comment path — see
-/// [`build_create_thread_request`]'s `is_general_comment` return value,
-/// which callers should check first; this also degrades gracefully if a
-/// provider ever omits the field for an unrelated reason).
-pub(crate) fn parse_thread_lookup_response(output: &str) -> Result<Option<(String, bool)>> {
+pub(crate) struct ThreadLookupPage {
+    pub thread: Option<(String, bool)>,
+    pub next_cursor: Option<String>,
+}
+
+/// Parse one page of the thread-lookup GraphQL response.
+pub(crate) fn parse_thread_lookup_response(
+    output: &str,
+    comment_node_id: &str,
+) -> Result<ThreadLookupPage> {
     let value: serde_json::Value = serde_json::from_str(output)?;
-    let thread = value.pointer("/data/node/pullRequestReviewThread");
-    let Some(thread) = thread else {
-        return Ok(None);
-    };
-    if thread.is_null() {
-        return Ok(None);
+    if let Some(errors) = value.get("errors").and_then(|errors| errors.as_array())
+        && !errors.is_empty()
+    {
+        return Err(TuicrError::Forge(format!(
+            "GitHub thread lookup returned GraphQL errors: {}",
+            serde_json::to_string(errors)?
+        )));
     }
-    let id = thread
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TuicrError::Forge("GitHub thread lookup missing `id`".to_string()))?
-        .to_string();
-    let is_resolved = thread
-        .get("isResolved")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    Ok(Some((id, is_resolved)))
+    let connection = value
+        .pointer("/data/repository/pullRequest/reviewThreads")
+        .ok_or_else(|| {
+            TuicrError::Forge("GitHub thread lookup missing reviewThreads".to_string())
+        })?;
+    let thread = connection
+        .get("nodes")
+        .and_then(|nodes| nodes.as_array())
+        .and_then(|nodes| {
+            nodes.iter().find(|thread| {
+                thread
+                    .pointer("/comments/nodes/0/id")
+                    .and_then(|id| id.as_str())
+                    == Some(comment_node_id)
+            })
+        })
+        .map(|thread| {
+            let id = thread.get("id").and_then(|id| id.as_str()).ok_or_else(|| {
+                TuicrError::Forge("GitHub thread lookup missing `id`".to_string())
+            })?;
+            let is_resolved = thread
+                .get("isResolved")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            Ok::<_, TuicrError>((id.to_string(), is_resolved))
+        })
+        .transpose()?;
+    let next_cursor = if connection
+        .pointer("/pageInfo/hasNextPage")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        Some(
+            connection
+                .pointer("/pageInfo/endCursor")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    TuicrError::Forge("GitHub thread lookup page has no `endCursor`".to_string())
+                })?
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    Ok(ThreadLookupPage {
+        thread,
+        next_cursor,
+    })
 }
 
 /// Assemble the final [`CreateThreadResponse`] once the comment has been
@@ -539,17 +592,21 @@ mod tests {
     }
 
     const THREAD_LOOKUP_RESPONSE_JSON: &str = r#"{
-        "data": {
-            "node": {
-                "pullRequestReviewThread": { "id": "PRRT_kwXYZ", "isResolved": false }
-            }
-        }
+        "data": {"repository": {"pullRequest": {"reviewThreads": {
+            "nodes": [{
+                "id": "PRRT_kwXYZ",
+                "isResolved": false,
+                "comments": {"nodes": [{"id": "PRRC_kwABC"}]}
+            }],
+            "pageInfo": {"hasNextPage": false, "endCursor": null}
+        }}}}
     }"#;
 
     #[test]
     fn should_parse_thread_lookup_response() {
-        let result = parse_thread_lookup_response(THREAD_LOOKUP_RESPONSE_JSON)
+        let result = parse_thread_lookup_response(THREAD_LOOKUP_RESPONSE_JSON, "PRRC_kwABC")
             .unwrap()
+            .thread
             .expect("thread lookup should find a thread");
         assert_eq!(result.0, "PRRT_kwXYZ");
         assert!(!result.1);
@@ -557,8 +614,12 @@ mod tests {
 
     #[test]
     fn should_return_none_when_lookup_response_has_no_thread() {
-        let json = r#"{"data": {"node": {"pullRequestReviewThread": null}}}"#;
-        assert_eq!(parse_thread_lookup_response(json).unwrap(), None);
+        let json = r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{
+            "nodes":[], "pageInfo":{"hasNextPage":false,"endCursor":null}
+        }}}}}"#;
+        let page = parse_thread_lookup_response(json, "PRRC_missing").unwrap();
+        assert_eq!(page.thread, None);
+        assert_eq!(page.next_cursor, None);
     }
 
     #[test]

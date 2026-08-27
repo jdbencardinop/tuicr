@@ -152,62 +152,86 @@ fn add_line_comment(app: &mut App, path: &str, line: u32, comment: Comment) {
 }
 
 #[test]
-fn should_prepare_exact_durable_plan_for_non_draft_gitlab_submit() {
+fn should_prepare_exact_durable_plan_for_non_draft_github_and_gitlab_submit() {
     use crate::forge::dryrun::OperationKind;
 
-    let mut app = make_gitlab_app_with_single_modified_file("src/lib.rs");
-    add_line_comment(
-        &mut app,
-        "src/lib.rs",
-        11,
-        line_comment(LineSide::New, Some(11), None),
-    );
-    app.session.migrate_legacy_comments_to_threads();
+    for mut app in [
+        make_pr_app_with_single_modified_file("src/lib.rs"),
+        make_gitlab_app_with_single_modified_file("src/lib.rs"),
+    ] {
+        add_line_comment(
+            &mut app,
+            "src/lib.rs",
+            11,
+            line_comment(LineSide::New, Some(11), None),
+        );
+        app.session.migrate_legacy_comments_to_threads();
+
+        app.start_submit(SubmitEvent::Comment);
+
+        let plan = app
+            .submit_durable_plan
+            .as_ref()
+            .expect("GitHub/GitLab durable plan");
+        assert_eq!(
+            plan.operations
+                .iter()
+                .filter(|operation| matches!(operation.op, OperationKind::CreateThread))
+                .count(),
+            1
+        );
+        assert!(
+            !plan
+                .operations
+                .iter()
+                .any(|operation| matches!(operation.op, OperationKind::SubmitReview { .. }))
+        );
+    }
+}
+
+#[test]
+fn should_prepare_github_plan_for_native_durable_activity_without_legacy_drafts() {
+    use crate::forge::dryrun::OperationKind;
+    use crate::model::thread::{Anchor, AnchorSide, Thread, ThreadAuthor, ThreadComment};
+    use crate::model::thread_store::PersistedThread;
+
+    let mut app = make_pr_app_with_single_modified_file("src/lib.rs");
+    let anchor = Anchor::range("src/lib.rs", AnchorSide::New, 10, 11).unwrap();
+    let root = ThreadComment::new(ThreadAuthor::human("reviewer"), "durable root");
+    app.session
+        .threads
+        .push(PersistedThread::new(Thread::open(anchor, root)));
 
     app.start_submit(SubmitEvent::Comment);
 
     let plan = app
         .submit_durable_plan
         .as_ref()
-        .expect("GitLab durable plan");
-    assert_eq!(
+        .expect("native-only GitHub durable plan");
+    assert!(
         plan.operations
             .iter()
-            .filter(|operation| matches!(operation.op, OperationKind::CreateThread))
-            .count(),
-        1
+            .any(|operation| { matches!(operation.op, OperationKind::CreateThread) })
     );
-    assert!(
-        !plan
-            .operations
-            .iter()
-            .any(|operation| matches!(operation.op, OperationKind::SubmitReview { .. }))
-    );
+    assert_eq!(app.input_mode, InputMode::SubmitConfirm);
 }
 
 #[test]
-fn should_keep_gitlab_draft_and_github_on_legacy_submit_path() {
-    let mut gitlab = make_gitlab_app_with_single_modified_file("src/lib.rs");
-    add_line_comment(
-        &mut gitlab,
-        "src/lib.rs",
-        11,
-        line_comment(LineSide::New, Some(11), None),
-    );
-    gitlab.session.migrate_legacy_comments_to_threads();
-    gitlab.start_submit(SubmitEvent::Draft);
-    assert!(gitlab.submit_durable_plan.is_none());
-
-    let mut github = make_pr_app_with_single_modified_file("src/lib.rs");
-    add_line_comment(
-        &mut github,
-        "src/lib.rs",
-        11,
-        line_comment(LineSide::New, Some(11), None),
-    );
-    github.session.migrate_legacy_comments_to_threads();
-    github.start_submit(SubmitEvent::Comment);
-    assert!(github.submit_durable_plan.is_none());
+fn should_keep_github_and_gitlab_drafts_on_legacy_submit_path() {
+    for mut app in [
+        make_pr_app_with_single_modified_file("src/lib.rs"),
+        make_gitlab_app_with_single_modified_file("src/lib.rs"),
+    ] {
+        add_line_comment(
+            &mut app,
+            "src/lib.rs",
+            11,
+            line_comment(LineSide::New, Some(11), None),
+        );
+        app.session.migrate_legacy_comments_to_threads();
+        app.start_submit(SubmitEvent::Draft);
+        assert!(app.submit_durable_plan.is_none());
+    }
 }
 
 #[test]
@@ -239,7 +263,12 @@ fn should_remove_unselected_grouped_legacy_reply_from_gitlab_plan() {
             .clone(),
     ];
 
-    let (_, plan, fallback) = App::build_gitlab_publication(&app.session, &selected).unwrap();
+    let (_, plan, fallback) = App::build_durable_publication(
+        &app.session,
+        &selected,
+        crate::forge::traits::ForgeKind::GitLab,
+    )
+    .unwrap();
     assert!(fallback.is_empty());
 
     assert_eq!(
@@ -287,7 +316,12 @@ fn should_fallback_when_selected_grouped_reply_has_hidden_root() {
     ];
     let selected_id = selected[0].comment_id.clone();
 
-    let (_, plan, fallback) = App::build_gitlab_publication(&app.session, &selected).unwrap();
+    let (_, plan, fallback) = App::build_durable_publication(
+        &app.session,
+        &selected,
+        crate::forge::traits::ForgeKind::GitLab,
+    )
+    .unwrap();
 
     assert_eq!(fallback, vec![selected_id]);
     assert!(!plan.operations.iter().any(|operation| {
@@ -317,7 +351,9 @@ fn should_not_republish_orphaned_legacy_mirror_as_thread_native() {
         .line_comments
         .clear();
 
-    let (_, plan, fallback) = App::build_gitlab_publication(&app.session, &[]).unwrap();
+    let (_, plan, fallback) =
+        App::build_durable_publication(&app.session, &[], crate::forge::traits::ForgeKind::GitLab)
+            .unwrap();
     assert!(fallback.is_empty());
 
     assert!(!plan.operations.iter().any(|operation| {

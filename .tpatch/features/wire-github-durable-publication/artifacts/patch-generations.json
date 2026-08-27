@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "feature": "wire-github-durable-publication",
+  "current_generation": 3,
+  "generations": [
+    {
+      "generation": 1,
+      "generation_id": "pg_381648e8a306",
+      "kind": "record",
+      "patch_sha256": "c600dd46f0f99a0fc5f3ad88b72dff3067dc3d0b8dc69767ccc2fc1b26b21144",
+      "git_patch_id": "1d0826bcf2aed32de35a2feefcb68d94784c4af7",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "34e770c75ec5516b99d2a29adbf4dbebb88b92dcf510beea88d9660904c50955",
+      "canonical_patch": "",
+      "audit_patch": "",
+      "base_commit": "45f8e7cf2a2daf392cf97b4685ae8961dccf0ced",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "docs/wayfinder/tickets/wire-github-durable-publication.md",
+        "src/app/mod.rs",
+        "src/app/submit.rs",
+        "src/app/tests/submit_flow_tests.rs",
+        "src/forge/publish.rs",
+        "src/ui/submit_modals.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    },
+    {
+      "generation": 2,
+      "generation_id": "pg_a43a577f3b62",
+      "kind": "amend-refresh",
+      "patch_sha256": "b8ec3f460fe99578ffa99f7f414c6de3530abec628b540fe40615dc81ed12997",
+      "git_patch_id": "51e9cbc99329f6c1eab4401ea9c3fb0bcdc24352",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "773a221117cc8c88e9fd8b02f1b8d4c13e55a66809ad8c330136b8ff58690ad9",
+      "canonical_patch": "",
+      "audit_patch": "patches/002-record.patch",
+      "base_commit": "45f8e7cf2a2daf392cf97b4685ae8961dccf0ced",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "docs/wayfinder/tickets/wire-github-durable-publication.md",
+        "src/app/mod.rs",
+        "src/app/submit.rs",
+        "src/app/tests/submit_flow_tests.rs",
+        "src/forge/github/gh.rs",
+        "src/forge/github/mutations.rs",
+        "src/forge/publish.rs",
+        "src/ui/submit_modals.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    },
+    {
+      "generation": 3,
+      "generation_id": "pg_c78900b1378f",
+      "kind": "amend-refresh",
+      "patch_sha256": "276cc4762ee08a74d8c4847735a6569bd5bcb331e9635778bff8607e1d671d70",
+      "git_patch_id": "fa92f9527466909acb6ae964b599b4d49c8944cb",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "c838fabd6e8a643cc4804ca0dcd17d0906eb278781a59ce86a4981f5c2f573a6",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/003-record.patch",
+      "base_commit": "45f8e7cf2a2daf392cf97b4685ae8961dccf0ced",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "docs/handoff/CURRENT.md",
+        "docs/wayfinder/map.md",
+        "docs/wayfinder/tickets/wire-github-durable-publication.md",
+        "src/app/mod.rs",
+        "src/app/submit.rs",
+        "src/app/tests/submit_flow_tests.rs",
+        "src/forge/github/gh.rs",
+        "src/forge/github/mutations.rs",
+        "src/forge/publish.rs",
+        "src/ui/submit_modals.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    }
+  ]
+}

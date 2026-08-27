@@ -1,0 +1,23 @@
+{
+  "id": "wire-github-durable-publication",
+  "slug": "wire-github-durable-publication",
+  "title": "Wire GitHub comment submission to the durable publication planner and checkpointed executor while preserving draft-review and legacy inline behavior.",
+  "state": "applied",
+  "compatibility": "unknown",
+  "requested_at": "2026-08-27T02:33:16Z",
+  "updated_at": "2026-08-27T03:10:05Z",
+  "last_command": "record",
+  "notes": "landed at 2026-08-27T03:10:06Z",
+  "apply": {
+    "completed_at": "2026-08-27T03:08:30Z",
+    "base_commit": "45f8e7cf2a2daf392cf97b4685ae8961dccf0ced",
+    "has_patch": true
+  },
+  "reconcile": {},
+  "verify": {
+    "verified_at": "2026-08-27T03:09:58Z",
+    "passed": true,
+    "recipe_hash_at_verify": "c838fabd6e8a643cc4804ca0dcd17d0906eb278781a59ce86a4981f5c2f573a6",
+    "patch_hash_at_verify": "276cc4762ee08a74d8c4847735a6569bd5bcb331e9635778bff8607e1d671d70"
+  }
+}

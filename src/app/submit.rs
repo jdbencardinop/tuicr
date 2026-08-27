@@ -12,9 +12,10 @@ impl App {
         self.start_submit_with(event, false);
     }
 
-    pub(in crate::app) fn build_gitlab_publication(
+    pub(in crate::app) fn build_durable_publication(
         session: &crate::model::review::ReviewSession,
         mappable: &[crate::forge::submit::InlineComment],
+        forge_kind: crate::forge::traits::ForgeKind,
     ) -> Result<(
         crate::model::review::ReviewSession,
         crate::forge::dryrun::DryRunPlan,
@@ -22,6 +23,7 @@ impl App {
     )> {
         use crate::forge::dryrun::{OperationKind, plan_publication};
 
+        let provider_key = forge_kind.provider_key();
         let selected: std::collections::HashSet<&str> = mappable
             .iter()
             .map(|item| item.comment_id.as_str())
@@ -29,7 +31,7 @@ impl App {
         let mut publication = session.clone();
         let mut legacy_fallback_ids = Vec::new();
         publication.threads.retain_mut(|persisted| {
-            let mapped = persisted.provider_mapping("gitlab").is_some();
+            let mapped = persisted.provider_mapping(provider_key).is_some();
             let root_selected = persisted
                 .thread
                 .root()
@@ -58,7 +60,16 @@ impl App {
             keep
         });
 
-        let capabilities = crate::forge::capabilities::gitlab();
+        let capabilities = match forge_kind {
+            crate::forge::traits::ForgeKind::GitHub => crate::forge::capabilities::github(),
+            crate::forge::traits::ForgeKind::GitLab => crate::forge::capabilities::gitlab(),
+            _ => {
+                return Err(TuicrError::Forge(format!(
+                    "{} does not use durable TUI publication",
+                    provider_key
+                )));
+            }
+        };
         let plan = plan_publication(&publication, &capabilities, None);
 
         for comment_id in selected {
@@ -128,6 +139,7 @@ impl App {
         identity: &crate::model::review::ReviewSession,
         published: &crate::model::review::ReviewSession,
         operation: &crate::forge::dryrun::PlannedOperation,
+        provider_key: &str,
     ) -> Result<()> {
         let Some(thread_id) = operation.thread_id.as_deref() else {
             return Ok(());
@@ -143,7 +155,7 @@ impl App {
             })?;
         let reply_mapping = match &operation.op {
             crate::forge::dryrun::OperationKind::Reply { comment_id } => published_thread
-                .published_reply_id("gitlab", comment_id)
+                .published_reply_id(provider_key, comment_id)
                 .map(|remote_id| (comment_id.clone(), remote_id.to_string())),
             _ => None,
         };
@@ -155,16 +167,17 @@ impl App {
             crate::forge::dryrun::OperationKind::Reply { comment_id } => Some(comment_id.clone()),
             _ => None,
         };
-        let mappings: Vec<(String, serde_json::Value)> = Self::publication_mapping_keys(operation)
-            .into_iter()
-            .filter_map(|key| {
-                published_thread
-                    .provider_mappings
-                    .get(&key)
-                    .cloned()
-                    .map(|mapping| (key, mapping))
-            })
-            .collect();
+        let mappings: Vec<(String, serde_json::Value)> =
+            Self::publication_mapping_keys(operation, provider_key)
+                .into_iter()
+                .filter_map(|key| {
+                    published_thread
+                        .provider_mappings
+                        .get(&key)
+                        .cloned()
+                        .map(|mapping| (key, mapping))
+                })
+                .collect();
 
         crate::persistence::storage::save_session_by_identity(identity, |persisted| {
             let mut session = persisted.unwrap_or_else(|| identity.clone());
@@ -178,7 +191,7 @@ impl App {
                     ))
                 })?;
             if let Some((comment_id, remote_id)) = reply_mapping {
-                thread.record_published_reply("gitlab", comment_id, remote_id);
+                thread.record_published_reply(provider_key, comment_id, remote_id);
             } else {
                 for (key, mapping) in mappings {
                     thread.provider_mappings.insert(key, mapping);
@@ -223,24 +236,28 @@ impl App {
         identity: &crate::model::review::ReviewSession,
         published: &crate::model::review::ReviewSession,
         report: &crate::forge::publish::PublishReport,
+        provider_key: &str,
     ) -> Result<()> {
         for operation in report.completed() {
-            Self::checkpoint_publication_mapping(identity, published, operation)?;
+            Self::checkpoint_publication_mapping(identity, published, operation, provider_key)?;
         }
         Ok(())
     }
 
-    fn publication_mapping_keys(operation: &crate::forge::dryrun::PlannedOperation) -> Vec<String> {
+    fn publication_mapping_keys(
+        operation: &crate::forge::dryrun::PlannedOperation,
+        provider_key: &str,
+    ) -> Vec<String> {
         use crate::forge::dryrun::OperationKind;
 
         match operation.op {
             OperationKind::CreateThread => vec![
-                "gitlab".to_string(),
-                crate::model::thread_store::root_comment_mapping_key("gitlab"),
+                provider_key.to_string(),
+                crate::model::thread_store::root_comment_mapping_key(provider_key),
             ],
             OperationKind::Reply { .. } => Vec::new(),
             OperationKind::Resolve | OperationKind::Reopen | OperationKind::Dismiss => {
-                vec!["gitlab".to_string()]
+                vec![provider_key.to_string()]
             }
             OperationKind::SubmitReview { .. } => Vec::new(),
         }
@@ -342,19 +359,25 @@ impl App {
             }
         }
 
-        let durable_publication = if pr.key.repository.kind
-            == crate::forge::traits::ForgeKind::GitLab
-            && event == crate::forge::submit::SubmitEvent::Comment
+        let forge_kind = pr.key.repository.kind;
+        let durable_publication = if matches!(
+            forge_kind,
+            crate::forge::traits::ForgeKind::GitHub | crate::forge::traits::ForgeKind::GitLab
+        ) && event == crate::forge::submit::SubmitEvent::Comment
+            && !self.session.threads.is_empty()
             && self.session.review_comments.is_empty()
             && unmappable.is_empty()
         {
-            match Self::build_gitlab_publication(&self.session, &mappable) {
+            match Self::build_durable_publication(&self.session, &mappable, forge_kind) {
                 Ok((session, plan, fallback)) if fallback.is_empty() => {
                     Some((session, plan, fallback))
                 }
                 Ok(_) => None,
                 Err(error) => {
-                    self.set_error(format!("Cannot prepare GitLab publication: {error}"));
+                    self.set_error(format!(
+                        "Cannot prepare {} publication: {error}",
+                        self.forge_display_name()
+                    ));
                     return;
                 }
             }
@@ -363,7 +386,7 @@ impl App {
         };
 
         // Approve is the one event that's meaningful with no comments — a
-        // bare "LGTM" approval. Durable-only GitLab activity is also valid.
+        // bare "LGTM" approval. Durable-only provider activity is also valid.
         let bare_allowed = matches!(event, crate::forge::submit::SubmitEvent::Approve);
         let has_durable_activity =
             durable_publication
@@ -653,6 +676,7 @@ impl App {
 
         if let (Some(mut durable_session), Some(durable_plan)) = (durable_session, durable_plan) {
             std::thread::spawn(move || {
+                let provider_key = repository.kind.provider_key();
                 let backend = create_forge_backend(&repository, local_checkout);
                 let target = PullRequestTarget::with_repository(
                     repository.clone(),
@@ -685,6 +709,7 @@ impl App {
                                         &publication_identity,
                                         published,
                                         operation,
+                                        provider_key,
                                     )
                                 },
                             );
@@ -692,6 +717,7 @@ impl App {
                             &publication_identity,
                             &durable_session,
                             &report,
+                            provider_key,
                         )
                         .map_err(|error| error.to_string());
                         Ok(DurableSubmitOutcome {
@@ -777,37 +803,37 @@ impl App {
                 head_sha,
                 result,
             } => {
+                let forge_name = Self::forge_kind_display_name(in_flight.repository.kind);
                 if self.submit_result_is_stale(&in_flight, &repository, pr_number, &head_sha) {
                     match *result {
                         Ok(DurableSubmitOutcome {
                             recovery: Ok(()), ..
                         }) => self.set_message(
-                            "GitLab publication finished for the previous MR revision; mappings were checkpointed"
-                                .to_string(),
+                            format!(
+                                "{forge_name} publication finished for the previous review revision; mappings were checkpointed"
+                            ),
                         ),
                         Ok(DurableSubmitOutcome {
                             recovery: Err(error),
                             ..
                         })
                         | Err(error) => self.set_error(format!(
-                            "GitLab publication finished for the previous MR revision, but checkpoint recovery failed: {error}"
+                            "{forge_name} publication finished for the previous review revision, but checkpoint recovery failed: {error}"
                         )),
                     }
                     return;
                 }
                 match *result {
-                    Ok(outcome) => self.finish_durable_gitlab_submit(
-                        in_flight,
-                        outcome.session,
-                        outcome.report,
-                    ),
+                    Ok(outcome) => {
+                        self.finish_durable_submit(in_flight, outcome.session, outcome.report)
+                    }
                     Err(error) => self.set_error(format!("Submit failed: {error}")),
                 }
             }
         }
     }
 
-    fn finish_durable_gitlab_submit(
+    fn finish_durable_submit(
         &mut self,
         in_flight: SubmitInFlightState,
         published: crate::model::review::ReviewSession,
@@ -816,6 +842,9 @@ impl App {
         use crate::forge::dryrun::OperationKind;
         use crate::forge::publish::ExecutedOperation;
 
+        let forge_kind = in_flight.repository.kind;
+        let provider_key = forge_kind.provider_key();
+        let forge_name = Self::forge_kind_display_name(forge_kind);
         let mut completed_comment_ids = Vec::new();
         let mut review_completed = false;
         let mut completed_count = 0;
@@ -835,7 +864,7 @@ impl App {
                             .iter_mut()
                             .find(|thread| thread.id().as_str() == thread_id)
                     {
-                        for key in Self::publication_mapping_keys(operation) {
+                        for key in Self::publication_mapping_keys(operation, provider_key) {
                             if let Some(mapping) = published_thread.provider_mappings.get(&key) {
                                 current.provider_mappings.insert(key, mapping.clone());
                             }
@@ -860,7 +889,7 @@ impl App {
                                     .iter()
                                     .find(|thread| thread.id().as_str() == thread_id)
                                 && let Some(remote_id) =
-                                    published_thread.published_reply_id("gitlab", comment_id)
+                                    published_thread.published_reply_id(provider_key, comment_id)
                                 && let Some(current) = self
                                     .session
                                     .threads
@@ -868,7 +897,7 @@ impl App {
                                     .find(|thread| thread.id().as_str() == thread_id)
                             {
                                 current.record_published_reply(
-                                    "gitlab",
+                                    provider_key,
                                     comment_id.clone(),
                                     remote_id.to_string(),
                                 );
@@ -907,25 +936,25 @@ impl App {
         if let Some((operation, error)) = report.failed {
             if let Err(save_error) = save_result {
                 self.set_error(format!(
-                    "GitLab publication stopped after {completed_count} operation(s) at {:?}: {error}; mapping recovery also failed: {save_error}",
+                    "{forge_name} publication stopped after {completed_count} operation(s) at {:?}: {error}; mapping recovery also failed: {save_error}",
                     operation.op
                 ));
             } else {
                 self.set_error(format!(
-                    "GitLab publication stopped after {completed_count} operation(s) at {:?}: {error}; retry will resume",
+                    "{forge_name} publication stopped after {completed_count} operation(s) at {:?}: {error}; retry will resume",
                     operation.op
                 ));
             }
         } else if let Err(error) = save_result {
             self.set_error(format!(
-                "GitLab publication completed, but saving its mappings failed: {error}"
+                "{forge_name} publication completed, but saving its mappings failed: {error}"
             ));
         } else {
             if in_flight.event == crate::forge::submit::SubmitEvent::Comment {
                 self.mark_pr_commits_reviewed_through(&in_flight.head_sha_snapshot);
             }
             self.set_message(format!(
-                "Published GitLab review: {completed_count} completed, {skipped_count} skipped"
+                "Published {forge_name} review: {completed_count} completed, {skipped_count} skipped"
             ));
         }
     }
@@ -965,14 +994,18 @@ impl App {
     /// Used to keep submit messaging accurate across GitHub and GitLab.
     pub fn forge_display_name(&self) -> &'static str {
         match &self.diff_source {
-            DiffSource::PullRequest(pr) => match pr.key.repository.kind {
-                crate::forge::traits::ForgeKind::GitHub => "GitHub",
-                crate::forge::traits::ForgeKind::GitLab => "GitLab",
-                crate::forge::traits::ForgeKind::AzureDevOps => "Azure DevOps",
-                crate::forge::traits::ForgeKind::Gitea => "Gitea",
-                crate::forge::traits::ForgeKind::Forgejo => "Forgejo",
-            },
+            DiffSource::PullRequest(pr) => Self::forge_kind_display_name(pr.key.repository.kind),
             _ => "forge",
+        }
+    }
+
+    fn forge_kind_display_name(kind: crate::forge::traits::ForgeKind) -> &'static str {
+        match kind {
+            crate::forge::traits::ForgeKind::GitHub => "GitHub",
+            crate::forge::traits::ForgeKind::GitLab => "GitLab",
+            crate::forge::traits::ForgeKind::AzureDevOps => "Azure DevOps",
+            crate::forge::traits::ForgeKind::Gitea => "Gitea",
+            crate::forge::traits::ForgeKind::Forgejo => "Forgejo",
         }
     }
 

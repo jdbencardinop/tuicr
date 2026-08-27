@@ -1,0 +1,122 @@
+# Test run — 2026-08-27T03:08:30Z
+# Command: cargo test app::tests::submit_flow_tests -- --test-threads=1 && cargo test forge::github::mutations::tests && cargo test forge::publish::tests
+# Directory: /home/juanbe/development/tools/diffreviewtui/tuicr
+
+   Compiling tuicr v0.19.1-offline-candidate.1 (/home/juanbe/development/tools/diffreviewtui/tuicr)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.82s
+     Running unittests src/lib.rs (target/debug/deps/tuicr-4e06e49e1fff1af7)
+
+running 42 tests
+test app::tests::submit_flow_tests::should_advance_from_resolver_to_confirm ... ok
+test app::tests::submit_flow_tests::should_allow_bare_approve_through_action_picker_with_no_comments ... ok
+test app::tests::submit_flow_tests::should_allow_bare_approve_without_any_comments ... ok
+test app::tests::submit_flow_tests::should_anchor_line_comments_via_hashmap_key_when_line_context_missing ... ok
+test app::tests::submit_flow_tests::should_apply_result_via_poll_when_head_sha_matches ... ok
+test app::tests::submit_flow_tests::should_cancel_submit_clears_state_and_returns_to_normal ... ok
+test app::tests::submit_flow_tests::should_detect_locked_comment_under_cursor_for_dd_path ... ok
+test app::tests::submit_flow_tests::should_discard_stale_submit_result_when_head_sha_changed ... ok
+test app::tests::submit_flow_tests::should_dispatch_async_submit_on_confirm_and_clear_modal_state ... ok
+test app::tests::submit_flow_tests::should_emit_draft_message_with_pr_url_for_draft_submit ... ok
+test app::tests::submit_flow_tests::should_emit_success_message_with_review_id_and_counts_for_published_submit ... ok
+test app::tests::submit_flow_tests::should_fallback_when_selected_grouped_reply_has_hidden_root ... ok
+test app::tests::submit_flow_tests::should_flip_comments_to_pushed_draft_for_draft_submission ... ok
+test app::tests::submit_flow_tests::should_flip_comments_to_submitted_and_stamp_review_id_on_success ... ok
+test app::tests::submit_flow_tests::should_flip_review_level_comments_on_submit_success ... ok
+test app::tests::submit_flow_tests::should_flip_summary_bound_unmappable_comments_on_submit_success ... ok
+test app::tests::submit_flow_tests::should_keep_comments_as_local_draft_on_submit_failure ... ok
+test app::tests::submit_flow_tests::should_keep_github_and_gitlab_drafts_on_legacy_submit_path ... ok
+test app::tests::submit_flow_tests::should_keep_locked_line_comments_when_remote_thread_refetch_fails ... ok
+test app::tests::submit_flow_tests::should_keep_locked_review_comments_when_remote_summary_refetch_fails ... ok
+test app::tests::submit_flow_tests::should_lock_file_level_comment_via_submit_success ... ok
+test app::tests::submit_flow_tests::should_mark_reviewed_commits_after_successful_submit ... ok
+test app::tests::submit_flow_tests::should_not_mark_reviewed_commits_after_draft_submit ... ok
+test app::tests::submit_flow_tests::should_not_republish_orphaned_legacy_mirror_as_thread_native ... ok
+test app::tests::submit_flow_tests::should_only_flip_comments_whose_ids_were_submitted ... ok
+test app::tests::submit_flow_tests::should_open_confirm_directly_when_all_comments_map ... ok
+test app::tests::submit_flow_tests::should_open_resolver_when_any_comment_is_unmappable ... ok
+test app::tests::submit_flow_tests::should_prepare_exact_durable_plan_for_non_draft_github_and_gitlab_submit ... ok
+test app::tests::submit_flow_tests::should_prepare_github_plan_for_native_durable_activity_without_legacy_drafts ... ok
+test app::tests::submit_flow_tests::should_prune_locked_comments_across_all_buckets ... ok
+test app::tests::submit_flow_tests::should_remove_unselected_grouped_legacy_reply_from_gitlab_plan ... ok
+test app::tests::submit_flow_tests::should_report_head_not_stale_when_current_matches_session_head ... ok
+test app::tests::submit_flow_tests::should_report_stale_head_when_current_differs_from_session_head ... ok
+test app::tests::submit_flow_tests::should_route_picker_through_resolver_then_skip_confirm ... ok
+test app::tests::submit_flow_tests::should_skip_confirm_modal_when_action_picker_dispatches_with_no_unmappable ... ok
+test app::tests::submit_flow_tests::should_skip_locked_comments_during_preflight ... ok
+test app::tests::submit_flow_tests::should_toggle_resolver_action_between_move_and_omit ... ok
+test app::tests::submit_flow_tests::should_use_pr_head_sha_as_commit_id_when_full_commit_range_selected ... ok
+test app::tests::submit_flow_tests::should_use_subset_head_sha_as_commit_id_when_inline_selector_is_strict_subset ... ok
+test app::tests::submit_flow_tests::should_warn_when_no_local_drafts_exist ... ok
+test app::tests::submit_flow_tests::should_warn_when_pr_is_closed_or_merged ... ok
+test app::tests::submit_flow_tests::should_warn_when_submitting_without_pr_mode ... ok
+
+test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 1639 filtered out; finished in 0.15s
+
+     Running unittests src/main.rs (target/debug/deps/tuicr-09362214ace3c32f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling tuicr v0.19.1-offline-candidate.1 (/home/juanbe/development/tools/diffreviewtui/tuicr)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.16s
+     Running unittests src/lib.rs (target/debug/deps/tuicr-4e06e49e1fff1af7)
+
+running 19 tests
+test forge::github::mutations::tests::should_build_resolve_and_unresolve_mutations ... ok
+test forge::github::mutations::tests::should_build_file_comment_payload_with_subject_type_file ... ok
+test forge::github::mutations::tests::should_build_reply_request_with_numeric_in_reply_to ... ok
+test forge::github::mutations::tests::should_build_line_comment_payload_with_side ... ok
+test forge::github::mutations::tests::should_parse_create_comment_response ... ok
+test forge::github::mutations::tests::should_parse_thread_lookup_response ... ok
+test forge::github::mutations::tests::should_reject_both_side_anchor_with_no_native_representation ... ok
+test forge::github::mutations::tests::should_reject_general_comment_for_pending_review_endpoint ... ok
+test forge::github::mutations::tests::should_mark_general_comment_mapping_unresolvable ... ok
+test forge::github::mutations::tests::should_build_range_comment_payload_with_start_line_and_side ... ok
+test forge::github::mutations::tests::should_return_none_when_lookup_response_has_no_thread ... ok
+test forge::github::mutations::tests::should_build_pending_review_comment_request_targeting_review_id ... ok
+test forge::github::mutations::tests::should_reject_non_numeric_root_comment_id_for_reply ... ok
+test forge::github::mutations::tests::should_build_line_anchored_mapping_with_resolvable_thread ... ok
+test forge::github::mutations::tests::should_parse_successful_resolution_response ... ok
+test forge::github::mutations::tests::should_route_enterprise_host_via_hostname_flag ... ok
+test forge::github::mutations::tests::should_include_hostname_for_pending_review_comment_on_enterprise_host ... ok
+test forge::github::mutations::tests::should_surface_graphql_errors_on_resolution_failure ... ok
+test forge::github::mutations::tests::should_use_issue_comments_endpoint_for_review_level_general_comment ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 1662 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/tuicr-09362214ace3c32f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling tuicr v0.19.1-offline-candidate.1 (/home/juanbe/development/tools/diffreviewtui/tuicr)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.86s
+     Running unittests src/lib.rs (target/debug/deps/tuicr-4e06e49e1fff1af7)
+
+running 15 tests
+test forge::publish::tests::should_create_thread_then_reply_then_resolve_on_gitlab_end_to_end ... ok
+test forge::publish::tests::should_create_thread_then_reply_then_resolve_on_github_end_to_end ... ok
+test forge::publish::tests::should_checkpoint_each_success_before_advancing ... ok
+test forge::publish::tests::should_dismiss_thread_via_the_same_resolution_call_as_resolve ... ok
+test forge::publish::tests::should_replan_without_duplicate_after_checkpoint_failure ... ok
+test forge::publish::tests::should_skip_create_thread_as_unsupported_on_gitea_and_forgejo_end_to_end ... ok
+test forge::publish::tests::should_reply_using_root_comment_ledger_after_remote_reimport_replaces_bare_mapping ... ok
+test forge::publish::tests::should_preserve_lineage_and_provider_ids_across_pr_head_change_then_reply ... ok
+test forge::publish::tests::should_not_duplicate_when_the_same_plan_is_executed_twice ... ok
+test forge::publish::tests::should_skip_operations_whose_outcome_is_not_planned_or_emulated ... ok
+test forge::publish::tests::should_stop_at_first_failure_and_resume_without_resending_completed_ops ... ok
+test forge::publish::tests::should_seed_root_comment_ledger_from_remote_import_enabling_reply_to_a_thread_never_created_locally ... ok
+test forge::publish::tests::should_submit_review_outcome_via_legacy_create_review_with_no_batched_comments ... ok
+test forge::publish::tests::should_resume_gitlab_one_at_a_time_prefix_failure_without_reposting_created_threads ... ok
+test forge::publish::tests::should_create_thread_then_reply_then_resolve_on_azure_end_to_end ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 1666 filtered out; finished in 0.96s
+
+     Running unittests src/main.rs (target/debug/deps/tuicr-09362214ace3c32f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

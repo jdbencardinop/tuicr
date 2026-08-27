@@ -216,7 +216,11 @@ pub fn render_submit_confirm(frame: &mut Frame, app: &App) {
         };
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            format!("Durable GitLab operations: {}", plan.operations.len()),
+            format!(
+                "Durable {} operations: {}",
+                app.forge_display_name(),
+                plan.operations.len()
+            ),
             Style::default().add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(format!(

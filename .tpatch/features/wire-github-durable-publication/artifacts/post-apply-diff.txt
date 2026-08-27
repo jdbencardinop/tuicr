@@ -1,0 +1,12 @@
+ .tpatch/FEATURES.md                                |   1 +
+ docs/handoff/CURRENT.md                            |  13 +-
+ docs/wayfinder/map.md                              |   5 +-
+ .../tickets/wire-github-durable-publication.md     |  19 ++-
+ src/app/mod.rs                                     |   2 +-
+ src/app/submit.rs                                  | 131 +++++++++++--------
+ src/app/tests/submit_flow_tests.rs                 | 126 ++++++++++++-------
+ src/forge/github/gh.rs                             |  50 ++++++--
+ src/forge/github/mutations.rs                      | 139 +++++++++++++++------
+ src/forge/publish.rs                               |   8 +-
+ src/ui/submit_modals.rs                            |   6 +-
+ 11 files changed, 341 insertions(+), 159 deletions(-)

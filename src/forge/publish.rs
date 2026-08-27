@@ -22,7 +22,7 @@
 //! operation is naturally absent from that new plan, and nothing already
 //! published is ever resent.
 //!
-//! The TUI uses checkpointed execution for non-draft GitLab publication.
+//! The TUI uses checkpointed execution for non-draft GitHub and GitLab publication.
 
 use crate::error::{Result, TuicrError};
 use crate::forge::dryrun::{OperationKind, OperationOutcome, PlannedOperation};
@@ -527,8 +527,10 @@ mod tests {
     }
 
     const GH_CREATE_COMMENT: &str = r#"{"id": 111, "node_id": "PRRC_1"}"#;
-    const GH_THREAD_LOOKUP: &str =
-        r#"{"data": {"node": {"pullRequestReviewThread": {"id": "PRRT_1", "isResolved": false}}}}"#;
+    const GH_THREAD_LOOKUP: &str = r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{
+        "nodes":[{"id":"PRRT_1","isResolved":false,"comments":{"nodes":[{"id":"PRRC_1"}]}}],
+        "pageInfo":{"hasNextPage":false,"endCursor":null}
+    }}}}}"#;
     const GH_REPLY: &str = r#"{"id": 222, "node_id": "PRRC_2"}"#;
     const GH_RESOLVE: &str =
         r#"{"data": {"resolveReviewThread": {"thread": {"id": "PRRT_1", "isResolved": true}}}}"#;

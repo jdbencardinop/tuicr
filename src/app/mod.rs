@@ -1189,7 +1189,7 @@ pub struct App {
     /// In-flight `:submit*` state. `None` outside the resolver + confirmation
     /// modal flow; preflight populates it.
     pub submit_state: Option<SubmitState>,
-    /// Exact durable publication input for a pending non-draft GitLab submit.
+    /// Exact durable publication input for a pending non-draft GitHub/GitLab submit.
     pub submit_durable_session: Option<crate::model::review::ReviewSession>,
     /// Capability-aware preview executed unchanged after confirmation.
     pub submit_durable_plan: Option<crate::forge::dryrun::DryRunPlan>,

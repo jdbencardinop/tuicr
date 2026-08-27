@@ -1,0 +1,8 @@
+{
+  "slug": "wire-github-durable-publication",
+  "completed_at": "2026-08-27T03:08:30Z",
+  "base_commit": "45f8e7cf2a2daf392cf97b4685ae8961dccf0ced",
+  "has_patch": true,
+  "validation_status": "passed",
+  "validation_notes": "tpatch test — command: cargo test app::tests::submit_flow_tests -- --test-threads=1 \u0026\u0026 cargo test forge::github::mutations::tests \u0026\u0026 cargo test forge::publish::tests"
+}

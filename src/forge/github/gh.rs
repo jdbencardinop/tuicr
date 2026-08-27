@@ -513,11 +513,7 @@ where
         let thread = if is_general {
             None
         } else {
-            let lookup_args = super::mutations::build_thread_lookup_args(pr, &comment_node_id);
-            let lookup_output = self
-                .run_gh(lookup_args, &pr.repository.host)
-                .unwrap_or_default();
-            super::mutations::parse_thread_lookup_response(&lookup_output).unwrap_or(None)
+            Some(self.lookup_review_thread(pr, &comment_node_id)?)
         };
 
         Ok(super::mutations::build_create_thread_response(
@@ -590,11 +586,7 @@ where
         // A pending-review comment is anchored (build_add_pending_review_
         // comment_request refuses a general/no-path request), so it always
         // has an owning thread once GitHub materializes one.
-        let lookup_args = super::mutations::build_thread_lookup_args(pr, &comment_node_id);
-        let lookup_output = self
-            .run_gh(lookup_args, &pr.repository.host)
-            .unwrap_or_default();
-        let thread = super::mutations::parse_thread_lookup_response(&lookup_output).unwrap_or(None);
+        let thread = Some(self.lookup_review_thread(pr, &comment_node_id)?);
 
         Ok(super::mutations::build_create_thread_response(
             comment_id,
@@ -608,6 +600,28 @@ impl<R> GitHubGhBackend<R>
 where
     R: GhCommandRunner,
 {
+    fn lookup_review_thread(
+        &self,
+        pr: &PullRequestDetails,
+        comment_node_id: &str,
+    ) -> Result<(String, bool)> {
+        let mut cursor = None;
+        loop {
+            let args = super::mutations::build_thread_lookup_args(pr, cursor.as_deref());
+            let output = self.run_gh(args, &pr.repository.host)?;
+            let page = super::mutations::parse_thread_lookup_response(&output, comment_node_id)?;
+            if let Some(thread) = page.thread {
+                return Ok(thread);
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                return Err(TuicrError::Forge(format!(
+                    "GitHub did not expose a review thread for anchored comment `{comment_node_id}`"
+                )));
+            };
+            cursor = Some(next_cursor);
+        }
+    }
+
     fn build_review_threads_args(
         &self,
         pr: &PullRequestDetails,
@@ -1196,7 +1210,11 @@ index 1111111..2222222 100644
                         }
                         Ok(r#"{"data": {"resolveReviewThread": {"thread": {"id": "PRRT_1", "isResolved": true}}}}"#.to_string())
                     } else if query.contains("reviewThreads(") {
-                        Ok(REVIEW_THREADS_JSON.to_string())
+                        if query.contains("comments(first: 1)") {
+                            Ok(THREAD_LOOKUP_THREADS_JSON.to_string())
+                        } else {
+                            Ok(REVIEW_THREADS_JSON.to_string())
+                        }
                     } else if query.contains("viewer { login }") && query.contains("commit { oid }")
                     {
                         Ok(REVIEW_METADATA_JSON.to_string())
@@ -1309,6 +1327,16 @@ index 1111111..2222222 100644
                 }
             }
         }
+    }"##;
+
+    const THREAD_LOOKUP_THREADS_JSON: &str = r##"{
+        "data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": false, "endCursor": null},
+            "nodes": [
+                {"id":"PRRT_1","isResolved":false,"comments":{"nodes":[{"id":"PRRC_1"}]}},
+                {"id":"PRRT_pending1","isResolved":false,"comments":{"nodes":[{"id":"PRRC_pending1"}]}}
+            ]
+        }}}}
     }"##;
 
     const REVIEW_SUMMARIES_JSON: &str = r##"{
