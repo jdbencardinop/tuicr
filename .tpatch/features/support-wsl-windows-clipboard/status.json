@@ -5,7 +5,7 @@
   "state": "applied",
   "compatibility": "unknown",
   "requested_at": "2026-08-27T21:11:18Z",
-  "updated_at": "2026-08-27T21:31:55Z",
+  "updated_at": "2026-08-27T21:33:55Z",
   "last_command": "verify",
   "notes": "landed at 2026-08-27T21:32:19Z",
   "apply": {
@@ -15,7 +15,7 @@
   },
   "reconcile": {},
   "verify": {
-    "verified_at": "2026-08-27T21:31:55Z",
+    "verified_at": "2026-08-27T21:33:54Z",
     "passed": true,
     "recipe_hash_at_verify": "f5cde24829ed304cb633370dc0b183d287240fda0c217b2ec7885f2a54cd4c7a",
     "patch_hash_at_verify": "e313c34a9289fbadad38ee597219bed8d5857b1e07f126e1bec4f07af28fbd62"

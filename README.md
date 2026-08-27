@@ -145,6 +145,10 @@ I reviewed your code and have the following comments. Please address them.
 
 Paste it back to any coding agent (Claude, Codex, Cursor, etc).
 
+On WSL, tuicr writes directly to Windows Clipboard through `clip.exe` when
+Windows interoperability is available, including inside tmux. Native Linux,
+macOS, and Windows retain their platform clipboard paths.
+
 For an agent-driven workflow where your agent opens tuicr in a tmux, Zellij, or Herdr
 split pane, see [skills/tuicr/SKILL.md](skills/tuicr/SKILL.md).
 

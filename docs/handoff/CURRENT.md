@@ -9,7 +9,8 @@ durable-store, real-TUI, and non-draft vote paths. GitHub durable
 root/reply/resolve/reopen publication and checkpointed restart retry now
 live-pass. GitHub cumulative diff and relocated-comment rendering now also
 live-pass after a head update. Release and upstream submission remain blocked
-on explicit disposition of the remaining WSL caveats recorded below.
+on packaging/distribution and explicit disposition of the remaining
+environment caveats recorded below.
 
 ## Decision
 
@@ -49,6 +50,10 @@ Full decision text: `docs/fork/DECISIONS.md`.
   the cumulative diff when a strict range would hide an active provider
   thread. A disposable live rerun retained 14 files, 1,005 additions, and one
   discussion relocated from line 42 to line 47 through `:e` and restart.
+- WSL Windows Clipboard: `8dc5bbd` — Linux builds with active WSL interop send
+  UTF-16LE directly to `clip.exe` before terminal/Linux fallbacks. Library,
+  detached-tmux, and real-TUI Unicode round trips pass without changing
+  native Linux, macOS, or native Windows routing.
 - Latest build exercised on WSL reports
   `tuicr 0.19.1-offline-candidate.1+c2a7554`; later validation/tracker commits
   only change documentation and have not been rebuilt separately. The
@@ -74,16 +79,14 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Explicitly accept or fix the WSL TUI-clipboard boundary —
-   `docs/wayfinder/tickets/decide-wsl-clipboard-boundary.md`.
-2. Add arm64, signing/notarization, package-manager distribution, and cut an
-   actual tagged/pushed release — depends on the clipboard decision;
+1. Add arm64, signing/notarization, package-manager distribution, and cut an
+   actual tagged/pushed release;
    `docs/wayfinder/tickets/release-cross-platform-fork.md`.
-3. Post the one ready upstream patch (comment-author JSON) once approved, and
+2. Post the one ready upstream patch (comment-author JSON) once approved, and
    reconcile the rest after the release interface stabilizes —
    `docs/wayfinder/tickets/upstream-and-reconcile.md`.
-4. Update the teaching package only after a real release interface is fixed —
-   depends on step 3; not tracked as its own ticket here since it strictly
+3. Update the teaching package only after a real release interface is fixed —
+   depends on step 2; not tracked as its own ticket here since it strictly
    follows that release.
 
 ## Evidence pointers in this repo
@@ -98,8 +101,6 @@ In dependency order:
 
 ## Known WSL caveats
 
-- TUI clipboard export does not reach the Windows clipboard; `--stdout` and
-  direct `clip.exe` work;
 - Ubuntu Git 2.43 cannot execute two newer-Git fixture tests;
 - `wslview` misdetects interop although PowerShell browser launch works.
 

@@ -44,8 +44,8 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
   — tip `ca319dc`, `OFFLINE_VALIDATED_ONLY`.
 - [Validate upstream and fork on Ubuntu under WSL](tickets/validate-wsl-baseline.md)
   — core build/startup/navigation/persistence/stdout/editor and read-only
-  provider checks passed; anchor relocation and Windows clipboard remain
-  explicit caveats.
+  provider checks passed; the two newer-Git fixtures and browser launcher
+  remain explicit environment caveats.
 - [Validate live GitLab transport](tickets/validate-live-provider-parity.md)
   — GitLab live-passes; GitHub legacy publication passes but durable TUI
   publication and post-head-update rendering fail; Azure DevOps thread,
@@ -67,6 +67,9 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
 - [Preserve GitHub discussions across head refresh](tickets/fix-github-head-refresh.md)
   — automatic since-last-review scoping now yields to the cumulative diff
   when it would hide an active relocated provider thread.
+- [Write WSL exports to Windows Clipboard](tickets/decide-wsl-clipboard-boundary.md)
+  — active WSL interop now uses a UTF-16LE `clip.exe` bridge before terminal
+  and Linux clipboard fallbacks without changing native platform routing.
 - [Provision provider sandboxes](tickets/provision-provider-sandboxes.md) —
   Disposable GitHub, GitLab, and Azure DevOps targets were approved,
   exercised with synthetic-only data, and fully torn down.
@@ -86,9 +89,6 @@ and what each still needs before it can go upstream):
 - Whether upstream Tuicr will accept the durable-thread/provider-adapter
   changes, and in what split — gated on
   [upstream-and-reconcile](tickets/upstream-and-reconcile.md).
-- Whether WSL TUI clipboard support is required for release or the verified
-  stdout/`clip.exe` workaround is accepted — gated on
-  [decide-wsl-clipboard-boundary](tickets/decide-wsl-clipboard-boundary.md).
 - Native self-hosted GitLab custom-port URLs without the documented portless
   logical-host workaround — tracked by
   [support-gitlab-custom-ports](tickets/support-gitlab-custom-ports.md).
