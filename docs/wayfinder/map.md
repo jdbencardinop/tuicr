@@ -64,6 +64,9 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
 - [Publish durable GitHub threads from the TUI](tickets/wire-github-durable-publication.md)
   — live root/reply/resolve/reopen publication and checkpointed restart retry
   pass without duplicates.
+- [Preserve GitHub discussions across head refresh](tickets/fix-github-head-refresh.md)
+  — automatic since-last-review scoping now yields to the cumulative diff
+  when it would hide an active relocated provider thread.
 - [Provision provider sandboxes](tickets/provision-provider-sandboxes.md) —
   Disposable GitHub, GitLab, and Azure DevOps targets were approved,
   exercised with synthetic-only data, and fully torn down.
@@ -83,8 +86,6 @@ and what each still needs before it can go upstream):
 - Whether upstream Tuicr will accept the durable-thread/provider-adapter
   changes, and in what split — gated on
   [upstream-and-reconcile](tickets/upstream-and-reconcile.md).
-- GitHub diff/comment preservation across a head update —
-  [fix-github-head-refresh](tickets/fix-github-head-refresh.md).
 - Whether WSL TUI clipboard support is required for release or the verified
   stdout/`clip.exe` workaround is accepted — gated on
   [decide-wsl-clipboard-boundary](tickets/decide-wsl-clipboard-boundary.md).

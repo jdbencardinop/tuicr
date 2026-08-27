@@ -7,9 +7,9 @@ anchor relocation, and disposable GitLab/GitHub/Azure DevOps runs are
 complete. Azure native-anchor preservation now passes the live adapter,
 durable-store, real-TUI, and non-draft vote paths. GitHub durable
 root/reply/resolve/reopen publication and checkpointed restart retry now
-live-pass. Release and upstream submission remain blocked on GitHub
-post-head-update rendering and explicit disposition of the remaining WSL
-caveats recorded below.
+live-pass. GitHub cumulative diff and relocated-comment rendering now also
+live-pass after a head update. Release and upstream submission remain blocked
+on explicit disposition of the remaining WSL caveats recorded below.
 
 ## Decision
 
@@ -45,6 +45,10 @@ Full decision text: `docs/fork/DECISIONS.md`.
   provider-native thread/iteration/tracking context survive live adapter
   conversion, stale classification, ReviewStore reload, and duplicate-free
   repeat import.
+- GitHub head refresh: `0ddd120` — automatic since-last-review scoping restores
+  the cumulative diff when a strict range would hide an active provider
+  thread. A disposable live rerun retained 14 files, 1,005 additions, and one
+  discussion relocated from line 42 to line 47 through `:e` and restart.
 - Latest build exercised on WSL reports
   `tuicr 0.19.1-offline-candidate.1+c2a7554`; later validation/tracker commits
   only change documentation and have not been rebuilt separately. The
@@ -70,18 +74,16 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Fix the GitHub head-refresh failure, then execute the remaining live parity —
-   `docs/wayfinder/tickets/validate-live-provider-parity.md`.
-2. Explicitly accept or fix the WSL TUI-clipboard boundary —
+1. Explicitly accept or fix the WSL TUI-clipboard boundary —
    `docs/wayfinder/tickets/decide-wsl-clipboard-boundary.md`.
-3. Add arm64, signing/notarization, package-manager distribution, and cut an
-   actual tagged/pushed release — depends on 1–3;
+2. Add arm64, signing/notarization, package-manager distribution, and cut an
+   actual tagged/pushed release — depends on the clipboard decision;
    `docs/wayfinder/tickets/release-cross-platform-fork.md`.
-4. Post the one ready upstream patch (comment-author JSON) once approved, and
+3. Post the one ready upstream patch (comment-author JSON) once approved, and
    reconcile the rest after the release interface stabilizes —
    `docs/wayfinder/tickets/upstream-and-reconcile.md`.
-5. Update the teaching package only after a real release interface is fixed —
-   depends on step 4; not tracked as its own ticket here since it strictly
+4. Update the teaching package only after a real release interface is fixed —
+   depends on step 3; not tracked as its own ticket here since it strictly
    follows that release.
 
 ## Evidence pointers in this repo
@@ -106,7 +108,6 @@ self-hosted provider run is complete with the gaps noted above.
 
 ## Remaining evidence gaps
 
-- GitHub post-head-update rendering;
 - independent GitHub review-state validation with a second standard identity;
 - multi-review daily-use observation.
 
