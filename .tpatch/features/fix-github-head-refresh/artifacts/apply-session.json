@@ -1,0 +1,8 @@
+{
+  "slug": "fix-github-head-refresh",
+  "completed_at": "2026-08-27T04:07:08Z",
+  "base_commit": "6a840910b4fbcdf8dbd4ec29ee22f043318533c3",
+  "has_patch": true,
+  "validation_status": "passed",
+  "validation_notes": "tpatch test — command: cargo test --lib -- --skip vcs::git::libgit2::tests::should_discover_worktree_with_relativeworktrees_extension --skip vcs::git::tests::default_preference_routes_reftable_repo_to_cli"
+}

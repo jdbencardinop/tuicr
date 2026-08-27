@@ -55,6 +55,7 @@ impl App {
         self.review_commits.clear();
         self.pr_commits.clear();
         self.pr_last_reviewed_commit_index = None;
+        self.pr_auto_scoped_since_last_review = false;
         self.show_commit_selector = false;
         self.range_diff_files = None;
         self.saved_inline_selection = None;
@@ -283,6 +284,54 @@ impl App {
         }
     }
 
+    fn active_remote_thread_anchor_is_visible(
+        &self,
+        thread: &crate::forge::remote_comments::RemoteReviewThread,
+    ) -> bool {
+        let Some(line) = thread.line else {
+            return true;
+        };
+        let side = match thread.side {
+            crate::forge::remote_comments::RemoteCommentSide::Right => LineSide::New,
+            crate::forge::remote_comments::RemoteCommentSide::Left => LineSide::Old,
+        };
+        let path = Path::new(&thread.path);
+
+        self.diff_files.iter().any(|file| {
+            let file_path = match side {
+                LineSide::New => file.new_path.as_deref().or(file.old_path.as_deref()),
+                LineSide::Old => file.old_path.as_deref().or(file.new_path.as_deref()),
+            };
+            file_path.is_some_and(|file_path| file_path == path)
+                && file.anchor_context(side, line, line, 0).is_some()
+        })
+    }
+
+    pub(in crate::app) fn restore_full_pr_diff_for_hidden_active_threads(
+        &mut self,
+        threads: &[crate::forge::remote_comments::RemoteReviewThread],
+    ) {
+        if !self.pr_auto_scoped_since_last_review
+            || self.range_diff_files.is_none()
+            || !threads.iter().any(|thread| {
+                !thread.is_resolved
+                    && !thread.is_outdated
+                    && !self.active_remote_thread_anchor_is_visible(thread)
+            })
+        {
+            return;
+        }
+
+        self.pr_auto_scoped_since_last_review = false;
+        self.pr_range_reload_state = None;
+        self.pr_range_reload_rx = None;
+        if !self.review_commits.is_empty() {
+            self.commit_selection_range = Some((0, self.review_commits.len() - 1));
+        }
+        self.apply_cached_full_pr_diff();
+        self.set_message("Showing the full pull request to keep active review discussions visible");
+    }
+
     /// Kick off a background fetch of `compare/<start>...<end>` and apply
     /// it on the main thread. Cancels any in-flight range reload (a fresh
     /// toggle invalidates the previous request).
@@ -431,6 +480,8 @@ impl App {
         if let Some(anchor) = &request.anchor {
             self.restore_pr_cursor_to_anchor(anchor);
         }
+        let threads = self.forge_review_threads.clone();
+        self.restore_full_pr_diff_for_hidden_active_threads(&threads);
         Ok(())
     }
 
@@ -1011,6 +1062,7 @@ impl App {
                 let mut threads_loaded = false;
                 match threads {
                     Ok(t) => {
+                        self.restore_full_pr_diff_for_hidden_active_threads(&t);
                         self.forge_review_threads = t;
                         threads_loaded = true;
                     }

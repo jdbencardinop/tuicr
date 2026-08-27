@@ -552,6 +552,7 @@ impl App {
             review_commits: Vec::new(),
             pr_commits: Vec::new(),
             pr_last_reviewed_commit_index: None,
+            pr_auto_scoped_since_last_review: false,
             pr_range_reload_state: None,
             pr_range_reload_rx: None,
             show_commit_selector: false,

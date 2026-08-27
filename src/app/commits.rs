@@ -32,6 +32,7 @@ impl App {
         review_metadata: crate::forge::traits::PullRequestReviewMetadata,
     ) -> Option<String> {
         self.pr_last_reviewed_commit_index = None;
+        self.pr_auto_scoped_since_last_review = false;
         if commits.len() <= 1 {
             return None;
         }
@@ -80,6 +81,7 @@ impl App {
         }
 
         self.commit_selection_range = Some(range);
+        self.pr_auto_scoped_since_last_review = auto_scoped_since_last_review;
         self.review_commits = mapped;
 
         if let Some(message) = since_last_review_message {
@@ -433,6 +435,7 @@ impl App {
         if cursor >= self.commit_list.len() {
             return;
         }
+        self.pr_auto_scoped_since_last_review = false;
 
         match self.commit_selection_range {
             None => {
@@ -665,6 +668,7 @@ impl App {
     }
 
     fn confirm_commit_selection_inner(&mut self) -> Result<()> {
+        self.pr_auto_scoped_since_last_review = false;
         let (start, end) = match self.commit_selection_range {
             Some(range) => range,
             None => {

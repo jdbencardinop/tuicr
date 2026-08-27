@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "feature": "fix-github-head-refresh",
+  "current_generation": 1,
+  "generations": [
+    {
+      "generation": 1,
+      "generation_id": "pg_d489ed68190c",
+      "kind": "record",
+      "patch_sha256": "cdf1844f073f5e8dedc55f1d568f028d5700d81ae96dc28c4d7980962d45d06c",
+      "git_patch_id": "c15a4a2009dabb17ddcc43a7d8671a32b87de749",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "369cd34c6893c6a864ca673c8c314100d7dbc462384fc01189781c8af39e51b2",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/001-record.patch",
+      "base_commit": "6a840910b4fbcdf8dbd4ec29ee22f043318533c3",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [
+          "src/app/commits.rs",
+          "src/app/init.rs",
+          "src/app/mod.rs",
+          "src/app/pr.rs",
+          "src/app/tests/target_selector_tests.rs"
+        ],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "src/app/commits.rs",
+        "src/app/init.rs",
+        "src/app/mod.rs",
+        "src/app/pr.rs",
+        "src/app/tests/target_selector_tests.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    }
+  ]
+}

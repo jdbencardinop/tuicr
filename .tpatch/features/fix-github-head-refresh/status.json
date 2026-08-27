@@ -1,0 +1,23 @@
+{
+  "id": "fix-github-head-refresh",
+  "slug": "fix-github-head-refresh",
+  "title": "Preserve the refreshed GitHub pull-request diff and provider-relocated comments across in-process reload and fresh restart after the pull-request head advances.",
+  "state": "applied",
+  "compatibility": "unknown",
+  "requested_at": "2026-08-27T03:50:37Z",
+  "updated_at": "2026-08-27T04:07:09Z",
+  "last_command": "verify",
+  "notes": "landed at 2026-08-27T04:17:27Z",
+  "apply": {
+    "completed_at": "2026-08-27T04:07:08Z",
+    "base_commit": "6a840910b4fbcdf8dbd4ec29ee22f043318533c3",
+    "has_patch": true
+  },
+  "reconcile": {},
+  "verify": {
+    "verified_at": "2026-08-27T04:07:08Z",
+    "passed": true,
+    "recipe_hash_at_verify": "369cd34c6893c6a864ca673c8c314100d7dbc462384fc01189781c8af39e51b2",
+    "patch_hash_at_verify": "cdf1844f073f5e8dedc55f1d568f028d5700d81ae96dc28c4d7980962d45d06c"
+  }
+}

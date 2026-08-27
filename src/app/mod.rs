@@ -1305,6 +1305,9 @@ pub struct App {
     /// by the viewer's latest submitted review. Commits at this index and
     /// older get a reviewed marker in the inline selector.
     pub pr_last_reviewed_commit_index: Option<usize>,
+    /// Whether the current strict PR range was selected automatically from
+    /// the viewer's latest review rather than explicitly by the user.
+    pub pr_auto_scoped_since_last_review: bool,
     /// In-flight range re-fetch driven by toggling commits in the inline
     /// selector while in PR mode. Drives a spinner in the status bar.
     pub pr_range_reload_state: Option<PrRangeReloadRequest>,

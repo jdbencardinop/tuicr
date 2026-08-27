@@ -1,0 +1,330 @@
+diff --git a/src/app/commits.rs b/src/app/commits.rs
+index 817f01d..193bc5c 100644
+--- a/src/app/commits.rs
++++ b/src/app/commits.rs
+@@ -32,6 +32,7 @@ impl App {
+         review_metadata: crate::forge::traits::PullRequestReviewMetadata,
+     ) -> Option<String> {
+         self.pr_last_reviewed_commit_index = None;
++        self.pr_auto_scoped_since_last_review = false;
+         if commits.len() <= 1 {
+             return None;
+         }
+@@ -80,6 +81,7 @@ impl App {
+         }
+ 
+         self.commit_selection_range = Some(range);
++        self.pr_auto_scoped_since_last_review = auto_scoped_since_last_review;
+         self.review_commits = mapped;
+ 
+         if let Some(message) = since_last_review_message {
+@@ -433,6 +435,7 @@ impl App {
+         if cursor >= self.commit_list.len() {
+             return;
+         }
++        self.pr_auto_scoped_since_last_review = false;
+ 
+         match self.commit_selection_range {
+             None => {
+@@ -665,6 +668,7 @@ impl App {
+     }
+ 
+     fn confirm_commit_selection_inner(&mut self) -> Result<()> {
++        self.pr_auto_scoped_since_last_review = false;
+         let (start, end) = match self.commit_selection_range {
+             Some(range) => range,
+             None => {
+diff --git a/src/app/init.rs b/src/app/init.rs
+index 3c6d310..3c83e80 100644
+--- a/src/app/init.rs
++++ b/src/app/init.rs
+@@ -552,6 +552,7 @@ impl App {
+             review_commits: Vec::new(),
+             pr_commits: Vec::new(),
+             pr_last_reviewed_commit_index: None,
++            pr_auto_scoped_since_last_review: false,
+             pr_range_reload_state: None,
+             pr_range_reload_rx: None,
+             show_commit_selector: false,
+diff --git a/src/app/mod.rs b/src/app/mod.rs
+index bf0cf49..6ca17b7 100644
+--- a/src/app/mod.rs
++++ b/src/app/mod.rs
+@@ -1305,6 +1305,9 @@ pub struct App {
+     /// by the viewer's latest submitted review. Commits at this index and
+     /// older get a reviewed marker in the inline selector.
+     pub pr_last_reviewed_commit_index: Option<usize>,
++    /// Whether the current strict PR range was selected automatically from
++    /// the viewer's latest review rather than explicitly by the user.
++    pub pr_auto_scoped_since_last_review: bool,
+     /// In-flight range re-fetch driven by toggling commits in the inline
+     /// selector while in PR mode. Drives a spinner in the status bar.
+     pub pr_range_reload_state: Option<PrRangeReloadRequest>,
+diff --git a/src/app/pr.rs b/src/app/pr.rs
+index b10c827..3084de4 100644
+--- a/src/app/pr.rs
++++ b/src/app/pr.rs
+@@ -55,6 +55,7 @@ impl App {
+         self.review_commits.clear();
+         self.pr_commits.clear();
+         self.pr_last_reviewed_commit_index = None;
++        self.pr_auto_scoped_since_last_review = false;
+         self.show_commit_selector = false;
+         self.range_diff_files = None;
+         self.saved_inline_selection = None;
+@@ -283,6 +284,54 @@ impl App {
+         }
+     }
+ 
++    fn active_remote_thread_anchor_is_visible(
++        &self,
++        thread: &crate::forge::remote_comments::RemoteReviewThread,
++    ) -> bool {
++        let Some(line) = thread.line else {
++            return true;
++        };
++        let side = match thread.side {
++            crate::forge::remote_comments::RemoteCommentSide::Right => LineSide::New,
++            crate::forge::remote_comments::RemoteCommentSide::Left => LineSide::Old,
++        };
++        let path = Path::new(&thread.path);
++
++        self.diff_files.iter().any(|file| {
++            let file_path = match side {
++                LineSide::New => file.new_path.as_deref().or(file.old_path.as_deref()),
++                LineSide::Old => file.old_path.as_deref().or(file.new_path.as_deref()),
++            };
++            file_path.is_some_and(|file_path| file_path == path)
++                && file.anchor_context(side, line, line, 0).is_some()
++        })
++    }
++
++    pub(in crate::app) fn restore_full_pr_diff_for_hidden_active_threads(
++        &mut self,
++        threads: &[crate::forge::remote_comments::RemoteReviewThread],
++    ) {
++        if !self.pr_auto_scoped_since_last_review
++            || self.range_diff_files.is_none()
++            || !threads.iter().any(|thread| {
++                !thread.is_resolved
++                    && !thread.is_outdated
++                    && !self.active_remote_thread_anchor_is_visible(thread)
++            })
++        {
++            return;
++        }
++
++        self.pr_auto_scoped_since_last_review = false;
++        self.pr_range_reload_state = None;
++        self.pr_range_reload_rx = None;
++        if !self.review_commits.is_empty() {
++            self.commit_selection_range = Some((0, self.review_commits.len() - 1));
++        }
++        self.apply_cached_full_pr_diff();
++        self.set_message("Showing the full pull request to keep active review discussions visible");
++    }
++
+     /// Kick off a background fetch of `compare/<start>...<end>` and apply
+     /// it on the main thread. Cancels any in-flight range reload (a fresh
+     /// toggle invalidates the previous request).
+@@ -431,6 +480,8 @@ impl App {
+         if let Some(anchor) = &request.anchor {
+             self.restore_pr_cursor_to_anchor(anchor);
+         }
++        let threads = self.forge_review_threads.clone();
++        self.restore_full_pr_diff_for_hidden_active_threads(&threads);
+         Ok(())
+     }
+ 
+@@ -1011,6 +1062,7 @@ impl App {
+                 let mut threads_loaded = false;
+                 match threads {
+                     Ok(t) => {
++                        self.restore_full_pr_diff_for_hidden_active_threads(&t);
+                         self.forge_review_threads = t;
+                         threads_loaded = true;
+                     }
+diff --git a/src/app/tests/target_selector_tests.rs b/src/app/tests/target_selector_tests.rs
+index 304fc5c..807ab6e 100644
+--- a/src/app/tests/target_selector_tests.rs
++++ b/src/app/tests/target_selector_tests.rs
+@@ -713,6 +713,7 @@ fn should_preserve_persisted_commit_range_over_since_last_review_default() {
+ 
+     assert_eq!(app.commit_selection_range, Some((1, 1)));
+     assert_eq!(app.pr_last_reviewed_commit_index, Some(1));
++    assert!(!app.pr_auto_scoped_since_last_review);
+     assert!(message.is_none());
+     assert_eq!(app.focused_panel, FocusedPanel::Diff);
+ }
+@@ -736,6 +737,7 @@ fn should_mark_pr_commits_covered_by_viewers_last_review() {
+ 
+     app.apply_pr_commit_selector(commits, metadata);
+ 
++    assert!(app.pr_auto_scoped_since_last_review);
+     assert!(!app.is_commit_reviewed_by_viewer(0));
+     assert!(app.is_commit_reviewed_by_viewer(1));
+     assert!(app.is_commit_reviewed_by_viewer(2));
+@@ -2529,6 +2531,163 @@ fn sample_thread(line: u32, body: &str, resolved: bool, outdated: bool) -> Remot
+     }
+ }
+ 
++fn github_head_refresh_full_patch() -> String {
++    fn added_file(path: &str, line_count: usize, prefix: &str) -> String {
++        let mut patch = format!(
++            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{line_count} @@\n"
++        );
++        for line in 1..=line_count {
++            patch.push_str(&format!("+{prefix} {line}\n"));
++        }
++        patch
++    }
++
++    let mut patch = added_file("src/review-policy.ts", 205, "policy line");
++    for index in 1..=12 {
++        patch.push_str(&added_file(
++            &format!("src/fixture-{index}.ts"),
++            60,
++            "fixture line",
++        ));
++    }
++    patch.push_str(&added_file("src/fixture-13.ts", 80, "fixture line"));
++    patch
++}
++
++fn github_head_refresh_range_patch() -> &'static str {
++    "diff --git a/src/review-policy.ts b/src/review-policy.ts
++--- a/src/review-policy.ts
+++++ b/src/review-policy.ts
++@@ -1,3 +1,8 @@
+++anchor shift 1
+++anchor shift 2
+++anchor shift 3
+++anchor shift 4
+++anchor shift 5
++ policy line 1
++ policy line 2
++ policy line 3
++"
++}
++
++fn github_head_refresh_app(auto_scoped: bool) -> App {
++    let mut app = build_app();
++    let highlighter = SyntaxHighlighter::default();
++    let full = crate::vcs::diff_parser::parse_unified_diff(
++        &github_head_refresh_full_patch(),
++        crate::vcs::diff_parser::DiffFormat::GitStyle,
++        &highlighter,
++    )
++    .unwrap();
++    let narrow = crate::vcs::diff_parser::parse_unified_diff(
++        github_head_refresh_range_patch(),
++        crate::vcs::diff_parser::DiffFormat::GitStyle,
++        &highlighter,
++    )
++    .unwrap();
++
++    assert_eq!(full.len(), 14);
++    assert_eq!(
++        full.iter()
++            .flat_map(|file| &file.hunks)
++            .flat_map(|hunk| &hunk.lines)
++            .filter(|line| line.origin == LineOrigin::Addition)
++            .count(),
++        1005
++    );
++
++    app.diff_files = narrow;
++    app.range_diff_files = Some(full);
++    app.review_commits = vec![dummy_commit("shift-head"), dummy_commit("review-head")];
++    app.commit_selection_range = Some((0, 0));
++    app.pr_last_reviewed_commit_index = Some(1);
++    app.pr_auto_scoped_since_last_review = auto_scoped;
++    app
++}
++
++#[test]
++fn should_restore_cumulative_github_diff_when_auto_scope_hides_relocated_active_thread() {
++    // Covers both an in-process head reload and a fresh lineage restart: both
++    // converge on the same automatic selector state before threads arrive.
++    for _ in 0..2 {
++        let mut app = github_head_refresh_app(true);
++        let (tx, rx) = std::sync::mpsc::channel();
++        drop(tx);
++        app.pr_range_reload_rx = Some(rx);
++
++        let mut relocated = sample_thread(47, "relocated from line 42", false, false);
++        relocated.path = "src/review-policy.ts".to_string();
++        relocated.provider_native_anchor = Some(serde_json::json!({
++            "originalLine": 42,
++            "line": 47,
++            "originalCommit": "review-head",
++            "commit": "shift-head"
++        }));
++
++        app.restore_full_pr_diff_for_hidden_active_threads(std::slice::from_ref(&relocated));
++
++        assert_eq!(app.diff_files.len(), 14);
++        assert_eq!(app.commit_selection_range, Some((0, 1)));
++        assert!(!app.pr_auto_scoped_since_last_review);
++        assert!(app.pr_range_reload_rx.is_none());
++        assert!(
++            app.diff_files
++                .iter()
++                .find(|file| file.new_path.as_deref() == Some(Path::new("src/review-policy.ts")))
++                .unwrap()
++                .anchor_context(LineSide::New, 47, 47, 0)
++                .is_some()
++        );
++
++        app.forge_review_threads = vec![relocated];
++        app.session
++            .import_remote_review_threads("github", &app.forge_review_threads);
++        app.session
++            .import_remote_review_threads("github", &app.forge_review_threads);
++        assert_eq!(app.session.threads.len(), 1);
++        assert!(app.session.threads[0].has_provider_id("github", "T"));
++    }
++}
++
++#[test]
++fn should_preserve_explicit_commit_range_when_remote_thread_anchor_is_outside_it() {
++    let mut app = github_head_refresh_app(false);
++    let mut relocated = sample_thread(47, "outside explicit range", false, false);
++    relocated.path = "src/review-policy.ts".to_string();
++
++    app.restore_full_pr_diff_for_hidden_active_threads(&[relocated]);
++
++    assert_eq!(app.diff_files.len(), 1);
++    assert_eq!(app.commit_selection_range, Some((0, 0)));
++    assert!(app.range_diff_files.is_some());
++}
++
++#[test]
++fn should_restore_cumulative_diff_when_range_reload_finishes_after_threads_load() {
++    let mut app = github_head_refresh_app(true);
++    app.diff_files = app.range_diff_files.clone().unwrap();
++    let mut relocated = sample_thread(47, "threads loaded first", false, false);
++    relocated.path = "src/review-policy.ts".to_string();
++    app.forge_review_threads = vec![relocated];
++    let request = PrRangeReloadRequest {
++        repository: ForgeRepository::github("github.com", "agavra", "tuicr"),
++        pr_number: 42,
++        head_sha: "shift-head".to_string(),
++        start_sha: "shift-head".to_string(),
++        end_sha: "shift-head".to_string(),
++        range: (0, 0),
++        started_at: Instant::now(),
++        anchor: None,
++    };
++
++    app.finish_pr_range_reload(&request, github_head_refresh_range_patch())
++        .unwrap();
++
++    assert_eq!(app.diff_files.len(), 14);
++    assert_eq!(app.commit_selection_range, Some((0, 1)));
++    assert!(!app.pr_auto_scoped_since_last_review);
++}
++
+ #[test]
+ fn should_populate_remote_threads_when_opening_pr_through_test_seam() {
+     // given

@@ -3,8 +3,8 @@ id: fix-github-head-refresh
 title: Preserve GitHub diff and comments across head refresh
 type: implementation
 mode: autonomous
-status: open
-owner:
+status: in-progress
+owner: copilot
 blocked_by: []
 ---
 
