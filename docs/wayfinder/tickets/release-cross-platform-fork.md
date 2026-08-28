@@ -3,8 +3,8 @@ id: release-cross-platform-fork
 title: Release the cross-platform fork
 type: task
 mode: AFK
-status: blocked
-owner: copilot
+status: open
+owner:
 blocked_by: [validate-live-provider-parity, classify-local-anchor-shifts, decide-wsl-clipboard-boundary]
 ---
 
@@ -32,24 +32,18 @@ explicitly **not a release**:
 - macOS/Linux x86_64 archives, checksums, manifest, license summary, and a
   binary-aware secret scan exist for this candidate only.
 
-## Blockers
+## Remaining work
 
-- unsafe local anchor behavior after a head shift
-  (`classify-local-anchor-shifts`);
-- live GitHub/Azure DevOps mutation validation plus GitLab durable publication
-  and range-staleness fixes (`validate-live-provider-parity`);
-- explicit acceptance or repair of the WSL TUI clipboard behavior
-  (`decide-wsl-clipboard-boundary`);
 - arm64 builds, signing/notarization, and package-manager distribution — not
   started.
 
 No Git tag has been created and nothing has been pushed or published.
 
-## Unblock condition
+## Next work
 
-All listed dependencies close, then arm64/signing/distribution work is scoped
-and done, then a real tagged/pushed release replaces the current offline
-candidate. `docs/offline-candidate/README.md` and
+All tracked validation dependencies are closed. Scope and complete
+arm64/signing/distribution work, then replace the current offline candidate
+with a real tagged/pushed release. `docs/offline-candidate/README.md` and
 `docs/offline-candidate/SECRET-SCAN.md` document the exact accepted scope,
 checksums, and secret-scan contract of the current candidate to carry forward
 into that release.

@@ -3,7 +3,7 @@ id: validate-live-provider-parity
 title: Validate live GitHub/GitLab/Azure DevOps provider parity
 type: prototype
 mode: HITL
-status: blocked
+status: closed
 owner: copilot
 blocked_by: [provision-provider-sandboxes, classify-gitlab-range-anchors, wire-gitlab-durable-publication, wire-github-durable-publication, fix-github-head-refresh]
 ---
@@ -26,10 +26,11 @@ behavior.
 
 ## Status
 
-GitLab is live-tested. GitHub has a completed one-identity live run with two
-implementation blockers. Azure DevOps thread, stale-anchor, durable-store,
-TUI, and non-draft vote behavior are live-tested. Only two-PR pagination
-remains as an Azure-specific evidence gap:
+GitHub, GitLab, and Azure DevOps live validation is complete against approved
+synthetic targets. The two GitHub implementation blockers found in the first
+run were fixed and rerun successfully. Azure two-PR pagination and independent
+GitHub review-state validation remain explicitly accepted evidence gaps, not
+release blockers:
 
 - GitHub/GitLab offline/mock parity is complete (durable create/reply/resolve,
   REST/GraphQL ID mapping, partial-resume/idempotency, head-update handling,
@@ -217,10 +218,48 @@ without guessing relocation. The committed harness, default/all/reloaded TUI
 views, and durable `ReviewStore` all passed with the preserved stale range at
 70-72. Exact container, volume, credential, build-state, forward, and tunnel
 teardown passed. Durable TUI publication remains the only GitLab integration
-gap.
+gap at this checkpoint.
 
-## Unblock condition
+### GitLab durable-publication rerun — 2026-08-25
 
-Close `wire-github-durable-publication` and `fix-github-head-refresh`, then
-rerun the disposable GitHub lifecycle. Record each remaining pass/fail delta
-directly in this ticket.
+The real TUI previewed and checkpointed durable roots, replies, resolve, and
+reopen operations. Provider-ID reconciliation, same-process retry, restart
+retry, and repeat import remained duplicate-free. The approved GitLab
+container, volumes, credentials, forward, and tunnel were removed. Sanitized
+evidence:
+`../../../../artifacts/validation/2026-08-25-wsl-gitlab-publication/`.
+
+### GitHub durable-publication rerun — 2026-08-27
+
+The real TUI published one range root, one reply, and resolve/reopen
+transitions through the canonical durable planner and checkpointed executor.
+Same-process and restart retries created no duplicates. The run also corrected
+paginated GraphQL thread discovery and provider-aware checkpoint mappings.
+The exact disposable repository was deleted. Sanitized evidence:
+`../../../../artifacts/validation/2026-08-27-wsl-github-durable-publication/`.
+
+### GitHub head-refresh rerun — 2026-08-27
+
+After the five-line anchor shift, GitHub retained the valid 14-file,
+1,005-addition cumulative diff and relocated the discussion from line 42 to
+line 47. Tuicr rendered all files and exactly one current line-47 discussion
+after both `:e` and a fresh restart. Explicit commit subsets remain narrow;
+only automatic since-last-review scoping yields when it would hide an active
+provider thread. The exact disposable repository was deleted. Sanitized
+evidence:
+`../../../../artifacts/validation/2026-08-27-wsl-github-head-refresh/`.
+
+## Resolution
+
+The provider contract is live-proven for the supported operation shapes:
+GitHub and GitLab legacy plus durable publication, reply/status lifecycle,
+head refresh, checkpoint resume, and duplicate prevention; Azure DevOps
+thread/reply/status, native iteration anchors, stale rendering, idempotency,
+and every non-draft vote state.
+
+The user explicitly accepted one Azure identity as sufficient for transport
+and lifecycle validation, with independent reviewer permissions/voting left
+as an evidence gap. Azure two-PR pagination is likewise retained as a minor
+evidence gap rather than a release gate. GitHub's unavailable second standard
+identity leaves independent approve/request-changes state unproven. These gaps
+must not be presented as passes, but none blocks the first fork release.

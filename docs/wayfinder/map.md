@@ -1,7 +1,7 @@
 # Continue the Tuicr Review Fork
 
-**Status:** Offline implementation and WSL/GitLab validation complete; release
-and upstream work remain blocked.
+**Status:** Implementation and live provider validation complete;
+cross-platform release engineering is the active frontier.
 
 ## Destination
 
@@ -46,10 +46,9 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
   — core build/startup/navigation/persistence/stdout/editor and read-only
   provider checks passed; the two newer-Git fixtures and browser launcher
   remain explicit environment caveats.
-- [Validate live GitLab transport](tickets/validate-live-provider-parity.md)
-  — GitLab live-passes; GitHub legacy publication passes but durable TUI
-  publication and post-head-update rendering fail; Azure DevOps thread,
-  native-anchor, TUI, and vote lifecycles live-pass.
+- [Validate live provider parity](tickets/validate-live-provider-parity.md)
+  — GitHub, GitLab, and Azure DevOps mutation lifecycles live-pass; accepted
+  identity and Azure pagination limits remain explicit evidence gaps.
 - [Classify GitLab range anchors](tickets/classify-gitlab-range-anchors.md)
   — live GitLab 19.2.1 now preserves native range 70-72 and marks either
   old-head or provider-terminal mismatches stale through backend, TUI reload,

@@ -8,9 +8,9 @@ complete. Azure native-anchor preservation now passes the live adapter,
 durable-store, real-TUI, and non-draft vote paths. GitHub durable
 root/reply/resolve/reopen publication and checkpointed restart retry now
 live-pass. GitHub cumulative diff and relocated-comment rendering now also
-live-pass after a head update. Release and upstream submission remain blocked
-on packaging/distribution and explicit disposition of the remaining
-environment caveats recorded below.
+live-pass after a head update. Provider parity is closed with the accepted
+identity/pagination evidence gaps recorded explicitly. Cross-platform release
+engineering is now the active frontier.
 
 ## Decision
 
@@ -75,7 +75,7 @@ Full decision text: `docs/fork/DECISIONS.md`.
 Per-feature commit ranges and validation state:
 `docs/fork/PATCHES.md`.
 
-## Blocked frontier
+## Active frontier
 
 In dependency order:
 
