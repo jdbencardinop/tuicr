@@ -1,8 +1,8 @@
 {
   "slug": "prepare-cross-platform-fork-release",
-  "completed_at": "2026-08-29T01:36:05Z",
-  "base_commit": "42a9597e2dd361ad66943c4a177e10ab3efd2d3e",
+  "completed_at": "2026-08-29T01:45:48Z",
+  "base_commit": "d47da014030f0573e7086dd622a0be80e79706d2",
   "has_patch": true,
   "validation_status": "passed",
-  "validation_notes": "tpatch test — command: python3 -c 'import yaml; yaml.safe_load(open(\".github/workflows/release-candidate.yml\"))' \u0026\u0026 git diff --check"
+  "validation_notes": "tpatch test — command: bash -n scripts/package-release-artifact.sh \u0026\u0026 git diff --check"
 }

@@ -63,6 +63,15 @@ scan_secrets() {
     'xox[baprs]-[0-9A-Za-z-]{10,}'
     '-----BEGIN[A-Z ]*PRIVATE KEY-----'
   )
+  local pattern_ids=(
+    github-pat-classic
+    github-pat-other-prefixes
+    github-pat-fine-grained
+    gitlab-pat
+    aws-access-key-id
+    slack-token
+    pem-private-key
+  )
   local allowlist=(
     'ghp_SENTINEL0123456789abcdefABCDEF01234567'
     'glpat-SENTINEL0123456789abcdefABCDEF'
@@ -71,10 +80,12 @@ scan_secrets() {
     'glpat-ABCDEFGHIJKLMNOPQRST'
   )
   local allowed_hash='861868d6e0246f776b867c651da9519f5d398cee945fe26ae2f0e890dcf64032'
-  local file pattern value value_hash allowed
+  local file pattern_index pattern pattern_id value value_hash value_length unique_chars allowed
 
   while IFS= read -r -d '' file; do
-    for pattern in "${patterns[@]}"; do
+    for pattern_index in "${!patterns[@]}"; do
+      pattern="${patterns[$pattern_index]}"
+      pattern_id="${pattern_ids[$pattern_index]}"
       while IFS= read -r value; do
         [[ -n "$value" ]] || continue
         allowed=0
@@ -83,8 +94,11 @@ scan_secrets() {
         done
         value_hash="$(printf '%s' "$value" | sha256_stream)"
         [[ "$value_hash" == "$allowed_hash" ]] && allowed=1
-        [[ "$allowed" -eq 1 ]] ||
-          die "non-allowlisted secret-shaped value in $(basename "$file")"
+        if [[ "$allowed" -ne 1 ]]; then
+          value_length="${#value}"
+          unique_chars="$(printf '%s' "$value" | fold -w1 | sort -u | wc -l | tr -d ' ')"
+          die "non-allowlisted $pattern_id value in $(basename "$file") (sha256=$value_hash, length=$value_length, unique_chars=$unique_chars)"
+        fi
       done < <(grep -aoE -- "$pattern" "$file" 2>/dev/null || true)
     done
   done < <(find "$root" -type f -print0)

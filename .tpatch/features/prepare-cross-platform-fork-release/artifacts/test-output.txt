@@ -1,4 +1,4 @@
-# Test run — 2026-08-29T01:36:05Z
-# Command: python3 -c 'import yaml; yaml.safe_load(open(".github/workflows/release-candidate.yml"))' && git diff --check
+# Test run — 2026-08-29T01:45:48Z
+# Command: bash -n scripts/package-release-artifact.sh && git diff --check
 # Directory: /home/juanbe/development/tools/diffreviewtui/tuicr
 

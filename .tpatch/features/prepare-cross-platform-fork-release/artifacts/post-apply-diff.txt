@@ -1,2 +1,2 @@
- .github/workflows/release-candidate.yml | 2 ++
- 1 file changed, 2 insertions(+)
+ scripts/package-release-artifact.sh | 22 ++++++++++++++++++----
+ 1 file changed, 18 insertions(+), 4 deletions(-)

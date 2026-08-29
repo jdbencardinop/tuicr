@@ -1,7 +1,7 @@
 {
   "version": 1,
   "feature": "prepare-cross-platform-fork-release",
-  "current_generation": 2,
+  "current_generation": 3,
   "generations": [
     {
       "generation": 1,
@@ -66,7 +66,7 @@
       "git_patch_id": "c021e4bccd5f08403aa0b11c7a858740a9a4bf7d",
       "git_patch_id_algorithm": "git-patch-id-stable",
       "recipe_sha256": "f50a4be7194ba5be982a271788273953277a4c226802a349d034a9dbabd3ad39",
-      "canonical_patch": "artifacts/post-apply.patch",
+      "canonical_patch": "",
       "audit_patch": "patches/002-record.patch",
       "base_commit": "42a9597e2dd361ad66943c4a177e10ab3efd2d3e",
       "upper": {
@@ -81,6 +81,38 @@
       },
       "touched_paths": [
         ".github/workflows/release-candidate.yml"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    },
+    {
+      "generation": 3,
+      "generation_id": "pg_3b5f7ecb2fee",
+      "kind": "amend-refresh",
+      "patch_sha256": "46f409c1638a44afd1c61f7b240d8fed3c0ef50190b7bd7e07717e4b7ce71a92",
+      "git_patch_id": "62762aa5dd4cd1ace48d16a0c8d052ee3bf657c2",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "d763e9280d89b00f5add5b32ff62fe391254c20f9f4406056619c4788e252b91",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/003-record.patch",
+      "base_commit": "d47da014030f0573e7086dd622a0be80e79706d2",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "scripts/package-release-artifact.sh"
       ],
       "dependencies": [],
       "refs": {

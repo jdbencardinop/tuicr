@@ -1,15 +1,15 @@
 # Implementation Record: prepare-cross-platform-fork-release
 
-**Recorded**: 2026-08-29T01:36:05Z
+**Recorded**: 2026-08-29T01:45:48Z
 **Files changed**: 1
-**Patch size**: 389 bytes
+**Patch size**: 1981 bytes
 **Capture mode**: working-tree-all
 
 ## Change Summary
 
 ```
- .github/workflows/release-candidate.yml | 2 ++
- 1 file changed, 2 insertions(+)
+ scripts/package-release-artifact.sh | 22 ++++++++++++++++++----
+ 1 file changed, 18 insertions(+), 4 deletions(-)
 ```
 
 ## Capture Provenance
@@ -17,7 +17,7 @@
 - **capture_mode**: `working-tree-all`
 - **pathspecs**: (none)
 - **claim_ids**: (none)
-- **base_commit**: `42a9597e2dd361ad66943c4a177e10ab3efd2d3e`
+- **base_commit**: `d47da014030f0573e7086dd622a0be80e79706d2`
 - **upper_commit**: `working-tree`
 
 ## Replay Instructions
