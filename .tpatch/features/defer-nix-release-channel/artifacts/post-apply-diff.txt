@@ -1,0 +1,6 @@
+ .github/workflows/build_nix.yml | 8 ++++----
+ .tpatch/FEATURES.md             | 1 +
+ README.md                       | 5 ++---
+ RELEASE.md                      | 5 +++--
+ docs/release/INSTALL.md         | 5 +++--
+ 5 files changed, 13 insertions(+), 11 deletions(-)

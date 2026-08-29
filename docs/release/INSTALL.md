@@ -11,14 +11,15 @@ Verify the adjacent `.sha256` file before extracting, then place `tuicr` on
 `PATH`. macOS archives are ad-hoc signed unless the release notes explicitly
 state that Developer ID signing and Apple notarization passed.
 
-Package-manager-capable source installs are also supported:
+The package-manager-capable source install is Cargo from an exact tag:
 
 ```bash
 cargo install --git https://github.com/jdbencardinop/tuicr \
   --tag <release-tag> --locked
-nix profile install github:jdbencardinop/tuicr/<release-tag>
 ```
 
 The fork does not publish the upstream-owned `tuicr` crate to crates.io.
 Automatic update checks and `tuicr update` remain disabled; upgrade by
 installing a newer verified tag and rollback by reinstalling an older one.
+The inherited Nix flake is not a first-release channel because its naersk
+fixed-output dependency fetch repeatedly received crates.io HTTP 403 in CI.

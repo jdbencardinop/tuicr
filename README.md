@@ -33,8 +33,6 @@
 cargo install --git https://github.com/jdbencardinop/tuicr \
   --tag <release-tag> --locked
 
-# Nix from an exact fork tag
-nix profile install github:jdbencardinop/tuicr/<release-tag>
 ```
 
 Checksummed native Linux/macOS x86_64 and arm64 archives are published at
@@ -50,7 +48,8 @@ cargo install --path .
 
 `tuicr update` remains disabled so the fork cannot silently replace itself
 from upstream's release channel. Upgrade or roll back by installing an exact,
-verified fork tag.
+verified fork tag. The inherited Nix flake is not a first-release channel;
+its legacy dependency fetch remains under separate investigation.
 
 ## Quick start
 

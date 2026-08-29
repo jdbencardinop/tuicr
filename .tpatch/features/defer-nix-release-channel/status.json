@@ -1,0 +1,23 @@
+{
+  "id": "defer-nix-release-channel",
+  "slug": "defer-nix-release-channel",
+  "title": "Defer Nix from the first maintained-fork release channel because the legacy naersk build repeatedly fails on crates.io fixed-output downloads, keep Cargo git as the validated package-manager path, and make the legacy Nix workflow manual and non-blocking.",
+  "state": "applied",
+  "compatibility": "unknown",
+  "requested_at": "2026-08-29T01:58:34Z",
+  "updated_at": "2026-08-29T01:59:40Z",
+  "last_command": "verify",
+  "notes": "landed at 2026-08-29T01:59:40Z",
+  "apply": {
+    "completed_at": "2026-08-29T01:59:39Z",
+    "base_commit": "e7ccb8f180a0a0e76bea56fe04a2904c7faf6034",
+    "has_patch": true
+  },
+  "reconcile": {},
+  "verify": {
+    "verified_at": "2026-08-29T01:59:39Z",
+    "passed": true,
+    "recipe_hash_at_verify": "85c0c01bac58515cbf7d32af2e48f25120183053ba63465aa2290895d11e29f1",
+    "patch_hash_at_verify": "9d6fd09ed0b523780ea368d3422770457b530570f4841fa6e9b4c11e821829a2"
+  }
+}

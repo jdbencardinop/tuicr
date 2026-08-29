@@ -1,0 +1,8 @@
+{
+  "slug": "defer-nix-release-channel",
+  "completed_at": "2026-08-29T01:59:39Z",
+  "base_commit": "e7ccb8f180a0a0e76bea56fe04a2904c7faf6034",
+  "has_patch": true,
+  "validation_status": "passed",
+  "validation_notes": "tpatch test — command: python3 -c 'import yaml; yaml.safe_load(open(\".github/workflows/build_nix.yml\"))' \u0026\u0026 git diff --check"
+}

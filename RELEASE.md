@@ -42,7 +42,8 @@ authorization to create the tag and hosted draft.
 - GitHub checksummed archives are the primary binary channel.
 - Cargo installs use an exact Git tag from this fork; this fork does not
   publish the upstream-owned `tuicr` crate to crates.io.
-- Nix installs use the exact fork tag through the repository flake.
-- Homebrew, Mise, APT, and RPM are not first-release channels.
+- Nix, Homebrew, Mise, APT, and RPM are not first-release channels. The
+  inherited Nix flake remains available for manual repair, but repeated
+  crates.io HTTP 403 responses prevented release validation.
 - `tuicr update` remains disabled until the fork owns a stable, verified
   update manifest and rollback channel.

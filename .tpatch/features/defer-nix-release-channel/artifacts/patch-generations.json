@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "feature": "defer-nix-release-channel",
+  "current_generation": 1,
+  "generations": [
+    {
+      "generation": 1,
+      "generation_id": "pg_877093c3ca73",
+      "kind": "record",
+      "patch_sha256": "9d6fd09ed0b523780ea368d3422770457b530570f4841fa6e9b4c11e821829a2",
+      "git_patch_id": "c57acad18847d1cd52a5569e4cc3fb8558e26cea",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "85c0c01bac58515cbf7d32af2e48f25120183053ba63465aa2290895d11e29f1",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/001-record.patch",
+      "base_commit": "e7ccb8f180a0a0e76bea56fe04a2904c7faf6034",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        ".github/workflows/build_nix.yml",
+        "README.md",
+        "RELEASE.md",
+        "docs/release/INSTALL.md"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    }
+  ]
+}
