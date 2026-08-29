@@ -43,12 +43,8 @@ pub struct CliArgs {
 #[derive(Parser, Debug)]
 #[command(
     name = "tuicr",
-    // Offline fork-candidate identity: `CARGO_PKG_VERSION` already carries
-    // an `-offline-candidate.N` prerelease tag (see Cargo.toml); appending
-    // the build-time source SHA (see build.rs) makes `--version` output
-    // unambiguous, e.g. `tuicr 0.19.1-offline-candidate.1+d8b1f63`. This can
-    // never be confused with an unmodified upstream `tuicr 0.19.1` release.
-    version = concat!(env!("CARGO_PKG_VERSION"), "+", env!("TUICR_OFFLINE_CANDIDATE_SHA")),
+    // The fork prerelease plus source SHA is unambiguous and traceable.
+    version = concat!(env!("CARGO_PKG_VERSION"), "+", env!("TUICR_BUILD_SHA")),
     about = "A code review TUI with vim keybindings. Export to GitHub or clipboard.",
     after_help = "Press ? in the application for keybinding help.",
     disable_help_subcommand = true

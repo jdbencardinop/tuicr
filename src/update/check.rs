@@ -1,11 +1,6 @@
-//! Offline fork candidate: the automatic background version check is
-//! permanently disabled here so packaged offline-candidate binaries can
-//! never phone home to crates.io, regardless of `--no-update-check` /
-//! `no_update_check` config (those flags are still parsed for
-//! config-file/CLI backward compatibility, but this function no longer
-//! branches on them -- it never makes a network call). See
-//! `docs/offline-candidate/README.md`.
-const OFFLINE_FORK_UPDATE_CHECK_MESSAGE: &str = "tuicr-offline-candidate: automatic update checks are disabled in this offline fork build; this binary will never contact crates.io.";
+//! Automatic checks remain disabled until the fork owns a stable release
+//! channel. The inherited upstream endpoint must never replace this binary.
+const FORK_UPDATE_CHECK_MESSAGE: &str = "tuicr-fork: automatic update checks are disabled in this fork build; this binary will never contact crates.io.";
 
 #[derive(Debug, Clone)]
 pub struct UpdateInfo {
@@ -23,7 +18,7 @@ pub enum UpdateCheckResult {
 }
 
 pub fn check_for_updates() -> UpdateCheckResult {
-    UpdateCheckResult::Failed(OFFLINE_FORK_UPDATE_CHECK_MESSAGE.to_string())
+    UpdateCheckResult::Failed(FORK_UPDATE_CHECK_MESSAGE.to_string())
 }
 
 /// Still used by the (now unreachable from this binary, but intact and
@@ -40,10 +35,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn never_contacts_the_network_and_reports_offline_fork_message() {
+    fn never_contacts_the_network_and_reports_fork_message() {
         assert!(matches!(
             check_for_updates(),
-            UpdateCheckResult::Failed(ref msg) if msg.contains("offline fork") && msg.contains("never contact crates.io")
+            UpdateCheckResult::Failed(ref msg) if msg.contains("fork build") && msg.contains("never contact crates.io")
         ));
     }
 

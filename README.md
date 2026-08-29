@@ -23,51 +23,34 @@
 
 ## Install
 
-```bash
-curl -fsSL tuicr.dev/install.sh | sh
-# or
-brew install agavra/tap/tuicr
-```
-
-<details>
-<summary>Other install methods (cargo, mise, nix, binaries, source)</summary>
+> [!IMPORTANT]
+> This branch is the maintained `jdbencardinop/tuicr` fork. It uses isolated
+> `tuicr-fork` data/config directories and does not publish the upstream-owned
+> crates.io package. See [RELEASE.md](RELEASE.md) for the prerelease gate.
 
 ```bash
-# Cargo
-cargo install tuicr
+# Cargo from an exact fork tag
+cargo install --git https://github.com/jdbencardinop/tuicr \
+  --tag <release-tag> --locked
 
-# Mise
-mise use github:agavra/tuicr
-
-# Nix
-nix run github:agavra/tuicr
+# Nix from an exact fork tag
+nix profile install github:jdbencardinop/tuicr/<release-tag>
 ```
 
-Pre-built binaries: [GitHub Releases](https://github.com/agavra/tuicr/releases)
+Checksummed native Linux/macOS x86_64 and arm64 archives are published at
+[fork releases](https://github.com/jdbencardinop/tuicr/releases).
 
 From source:
 
 ```bash
-git clone https://github.com/agavra/tuicr.git
+git clone https://github.com/jdbencardinop/tuicr.git
 cd tuicr
 cargo install --path .
 ```
 
-</details>
-
-Update the active installation with one command:
-
-```bash
-tuicr update
-tuicr update 0.18.0 # Install a known-good version
-```
-
-`tuicr update` uses Homebrew, Cargo, Mise, or a Nix profile when that manager owns the
-executable. Install-script and manually downloaded binaries update in place from the matching
-GitHub release asset after SHA-256 verification. Exact-version installs support Cargo and direct
-binaries; use the package manager's pinning workflow for Homebrew, Mise, or Nix. A `nix run`
-invocation is temporary rather than installed; rerun it to use the current flake, or use
-`nix profile install github:agavra/tuicr` for an installation that `tuicr update` can upgrade.
+`tuicr update` remains disabled so the fork cannot silently replace itself
+from upstream's release channel. Upgrade or roll back by installing an exact,
+verified fork tag.
 
 ## Quick start
 
@@ -82,8 +65,6 @@ tuicr tui pr 125            # GitHub PR via explicit TUI subcommand
 tuicr tui mr 125            # GitLab MR via explicit TUI subcommand
 tuicr --stdout              # Pipe the review to stdout
 tuicr review list           # List saved local review sessions
-tuicr update                # Update the active installation
-tuicr update 0.18.0         # Install a known-good version
 ```
 
 Inside tuicr, navigate with `j`/`k`, press `c` to comment, then `y` to copy the review or

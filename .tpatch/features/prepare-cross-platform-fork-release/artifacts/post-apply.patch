@@ -1,0 +1,1530 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 6f1824a..c41156a 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -58,7 +58,7 @@ jobs:
+       - run: cargo test
+ 
+   update-test:
+-    name: Update command (${{ matrix.os }})
++    name: Fork update boundary (${{ matrix.os }})
+     needs: [check, fmt]
+     strategy:
+       matrix:
+@@ -68,12 +68,10 @@ jobs:
+       - uses: actions/checkout@v4
+       - uses: dtolnay/rust-toolchain@stable
+       - uses: Swatinem/rust-cache@v2
+-      - name: Test manager and direct upgrade/rollback matrix
++      - name: Test retained installer internals
+         run: cargo test 'update::'
+-      - name: Test live direct upgrade and rollback
++      - name: Verify fork update command stays disabled
+         shell: bash
+-        env:
+-          ROLLBACK_VERSION: 0.19.0
+         run: |
+           set -euo pipefail
+           extension=""
+@@ -82,38 +80,9 @@ jobs:
+           fi
+ 
+           cargo build --bin tuicr
+-          rollback_candidate="$RUNNER_TEMP/tuicr-rollback-candidate$extension"
+-          cp "target/debug/tuicr$extension" "$rollback_candidate"
+-
+-          # Use separate candidates because v0.19.0 predates `tuicr update`.
+-          cp Cargo.toml "$RUNNER_TEMP/tuicr-Cargo.toml"
+-          cp Cargo.lock "$RUNNER_TEMP/tuicr-Cargo.lock"
+-          trap 'cp "$RUNNER_TEMP/tuicr-Cargo.toml" Cargo.toml; cp "$RUNNER_TEMP/tuicr-Cargo.lock" Cargo.lock' EXIT
+-          python - <<'PY'
+-          from pathlib import Path
+-          import re
+-
+-          manifest = Path("Cargo.toml")
+-          updated, count = re.subn(
+-              r'(?m)^version = "[^"]+"$',
+-              'version = "0.0.0"',
+-              manifest.read_text(),
+-              count=1,
+-          )
+-          if count != 1:
+-              raise SystemExit("could not set the test package version")
+-          manifest.write_text(updated)
+-          PY
+-          cargo build --bin tuicr
+-          upgrade_candidate="$RUNNER_TEMP/tuicr-upgrade-candidate$extension"
+-          cp "target/debug/tuicr$extension" "$upgrade_candidate"
+-          cp "$RUNNER_TEMP/tuicr-Cargo.toml" Cargo.toml
+-          cp "$RUNNER_TEMP/tuicr-Cargo.lock" Cargo.lock
+-
+-          test "$("$upgrade_candidate" --version)" = "tuicr 0.0.0"
+-          "$upgrade_candidate" update
+-          test "$("$upgrade_candidate" --version)" != "tuicr 0.0.0"
+-
+-          "$rollback_candidate" update "$ROLLBACK_VERSION"
+-          test "$("$rollback_candidate" --version)" = "tuicr $ROLLBACK_VERSION"
+-          test -z "$(find "$RUNNER_TEMP" -maxdepth 1 -name '.tuicr-update-*' -print)"
++          binary="target/debug/tuicr$extension"
++          if "$binary" update >"$RUNNER_TEMP/update.stdout" 2>"$RUNNER_TEMP/update.stderr"; then
++            echo "fork update unexpectedly succeeded" >&2
++            exit 1
++          fi
++          grep -q "tuicr update.*disabled" "$RUNNER_TEMP/update.stderr"
+diff --git a/.github/workflows/release-candidate.yml b/.github/workflows/release-candidate.yml
+new file mode 100644
+index 0000000..dbb8b6e
+--- /dev/null
++++ b/.github/workflows/release-candidate.yml
+@@ -0,0 +1,93 @@
++name: Release candidate
++
++on:
++  workflow_dispatch:
++  pull_request:
++    branches: [main]
++    paths:
++      - ".github/workflows/release-candidate.yml"
++      - "Cargo.lock"
++      - "Cargo.toml"
++      - "build.rs"
++      - "src/**"
++      - "scripts/package-release-artifact.sh"
++      - "scripts/import-reviews.sh"
++      - "docs/release/**"
++
++permissions:
++  contents: read
++
++env:
++  CARGO_TERM_COLOR: always
++
++jobs:
++  native-artifacts:
++    name: ${{ matrix.target }}
++    strategy:
++      fail-fast: false
++      matrix:
++        include:
++          - target: x86_64-unknown-linux-gnu
++            os: ubuntu-24.04
++          - target: aarch64-unknown-linux-gnu
++            os: ubuntu-24.04-arm
++          - target: x86_64-apple-darwin
++            os: macos-15-intel
++          - target: aarch64-apple-darwin
++            os: macos-15
++    runs-on: ${{ matrix.os }}
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          ref: ${{ github.event.pull_request.head.sha || github.sha }}
++      - uses: dtolnay/rust-toolchain@stable
++        with:
++          targets: ${{ matrix.target }}
++      - uses: Swatinem/rust-cache@v2
++        with:
++          key: release-${{ matrix.target }}
++      - name: Record source identity
++        shell: bash
++        run: echo "TUICR_BUILD_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
++      - name: Build native release binary
++        shell: bash
++        run: cargo build --release --locked --target "${{ matrix.target }}"
++      - name: Package and smoke-test
++        shell: bash
++        run: |
++          scripts/package-release-artifact.sh \
++            --target "${{ matrix.target }}" \
++            --binary "target/${{ matrix.target }}/release/tuicr" \
++            --output-dir dist
++      - uses: actions/upload-artifact@v4
++        with:
++          name: tuicr-${{ matrix.target }}
++          path: dist/*
++          if-no-files-found: error
++
++  verify-artifact-set:
++    name: Verify four-platform artifact set
++    needs: native-artifacts
++    runs-on: ubuntu-24.04
++    steps:
++      - uses: actions/download-artifact@v4
++        with:
++          pattern: tuicr-*
++          path: dist
++          merge-multiple: true
++      - name: Verify checksums and target coverage
++        shell: bash
++        run: |
++          set -euo pipefail
++          targets=(
++            x86_64-unknown-linux-gnu
++            aarch64-unknown-linux-gnu
++            x86_64-apple-darwin
++            aarch64-apple-darwin
++          )
++          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 4
++          for target in "${targets[@]}"; do
++            checksum="$(find dist -maxdepth 1 -name "*-${target}.tar.gz.sha256" -print -quit)"
++            test -n "$checksum"
++            (cd dist && sha256sum --check "$(basename "$checksum")")
++          done
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 1d96f1e..973344c 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -1,202 +1,66 @@
+-name: Release
++name: Promote verified candidate
+ 
+ on:
+   workflow_dispatch:
+     inputs:
+-      action:
+-        description: 'Action to perform'
++      candidate_run_id:
++        description: Successful Release candidate workflow run ID
+         required: true
+-        type: choice
+-        options:
+-          - bump-patch
+-          - bump-minor
+-          - bump-major
+-          - build-binaries
++        type: string
+       version:
+-        description: 'Version to build (only for build-binaries, e.g., 0.1.1)'
+-        required: false
++        description: Fork prerelease version without v prefix
++        required: true
+         type: string
+ 
+-  pull_request:
+-    types: [closed]
+-    branches: [main]
+-
+-env:
+-  CARGO_TERM_COLOR: always
++permissions:
++  contents: write
++  actions: read
+ 
+ jobs:
+-  create-release-pr:
+-    name: Create Release PR
+-    if: github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.action, 'bump-')
+-    runs-on: ubuntu-latest
+-    permissions:
+-      contents: write
+-      pull-requests: write
++  promote:
++    name: Create draft prerelease
++    runs-on: ubuntu-24.04
++    environment: release
+     steps:
+       - uses: actions/checkout@v4
+         with:
+           fetch-depth: 0
+-
+-      - name: Install git-cliff
+-        uses: taiki-e/install-action@git-cliff
+-
+-      - name: Get current version
+-        id: current
+-        run: |
+-          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+-
+-      - name: Calculate new version
+-        id: new
+-        run: |
+-          IFS='.' read -r major minor patch <<< "${{ steps.current.outputs.version }}"
+-          case "${{ inputs.action }}" in
+-            bump-major)
+-              major=$((major + 1))
+-              minor=0
+-              patch=0
+-              ;;
+-            bump-minor)
+-              minor=$((minor + 1))
+-              patch=0
+-              ;;
+-            bump-patch)
+-              patch=$((patch + 1))
+-              ;;
+-          esac
+-          NEW_VERSION="${major}.${minor}.${patch}"
+-          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+-          echo "Bumping ${{ steps.current.outputs.version }} -> $NEW_VERSION"
+-
+-      - name: Update Cargo.toml version
+-        run: |
+-          sed -i 's/^version = ".*"/version = "${{ steps.new.outputs.version }}"/' Cargo.toml
+-
+-      - name: Update Cargo.lock
+-        run: cargo generate-lockfile
+-
+-      - name: Generate changelog
+-        run: git cliff --tag "v${{ steps.new.outputs.version }}" -o CHANGELOG.md
+-
+-      - name: Create Pull Request
+-        uses: peter-evans/create-pull-request@v7
+-        with:
+-          commit-message: "chore(release): prepare v${{ steps.new.outputs.version }}"
+-          branch: release/v${{ steps.new.outputs.version }}
+-          title: "release: v${{ steps.new.outputs.version }}"
+-          body: |
+-            Bumps version from ${{ steps.current.outputs.version }} to ${{ steps.new.outputs.version }}.
+-
+-            **Changes included:**
+-            - Version bump in `Cargo.toml`
+-            - Updated `CHANGELOG.md` (auto-generated from commits)
+-
+-            Once merged, this will automatically:
+-            - Create git tag `v${{ steps.new.outputs.version }}`
+-            - Build binaries for Linux, macOS, Windows
+-            - Publish to crates.io
+-            - Create GitHub Release with binaries
+-
+-  publish:
+-    name: Publish Release
+-    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/v')
+-    runs-on: ubuntu-latest
+-    permissions:
+-      contents: write
+-    outputs:
+-      version: ${{ steps.version.outputs.version }}
+-    steps:
+-      - uses: actions/checkout@v4
+-
+-      - uses: dtolnay/rust-toolchain@stable
+-
+-      - name: Get version from Cargo.toml
+-        id: version
+-        run: |
+-          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+-
+-      - name: Create and push tag
+-        run: |
+-          git config user.name "github-actions[bot]"
+-          git config user.email "github-actions[bot]@users.noreply.github.com"
+-          git tag "v${{ steps.version.outputs.version }}"
+-          git push origin "v${{ steps.version.outputs.version }}"
+-
+-      - name: Publish to crates.io
+-        run: cargo publish
++      - name: Validate version and candidate run
+         env:
+-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+-
+-      - name: Create GitHub Release
+-        uses: softprops/action-gh-release@v2
+-        with:
+-          tag_name: v${{ steps.version.outputs.version }}
+-          name: v${{ steps.version.outputs.version }}
+-          generate_release_notes: true
+-          draft: false
+-
+-  build-binaries:
+-    name: Build ${{ matrix.target }}
+-    needs: [publish]
+-    if: |
+-      always() &&
+-      (needs.publish.result == 'success' ||
+-       (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'build-binaries' && github.event.inputs.version != ''))
+-    runs-on: ${{ matrix.os }}
+-    permissions:
+-      contents: write
+-    strategy:
+-      matrix:
+-        include:
+-          - target: x86_64-unknown-linux-gnu
+-            os: ubuntu-latest
+-          - target: aarch64-unknown-linux-gnu
+-            os: ubuntu-24.04-arm
+-          - target: x86_64-apple-darwin
+-            os: macos-15-intel
+-          - target: aarch64-apple-darwin
+-            os: macos-latest
+-          - target: x86_64-pc-windows-msvc
+-            os: windows-latest
+-
+-    steps:
+-      - uses: actions/checkout@v4
+-        with:
+-          ref: v${{ needs.publish.outputs.version || github.event.inputs.version }}
+-
+-      - name: Set version
+-        id: version
+-        shell: bash
+-        run: echo "version=${{ needs.publish.outputs.version || github.event.inputs.version }}" >> $GITHUB_OUTPUT
+-
+-      - name: Install dependencies (Linux)
+-        if: runner.os == 'Linux'
++          GH_TOKEN: ${{ github.token }}
++          RUN_ID: ${{ inputs.candidate_run_id }}
++          VERSION: ${{ inputs.version }}
+         run: |
+-          sudo apt-get update
+-          sudo apt-get install -y libssl-dev pkg-config
+-
+-      - uses: dtolnay/rust-toolchain@stable
+-
+-      - name: Build
+-        run: cargo build --release
+-
+-      - name: Package binary (unix)
+-        if: runner.os != 'Windows'
++          set -euo pipefail
++          test "$VERSION" = "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
++          conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq .conclusion)"
++          head_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq .head_sha)"
++          workflow_path="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq .path)"
++          test "$conclusion" = success
++          test "$head_sha" = "$GITHUB_SHA"
++          test "$workflow_path" = ".github/workflows/release-candidate.yml"
++      - name: Download verified artifacts
++        env:
++          GH_TOKEN: ${{ github.token }}
++        run: gh run download "${{ inputs.candidate_run_id }}" --dir dist
++      - name: Verify complete artifact set
+         run: |
+-          cd target/release
+-          tar -czvf ../../tuicr-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz tuicr
+-
+-      - name: Package binary (windows)
+-        if: runner.os == 'Windows'
++          set -euo pipefail
++          find dist -type f -name '*.tar.gz.sha256' -print0 |
++            while IFS= read -r -d '' checksum; do
++              (cd "$(dirname "$checksum")" && sha256sum --check "$(basename "$checksum")")
++            done
++          test "$(find dist -type f -name '*.tar.gz' | wc -l)" -eq 4
++      - name: Create tag and draft prerelease
++        env:
++          GH_TOKEN: ${{ github.token }}
++          VERSION: ${{ inputs.version }}
+         run: |
+-          cd target/release
+-          7z a ../../tuicr-${{ steps.version.outputs.version }}-${{ matrix.target }}.zip tuicr.exe
+-
+-      - name: Upload to release
+-        uses: softprops/action-gh-release@v2
+-        with:
+-          tag_name: v${{ steps.version.outputs.version }}
+-          files: |
+-            tuicr-*.tar.gz
+-            tuicr-*.zip
++          set -euo pipefail
++          tag="v$VERSION"
++          git config user.name "github-actions[bot]"
++          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
++          git tag -a "$tag" -m "tuicr fork $VERSION"
++          git push origin "$tag"
++          mapfile -t files < <(find dist -type f \( -name '*.tar.gz' -o -name '*.sha256' -o -name '*.version.txt' \) -print)
++          gh release create "$tag" "${files[@]}" --draft --prerelease --generate-notes --title "$tag"
+diff --git a/Cargo.lock b/Cargo.lock
+index 32d0274..5b481d8 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2815,7 +2815,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "tuicr"
+-version = "0.19.1-offline-candidate.1"
++version = "0.19.1-fork.1"
+ dependencies = [
+  "anyhow",
+  "arboard",
+diff --git a/Cargo.toml b/Cargo.toml
+index b3eba2c..ca37797 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,17 +1,14 @@
+ [package]
+ name = "tuicr"
+-# Offline fork-candidate identity: a semver prerelease tag distinguishes this
+-# build from real upstream `tuicr` releases (which never publish an
+-# `-offline-candidate.N` version). The exact source commit is additionally
+-# embedded at build time (see build.rs) and surfaced via `--version` as
+-# `<version>+<short-sha>`, so this binary never reports an identity that
+-# could be mistaken for an unmodified upstream release.
+-version = "0.19.1-offline-candidate.1"
++# Maintained-fork identity: the prerelease tag distinguishes this build from
++# upstream `tuicr` releases. The exact source commit is additionally embedded
++# at build time (see build.rs) and surfaced via `--version`.
++version = "0.19.1-fork.1"
+ edition = "2024"
+ description = "Review AI-generated diffs like a GitHub pull request, right from your terminal."
+ license = "MIT"
+-repository = "https://github.com/agavra/tuicr"
+-homepage = "https://github.com/agavra/tuicr"
++repository = "https://github.com/jdbencardinop/tuicr"
++homepage = "https://github.com/jdbencardinop/tuicr"
+ readme = "README.md"
+ keywords = ["tui", "git", "code-review", "diff", "cli"]
+ categories = ["command-line-utilities", "development-tools"]
+diff --git a/README.md b/README.md
+index cc26e1b..758d740 100644
+--- a/README.md
++++ b/README.md
+@@ -23,51 +23,34 @@
+ 
+ ## Install
+ 
+-```bash
+-curl -fsSL tuicr.dev/install.sh | sh
+-# or
+-brew install agavra/tap/tuicr
+-```
+-
+-<details>
+-<summary>Other install methods (cargo, mise, nix, binaries, source)</summary>
++> [!IMPORTANT]
++> This branch is the maintained `jdbencardinop/tuicr` fork. It uses isolated
++> `tuicr-fork` data/config directories and does not publish the upstream-owned
++> crates.io package. See [RELEASE.md](RELEASE.md) for the prerelease gate.
+ 
+ ```bash
+-# Cargo
+-cargo install tuicr
++# Cargo from an exact fork tag
++cargo install --git https://github.com/jdbencardinop/tuicr \
++  --tag <release-tag> --locked
+ 
+-# Mise
+-mise use github:agavra/tuicr
+-
+-# Nix
+-nix run github:agavra/tuicr
++# Nix from an exact fork tag
++nix profile install github:jdbencardinop/tuicr/<release-tag>
+ ```
+ 
+-Pre-built binaries: [GitHub Releases](https://github.com/agavra/tuicr/releases)
++Checksummed native Linux/macOS x86_64 and arm64 archives are published at
++[fork releases](https://github.com/jdbencardinop/tuicr/releases).
+ 
+ From source:
+ 
+ ```bash
+-git clone https://github.com/agavra/tuicr.git
++git clone https://github.com/jdbencardinop/tuicr.git
+ cd tuicr
+ cargo install --path .
+ ```
+ 
+-</details>
+-
+-Update the active installation with one command:
+-
+-```bash
+-tuicr update
+-tuicr update 0.18.0 # Install a known-good version
+-```
+-
+-`tuicr update` uses Homebrew, Cargo, Mise, or a Nix profile when that manager owns the
+-executable. Install-script and manually downloaded binaries update in place from the matching
+-GitHub release asset after SHA-256 verification. Exact-version installs support Cargo and direct
+-binaries; use the package manager's pinning workflow for Homebrew, Mise, or Nix. A `nix run`
+-invocation is temporary rather than installed; rerun it to use the current flake, or use
+-`nix profile install github:agavra/tuicr` for an installation that `tuicr update` can upgrade.
++`tuicr update` remains disabled so the fork cannot silently replace itself
++from upstream's release channel. Upgrade or roll back by installing an exact,
++verified fork tag.
+ 
+ ## Quick start
+ 
+@@ -82,8 +65,6 @@ tuicr tui pr 125            # GitHub PR via explicit TUI subcommand
+ tuicr tui mr 125            # GitLab MR via explicit TUI subcommand
+ tuicr --stdout              # Pipe the review to stdout
+ tuicr review list           # List saved local review sessions
+-tuicr update                # Update the active installation
+-tuicr update 0.18.0         # Install a known-good version
+ ```
+ 
+ Inside tuicr, navigate with `j`/`k`, press `c` to comment, then `y` to copy the review or
+diff --git a/RELEASE.md b/RELEASE.md
+index dfd3e81..3d8f430 100644
+--- a/RELEASE.md
++++ b/RELEASE.md
+@@ -1,86 +1,48 @@
+-# Release Process
++# Maintained fork release process
+ 
+-This project uses an automated release workflow via GitHub Actions.
++The fork uses a two-stage release. Candidate validation cannot tag, publish a
++crate, or create a GitHub Release.
+ 
+-## How to Release
++## 1. Validate a candidate
+ 
+-1. **Go to Actions** → **Release** → **Run workflow**
+-2. **Select action:**
+-   - `bump-patch` (0.1.0 → 0.1.1) - bug fixes
+-   - `bump-minor` (0.1.0 → 0.2.0) - new features
+-   - `bump-major` (0.1.0 → 1.0.0) - breaking changes
+-3. **Click "Run workflow"**
+-4. **Review and merge** the auto-created PR
+-5. **Done!** Merging automatically:
+-   - Creates git tag `vX.Y.Z`
+-   - Publishes to crates.io
+-   - Creates GitHub Release with release notes
+-   - Builds and uploads binaries for:
+-     - `x86_64-unknown-linux-gnu` (Linux x64)
+-     - `aarch64-unknown-linux-gnu` (Linux ARM64)
+-     - `x86_64-apple-darwin` (macOS x64)
+-     - `aarch64-apple-darwin` (macOS Apple Silicon)
+-     - `x86_64-pc-windows-msvc` (Windows x64)
+-6. **Update Homebrew tap** (manual, see below)
++Push the exact source commit and run **Release candidate**. It builds and
++smoke-tests native archives on:
+ 
+-## Build Binaries for Existing Release
++- Ubuntu x86_64 and arm64;
++- macOS x86_64 and Apple Silicon.
+ 
+-If you need to rebuild binaries for an existing release:
++Each archive contains the binary, license, install/migration/provider
++documentation, import helper, and provenance. The packaging script performs a
++byte-aware secret-pattern scan and emits an adjacent SHA-256 file. The
++aggregate job requires all four targets and verifies every checksum.
+ 
+-1. **Go to Actions** → **Release** → **Run workflow**
+-2. **Select action:** `build-binaries`
+-3. **Enter version:** e.g., `0.1.1` (without the `v` prefix)
+-4. **Click "Run workflow"**
++macOS binaries are ad-hoc signed for integrity testing. They are **not**
++Developer ID signed or notarized. A Developer ID Application certificate,
++App Store Connect issuer/key, and an approved credential-handling design are
++required before claiming Gatekeeper-ready distribution.
+ 
+-## What Gets Updated
++## 2. Promote the verified commit
+ 
+-The release PR includes:
+-- `Cargo.toml` - version bump
+-- `Cargo.lock` - updated lockfile
+-- `CHANGELOG.md` - auto-generated from commits
++Promotion is a separate, manually dispatched **Promote verified candidate**
++workflow protected by the `release` environment. It accepts the successful
++candidate run ID and version, then verifies:
+ 
+-## Commit Message Convention
++- candidate conclusion is `success`;
++- candidate workflow path is exactly the release-candidate workflow;
++- candidate source SHA equals the commit being promoted;
++- Cargo version equals the requested version;
++- all four archives and checksums are present and valid.
+ 
+-For meaningful changelogs, use conventional commits:
++Only then does it create an annotated tag and a **draft prerelease**. Publishing
++that draft is a separate explicit GitHub action. Do not run promotion without
++authorization to create the tag and hosted draft.
+ 
+-| Prefix | Category | Example |
+-|--------|----------|---------|
+-| `feat:` | Features | `feat: add export to JSON` |
+-| `fix:` | Bug Fixes | `fix: resolve crash on empty diff` |
+-| `docs:` | Documentation | `docs: update keybindings table` |
+-| `perf:` | Performance | `perf: optimize large file rendering` |
+-| `refactor:` | Refactor | `refactor: simplify state machine` |
+-| `test:` | Testing | `test: add integration tests` |
+-| `chore:` | Miscellaneous | `chore: update dependencies` |
++## Distribution policy
+ 
+-## Update Homebrew Tap
+-
+-After binaries are uploaded, update the Homebrew formula:
+-
+-```bash
+-# Get SHA256 checksums for the new version
+-VERSION=X.Y.Z
+-curl -sL "https://github.com/agavra/tuicr/releases/download/v${VERSION}/tuicr-${VERSION}-x86_64-apple-darwin.tar.gz" | shasum -a 256
+-curl -sL "https://github.com/agavra/tuicr/releases/download/v${VERSION}/tuicr-${VERSION}-aarch64-apple-darwin.tar.gz" | shasum -a 256
+-curl -sL "https://github.com/agavra/tuicr/releases/download/v${VERSION}/tuicr-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" | shasum -a 256
+-curl -sL "https://github.com/agavra/tuicr/releases/download/v${VERSION}/tuicr-${VERSION}-aarch64-unknown-linux-gnu.tar.gz" | shasum -a 256
+-
+-# Update homebrew-tap/Formula/tuicr.rb with new version and checksums
+-# Then commit and push to homebrew-tap repo
+-```
+-
+-## Required Secrets
+-
+-The following secrets must be configured in GitHub repository settings:
+-
+-- `CARGO_REGISTRY_TOKEN` - API token from https://crates.io/settings/tokens
+-
+-## Manual Release (if needed)
+-
+-```bash
+-# Update version in Cargo.toml manually, then:
+-cargo publish --dry-run  # verify
+-cargo publish            # publish to crates.io
+-git tag v0.2.0
+-git push origin v0.2.0
+-```
++- GitHub checksummed archives are the primary binary channel.
++- Cargo installs use an exact Git tag from this fork; this fork does not
++  publish the upstream-owned `tuicr` crate to crates.io.
++- Nix installs use the exact fork tag through the repository flake.
++- Homebrew, Mise, APT, and RPM are not first-release channels.
++- `tuicr update` remains disabled until the fork owns a stable, verified
++  update manifest and rollback channel.
+diff --git a/build.rs b/build.rs
+index 1545f94..a71a07e 100644
+--- a/build.rs
++++ b/build.rs
+@@ -1,29 +1,24 @@
+-//! Embeds the source commit SHA this offline-candidate build was compiled
+-//! from into `TUICR_OFFLINE_CANDIDATE_SHA`, which `src/cli.rs` appends to
+-//! `--version` output (alongside the `-offline-candidate.N` prerelease tag
+-//! already in `Cargo.toml`'s `version`). This lets anyone confirm a packaged
+-//! binary's exact provenance without trusting an unpinned `--version`
+-//! string.
++//! Embeds the source commit SHA into `TUICR_BUILD_SHA`, which `src/cli.rs`
++//! appends to `--version`. This lets anyone confirm a packaged binary's exact
++//! provenance without trusting an unpinned version string.
+ //!
+-//! `scripts/package-offline-candidate.sh` builds from a clean `git archive`
+-//! checkout (no `.git` directory), so it exports
+-//! `TUICR_OFFLINE_CANDIDATE_SHA` explicitly before invoking `cargo build`;
+-//! that value takes priority here. Plain local development builds (with a
+-//! `.git` directory present) fall back to `git rev-parse` directly.
++//! Release packaging can build from a source archive without `.git`, so it
++//! exports `TUICR_BUILD_SHA` explicitly. Plain development builds fall back
++//! to `git rev-parse`.
+ 
+ use std::process::Command;
+ 
+ fn main() {
+-    println!("cargo:rerun-if-env-changed=TUICR_OFFLINE_CANDIDATE_SHA");
++    println!("cargo:rerun-if-env-changed=TUICR_BUILD_SHA");
+     println!("cargo:rerun-if-changed=.git/HEAD");
+ 
+-    let sha = std::env::var("TUICR_OFFLINE_CANDIDATE_SHA")
++    let sha = std::env::var("TUICR_BUILD_SHA")
+         .ok()
+         .filter(|value| !value.trim().is_empty())
+         .or_else(git_short_sha)
+         .unwrap_or_else(|| "unknown".to_string());
+ 
+-    println!("cargo:rustc-env=TUICR_OFFLINE_CANDIDATE_SHA={sha}");
++    println!("cargo:rustc-env=TUICR_BUILD_SHA={sha}");
+ }
+ 
+ fn git_short_sha() -> Option<String> {
+diff --git a/docs/fork/AGENT-WORKFLOW.md b/docs/fork/AGENT-WORKFLOW.md
+index 3fb61e1..40789eb 100644
+--- a/docs/fork/AGENT-WORKFLOW.md
++++ b/docs/fork/AGENT-WORKFLOW.md
+@@ -133,14 +133,16 @@ tracked in `docs/handoff/CURRENT.md`. These are self-contained fork-scoped
+ records: link to files inside this repo or public upstream URLs only, never
+ to a local research workspace or machine-specific path.
+ 
+-## WSL/provider release gates
+-
+-`RELEASE.md`'s automated `bump-*` workflow (tag, crates.io publish, GitHub
+-Release, binaries) must **not** be triggered until the release is actually
+-ready: a real Ubuntu-under-WSL run has passed, and live GitHub/GitLab/Azure
+-DevOps/Gitea/Forgejo mutation validation has been approved and executed.
+-Anything produced before that (including `docs/offline-candidate/` archives)
+-is `OFFLINE_VALIDATED_ONLY`, not a release.
++## Release gates
++
++The WSL and live-provider gates are complete. `Release candidate` is the only
++workflow permitted during preparation: it has read-only permissions, builds
++four native Linux/macOS x86_64/arm64 archives, and cannot tag or publish.
++`Promote verified candidate` requires a successful exact-commit candidate run
++and creates only a tag plus draft prerelease behind the `release` environment.
++Do not dispatch promotion without explicit tag/release authorization.
++crates.io publication is disabled for this fork; Developer ID
++signing/notarization remains a separate credential-gated release capability.
+ 
+ ## Commit and safety rules
+ 
+diff --git a/docs/fork/DECISIONS.md b/docs/fork/DECISIONS.md
+index cb1ec3a..3e663f2 100644
+--- a/docs/fork/DECISIONS.md
++++ b/docs/fork/DECISIONS.md
+@@ -80,7 +80,7 @@ The packaged fork binary must be unambiguously distinguishable from upstream
+ and must never silently self-replace with upstream:
+ 
+ - `--version` reports a distinguishable prerelease tag plus the embedded
+-  source commit SHA (e.g. `tuicr 0.19.1-offline-candidate.N+<sha>`), never a
++  source commit SHA (e.g. `tuicr 0.19.1-fork.N+<sha>`), never a
+   plain upstream version string.
+ - The automatic background update check and `tuicr update` are disabled at
+   the source level (not just by config flag) and make zero network calls;
+@@ -93,17 +93,15 @@ and must never silently self-replace with upstream:
+ 
+ These four rules exist together so that installing, running, or updating the
+ fork can never silently overwrite, delete, or leak into an existing upstream
+-Tuicr install. See this repo's `docs/offline-candidate/README.md`,
+-`docs/offline-candidate/SECRET-SCAN.md`, and
+-`docs/offline-candidate/MIGRATION.md` for the exact mechanics.
++Tuicr install. See `RELEASE.md`, `docs/release/`, and the archived
++`docs/offline-candidate/SECRET-SCAN.md` for the mechanics.
+ 
+-## Current offline-only status
++## Current release-candidate status
+ 
+-The fork is **offline-implementation-complete; release is blocked.** The
+-implementation/package base remains `ca319dc`, reported by its archived
+-packages as `tuicr 0.19.1-offline-candidate.1+ca319dc`. Those macOS x86_64 and
+-Linux x86_64 packages remain explicitly `OFFLINE_VALIDATED_ONLY` — not a
+-release.
++The historical macOS/Linux x86_64 packages at `ca319dc` remain
++`OFFLINE_VALIDATED_ONLY`. Current source is promoted to the distinguishable
++`0.19.1-fork.1` prerelease identity and release preparation uses a
++non-publishing four-platform native candidate gate.
+ 
+ Follow-up validation exercised source revision `c2a7554` on real Ubuntu 24.04
+ under WSL2 and live-tested the GitLab transport against an approved disposable
+@@ -120,11 +118,10 @@ head refresh. Its formatting, clippy, 61 focused GitLab tests, and all 1,655
+ supported locked library tests pass; the disposable GitLab head-shift rerun
+ remains required before the live range gap closes.
+ 
+-Explicitly **not yet done**: live GitHub mutation validation; live Azure DevOps
+-mutation validation; GitLab durable TUI publication and stale-range live
+-retest; disposition of the WSL local-anchor and TUI-clipboard caveats;
+-arm64/universal builds; signing/notarization; package-manager distribution; any
+-Git tag or hosted release; upstream PR submission/reconciliation.
++Live provider validation and WSL correctness gates are complete. A real tag or
++hosted release remains pending native candidate CI. Developer ID
++signing/notarization remains an explicit credential-gated gap; crates.io is
++not a fork distribution channel.
+ 
+ See `docs/handoff/CURRENT.md` for the exact frontier and
+ `docs/wayfinder/tickets/` for the open/blocking tickets that gate a real
+diff --git a/docs/handoff/CURRENT.md b/docs/handoff/CURRENT.md
+index e090ee9..cde129f 100644
+--- a/docs/handoff/CURRENT.md
++++ b/docs/handoff/CURRENT.md
+@@ -54,15 +54,14 @@ Full decision text: `docs/fork/DECISIONS.md`.
+   UTF-16LE directly to `clip.exe` before terminal/Linux fallbacks. Library,
+   detached-tmux, and real-TUI Unicode round trips pass without changing
+   native Linux, macOS, or native Windows routing.
+-- Latest build exercised on WSL reports
+-  `tuicr 0.19.1-offline-candidate.1+c2a7554`; later validation/tracker commits
+-  only change documentation and have not been rebuilt separately. The
+-  archived implementation package at `ca319dc` reports the corresponding
+-  `+ca319dc` identity.
+-- Platforms packaged: macOS x86_64 and Linux x86_64 only.
+-- Artifact readiness: `OFFLINE_VALIDATED_ONLY` — not a release. See
+-  `docs/offline-candidate/README.md` and `docs/offline-candidate/SECRET-SCAN.md`
+-  for the accepted scope and artifact/checksum contract.
++- The current release-preparation worktree reports
++  `tuicr 0.19.1-fork.1+<source-sha>` and uses isolated `tuicr-fork` storage.
++  The archived implementation package at `ca319dc` remains
++  `OFFLINE_VALIDATED_ONLY`.
++- Release candidate matrix: native macOS/Linux x86_64 and arm64. Local Linux
++  x86_64 packaging passes; GitHub-hosted native matrix remains pending.
++- No tag or hosted release exists. Candidate CI is non-publishing; promotion
++  creates only a draft prerelease after exact-run verification.
+ - Real Ubuntu 24.04 under WSL2: **pass with caveats** for upstream `v0.19.1`
+   and fork tip `c2a7554`; see
+   `docs/wayfinder/tickets/validate-wsl-baseline.md`.
+@@ -79,8 +78,8 @@ Per-feature commit ranges and validation state:
+ 
+ In dependency order:
+ 
+-1. Add arm64, signing/notarization, package-manager distribution, and cut an
+-   actual tagged/pushed release;
++1. Push the candidate, run and inspect native x86_64/arm64 Linux/macOS CI,
++   then obtain separate approval before tag/draft-prerelease promotion;
+    `docs/wayfinder/tickets/release-cross-platform-fork.md`.
+ 2. Post the one ready upstream patch (comment-author JSON) once approved, and
+    reconcile the rest after the release interface stabilizes —
+@@ -96,6 +95,8 @@ In dependency order:
+ - `docs/wayfinder/` — the open/blocking tickets that gate a real release.
+ - `docs/offline-candidate/` — the packaged candidate itself (install,
+   migration, provider capabilities, secret-scan contract).
++- `docs/release/` and `RELEASE.md` — maintained-fork installation,
++  migration, signing, distribution, candidate, and promotion contracts.
+ - `docs/fork/TPATCH.md` — the local tpatch committed-range verifier fix and
+   when to apply it.
+ 
+diff --git a/docs/release/INSTALL.md b/docs/release/INSTALL.md
+new file mode 100644
+index 0000000..db2ce22
+--- /dev/null
++++ b/docs/release/INSTALL.md
+@@ -0,0 +1,24 @@
++# Install the maintained fork
++
++The primary distribution is a checksummed GitHub release archive for one of:
++
++- `x86_64-unknown-linux-gnu`
++- `aarch64-unknown-linux-gnu`
++- `x86_64-apple-darwin`
++- `aarch64-apple-darwin`
++
++Verify the adjacent `.sha256` file before extracting, then place `tuicr` on
++`PATH`. macOS archives are ad-hoc signed unless the release notes explicitly
++state that Developer ID signing and Apple notarization passed.
++
++Package-manager-capable source installs are also supported:
++
++```bash
++cargo install --git https://github.com/jdbencardinop/tuicr \
++  --tag <release-tag> --locked
++nix profile install github:jdbencardinop/tuicr/<release-tag>
++```
++
++The fork does not publish the upstream-owned `tuicr` crate to crates.io.
++Automatic update checks and `tuicr update` remain disabled; upgrade by
++installing a newer verified tag and rollback by reinstalling an older one.
+diff --git a/docs/release/MIGRATION.md b/docs/release/MIGRATION.md
+new file mode 100644
+index 0000000..ff729c0
+--- /dev/null
++++ b/docs/release/MIGRATION.md
+@@ -0,0 +1,28 @@
++# Fork data migration and rollback
++
++The maintained fork stores reviews under `tuicr-fork`, separate from both
++upstream `tuicr` and the archived `tuicr-offline-candidate` build.
++
++| Platform | Reviews |
++| --- | --- |
++| Linux | `${XDG_DATA_HOME:-~/.local/share}/tuicr-fork/reviews/` |
++| macOS | `~/Library/Application Support/tuicr-fork/reviews/` |
++
++Config and themes use `${XDG_CONFIG_HOME:-~/.config}/tuicr-fork/`.
++
++Import is explicit, one-way, and backup-first:
++
++```bash
++./import-reviews.sh --source upstream --dry-run
++./import-reviews.sh --source upstream
++./import-reviews.sh --source offline-candidate
++```
++
++Use `--force` only when the destination is non-empty; the script copies the
++current destination to a timestamped backup before importing. It never
++modifies the source.
++
++Before rollback, back up the entire `tuicr-fork` data directory. Upstream
++0.19.1 ignores fork-only durable thread fields and can discard them if it
++rewrites copied sessions, so keep fork data separate and treat any explicit
++copy back to upstream as lossy.
+diff --git a/docs/wayfinder/map.md b/docs/wayfinder/map.md
+index 7d7803d..62cdf1e 100644
+--- a/docs/wayfinder/map.md
++++ b/docs/wayfinder/map.md
+@@ -40,8 +40,9 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
+   partial explicitly.
+ - [Make the fork binary unambiguously distinguishable from upstream](../fork/DECISIONS.md#fork-identity-update-and-data-dir-behavior)
+   — distinguishable version string, disabled self-update, isolated data dir.
+-- [Current status is offline-only, not a release](../fork/DECISIONS.md#current-offline-only-status)
+-  — tip `ca319dc`, `OFFLINE_VALIDATED_ONLY`.
++- [Prepare a fork-owned release channel](tickets/release-cross-platform-fork.md#release-design)
++  — fork identity, isolated storage, native four-platform candidate CI, and
++  guarded draft-prerelease promotion are implemented; native CI is pending.
+ - [Validate upstream and fork on Ubuntu under WSL](tickets/validate-wsl-baseline.md)
+   — core build/startup/navigation/persistence/stdout/editor and read-only
+   provider checks passed; the two newer-Git fixtures and browser launcher
+@@ -91,8 +92,9 @@ and what each still needs before it can go upstream):
+ - Native self-hosted GitLab custom-port URLs without the documented portless
+   logical-host workaround — tracked by
+   [support-gitlab-custom-ports](tickets/support-gitlab-custom-ports.md).
+-- arm64 builds, signing/notarization, package-manager distribution, and the
+-  actual tagged/pushed release — gated on
++- native arm64/macOS candidate evidence, Developer ID
++  signing/notarization disposition, and the actual tagged/pushed release —
++  gated on
+   [release-cross-platform-fork](tickets/release-cross-platform-fork.md).
+ - Minimum supported provider versions beyond the proven Gitea 1.24/Forgejo 16
+   pins.
+diff --git a/docs/wayfinder/tickets/release-cross-platform-fork.md b/docs/wayfinder/tickets/release-cross-platform-fork.md
+index 3414c20..9b530a2 100644
+--- a/docs/wayfinder/tickets/release-cross-platform-fork.md
++++ b/docs/wayfinder/tickets/release-cross-platform-fork.md
+@@ -3,8 +3,8 @@ id: release-cross-platform-fork
+ title: Release the cross-platform fork
+ type: task
+ mode: AFK
+-status: open
+-owner:
++status: in-progress
++owner: copilot
+ blocked_by: [validate-live-provider-parity, classify-local-anchor-shifts, decide-wsl-clipboard-boundary]
+ ---
+ 
+@@ -34,16 +34,39 @@ explicitly **not a release**:
+ 
+ ## Remaining work
+ 
+-- arm64 builds, signing/notarization, and package-manager distribution — not
+-  started.
++- Native candidate CI is implemented for Linux/macOS x86_64 and arm64 but has
++  not run on the GitHub-hosted arm64/macOS runners yet.
++- macOS artifacts are ad-hoc signed. Developer ID signing and Apple
++  notarization require credentials and an approved secret-handling boundary;
++  the first prerelease must label this limitation rather than imply it passed.
++- GitHub archives are the primary binary channel. Exact-tag Cargo git and Nix
++  installs are documented; crates.io, Homebrew, Mise, APT, and RPM are not
++  first-release channels.
+ 
+ No Git tag has been created and nothing has been pushed or published.
+ 
+ ## Next work
+ 
+-All tracked validation dependencies are closed. Scope and complete
+-arm64/signing/distribution work, then replace the current offline candidate
+-with a real tagged/pushed release. `docs/offline-candidate/README.md` and
+-`docs/offline-candidate/SECRET-SCAN.md` document the exact accepted scope,
+-checksums, and secret-scan contract of the current candidate to carry forward
+-into that release.
++Push the exact candidate commit, run the four-platform workflow, inspect its
++archives/checksums/provenance, and record the native results here. Promotion
++then requires separate authorization to create a tag and draft GitHub
++prerelease. Publishing that draft remains a second explicit action.
++
++## Release design
++
++The maintained fork now reports `0.19.1-fork.1+<source-sha>`, stores data under
++`tuicr-fork`, and imports upstream or archived-candidate sessions through an
++explicit backup-first copy. The inherited workflow that tagged and published
++crates.io before binary completion was replaced:
++
++- `Release candidate` has read-only permissions and cannot tag or publish;
++- each native runner packages one archive and runs it locally;
++- the aggregate job requires all four targets and verifies every checksum;
++- `Promote verified candidate` accepts only a successful candidate run for the
++  exact source commit/version, then creates an annotated tag and **draft**
++  prerelease behind the `release` environment;
++- no workflow publishes the upstream-owned crates.io package.
++
++The local WSL x86_64 release archive passed build, identity, help, byte-aware
++secret-pattern scan, extraction, content, and checksum checks. Native arm64
++and macOS evidence remains pending CI.
+diff --git a/scripts/import-reviews.sh b/scripts/import-reviews.sh
+new file mode 100755
+index 0000000..d780c77
+--- /dev/null
++++ b/scripts/import-reviews.sh
+@@ -0,0 +1,86 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++SOURCE="upstream"
++DRY_RUN=0
++FORCE=0
++FROM_DIR=""
++TO_DIR=""
++
++usage() {
++  cat <<'USAGE'
++Usage: scripts/import-reviews.sh [options]
++
++Copy review data into the maintained fork without modifying the source.
++
++Options:
++  --source NAME  Source layout: upstream (default) or offline-candidate.
++  --from DIR     Override the source reviews directory.
++  --to DIR       Override the fork reviews directory.
++  --force        Permit a non-empty destination after backing it up.
++  --dry-run      Print the resolved operation without copying.
++  -h, --help     Show this help.
++USAGE
++}
++
++log() { printf '[import-reviews] %s\n' "$*" >&2; }
++die() { printf '[import-reviews] ERROR: %s\n' "$*" >&2; exit 1; }
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --source) SOURCE="${2:?--source requires a value}"; shift 2 ;;
++    --from) FROM_DIR="${2:?--from requires a value}"; shift 2 ;;
++    --to) TO_DIR="${2:?--to requires a value}"; shift 2 ;;
++    --force) FORCE=1; shift ;;
++    --dry-run) DRY_RUN=1; shift ;;
++    -h|--help) usage; exit 0 ;;
++    *) die "unknown argument: $1" ;;
++  esac
++done
++
++case "$SOURCE" in
++  upstream) source_app_id="tuicr" ;;
++  offline-candidate) source_app_id="tuicr-offline-candidate" ;;
++  *) die "--source must be upstream or offline-candidate" ;;
++esac
++
++default_data_home() {
++  case "$(uname -s)" in
++    Darwin) printf '%s/Library/Application Support' "$HOME" ;;
++    *) printf '%s' "${XDG_DATA_HOME:-$HOME/.local/share}" ;;
++  esac
++}
++
++data_home="$(default_data_home)"
++FROM_DIR="${FROM_DIR:-$data_home/$source_app_id/reviews}"
++TO_DIR="${TO_DIR:-$data_home/tuicr-fork/reviews}"
++
++[[ -d "$FROM_DIR" ]] || die "source directory does not exist: $FROM_DIR"
++source_count="$(find "$FROM_DIR" -type f | wc -l | tr -d ' ')"
++destination_count=0
++if [[ -e "$TO_DIR" ]]; then
++  destination_count="$(find "$TO_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
++fi
++
++log "source ($SOURCE): $FROM_DIR ($source_count file(s))"
++log "destination: $TO_DIR ($destination_count file(s))"
++
++if [[ "$destination_count" -gt 0 && "$FORCE" -ne 1 ]]; then
++  die "destination is non-empty; rerun with --force to back it up before import"
++fi
++
++if [[ "$DRY_RUN" -eq 1 ]]; then
++  log "[dry-run] would back up the destination if present, then copy source to destination"
++  exit 0
++fi
++
++if [[ -e "$TO_DIR" ]]; then
++  backup_dir="${TO_DIR}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
++  log "backing up destination to: $backup_dir"
++  cp -R "$TO_DIR" "$backup_dir"
++fi
++
++mkdir -p "$TO_DIR"
++cp -R "$FROM_DIR/." "$TO_DIR/"
++copied_count="$(find "$TO_DIR" -type f | wc -l | tr -d ' ')"
++log "import complete: $copied_count destination file(s); source was not modified"
+diff --git a/scripts/package-offline-candidate.sh b/scripts/package-offline-candidate.sh
+index d92e6d9..9120a47 100755
+--- a/scripts/package-offline-candidate.sh
++++ b/scripts/package-offline-candidate.sh
+@@ -141,7 +141,7 @@ VERSION="$UPSTREAM_BASE_VERSION"
+ # build, which builds from a clean `git archive` checkout with no `.git`
+ # directory to fall back on) embeds an identical, known-correct source SHA
+ # into `--version` regardless of build environment.
+-export TUICR_OFFLINE_CANDIDATE_SHA="$SOURCE_SHA_SHORT"
++export TUICR_BUILD_SHA="$SOURCE_SHA_SHORT"
+ EXPECTED_REPORTED_VERSION="tuicr ${FORK_VERSION}+${SOURCE_SHA_SHORT}"
+ PACKAGED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+ RUSTC_VERSION="$(rustc --version)"
+@@ -866,7 +866,7 @@ if [[ "$SKIP_LINUX" -eq 0 ]]; then
+       -v "$LINUX_TARGET_DIR:/build-target" \
+       -v "$LINUX_REGISTRY_DIR:/usr/local/cargo/registry" \
+       -e CARGO_TARGET_DIR=/build-target \
+-      -e TUICR_OFFLINE_CANDIDATE_SHA="$SOURCE_SHA_SHORT" \
++      -e TUICR_BUILD_SHA="$SOURCE_SHA_SHORT" \
+       -w /src \
+       "$LINUX_BUILD_IMAGE" \
+       cargo build --release --locked >&2
+diff --git a/scripts/package-release-artifact.sh b/scripts/package-release-artifact.sh
+new file mode 100755
+index 0000000..59c2e2a
+--- /dev/null
++++ b/scripts/package-release-artifact.sh
+@@ -0,0 +1,141 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++TARGET=""
++BINARY=""
++OUTPUT_DIR=""
++SOURCE_SHA="${TUICR_BUILD_SHA:-}"
++
++usage() {
++  cat <<'USAGE'
++Usage: scripts/package-release-artifact.sh --target TRIPLE --binary PATH --output-dir DIR [--source-sha SHA]
++
++Packages one native fork binary with release documentation, provenance, and
++a SHA-256 checksum. The binary must run on the current host.
++USAGE
++}
++
++die() { printf '[package-release-artifact] ERROR: %s\n' "$*" >&2; exit 1; }
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --target) TARGET="${2:?--target requires a value}"; shift 2 ;;
++    --binary) BINARY="${2:?--binary requires a value}"; shift 2 ;;
++    --output-dir) OUTPUT_DIR="${2:?--output-dir requires a value}"; shift 2 ;;
++    --source-sha) SOURCE_SHA="${2:?--source-sha requires a value}"; shift 2 ;;
++    -h|--help) usage; exit 0 ;;
++    *) die "unknown argument: $1" ;;
++  esac
++done
++
++[[ -n "$TARGET" && -n "$BINARY" && -n "$OUTPUT_DIR" ]] || { usage; exit 2; }
++[[ -x "$BINARY" ]] || die "binary is not executable: $BINARY"
++[[ -n "$SOURCE_SHA" ]] || die "source SHA is required"
++
++case "$TARGET" in
++  x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) os="linux" ;;
++  x86_64-apple-darwin|aarch64-apple-darwin) os="macos" ;;
++  *) die "unsupported release target: $TARGET" ;;
++esac
++
++version="$("$BINARY" --version)"
++package_version="${version#tuicr }"
++package_version="${package_version%%+*}"
++[[ "$version" == "tuicr $package_version+$SOURCE_SHA" ]] ||
++  die "binary identity '$version' does not match source SHA '$SOURCE_SHA'"
++
++sha256() {
++  if command -v sha256sum >/dev/null 2>&1; then
++    sha256sum "$1" | awk '{print $1}'
++  else
++    shasum -a 256 "$1" | awk '{print $1}'
++  fi
++}
++
++scan_secrets() {
++  local root="$1"
++  local patterns=(
++    'ghp_[0-9A-Za-z]{36,}'
++    'gh[oesur]_[0-9A-Za-z]{36,}'
++    'github_pat_[0-9A-Za-z_]{22,}'
++    'glpat[-_][0-9A-Za-z_-]{20,}'
++    'AKIA[0-9A-Z]{16}'
++    'xox[baprs]-[0-9A-Za-z-]{10,}'
++    '-----BEGIN[A-Z ]*PRIVATE KEY-----'
++  )
++  local allowlist=(
++    'ghp_SENTINEL0123456789abcdefABCDEF01234567'
++    'glpat-SENTINEL0123456789abcdefABCDEF'
++    'glpat-SENTINEL0123456789abcdef'
++    'glpat-XyZ_0123456789abcdef'
++    'glpat-ABCDEFGHIJKLMNOPQRST'
++  )
++  local allowed_hash='861868d6e0246f776b867c651da9519f5d398cee945fe26ae2f0e890dcf64032'
++  local file pattern value value_hash allowed
++
++  while IFS= read -r -d '' file; do
++    for pattern in "${patterns[@]}"; do
++      while IFS= read -r value; do
++        [[ -n "$value" ]] || continue
++        allowed=0
++        for exact in "${allowlist[@]}"; do
++          [[ "$value" == "$exact" ]] && allowed=1
++        done
++        value_hash="$(printf '%s' "$value" | sha256_stream)"
++        [[ "$value_hash" == "$allowed_hash" ]] && allowed=1
++        [[ "$allowed" -eq 1 ]] ||
++          die "non-allowlisted secret-shaped value in $(basename "$file")"
++      done < <(grep -aoE -- "$pattern" "$file" 2>/dev/null || true)
++    done
++  done < <(find "$root" -type f -print0)
++}
++
++sha256_stream() {
++  if command -v sha256sum >/dev/null 2>&1; then
++    sha256sum | awk '{print $1}'
++  else
++    shasum -a 256 | awk '{print $1}'
++  fi
++}
++
++mkdir -p "$OUTPUT_DIR"
++work_dir="$(mktemp -d "${TMPDIR:-/tmp}/tuicr-release.XXXXXX")"
++trap 'rm -rf "$work_dir"' EXIT
++
++base_name="tuicr-${package_version}-${TARGET}"
++stage_dir="$work_dir/$base_name"
++mkdir -p "$stage_dir"
++cp "$BINARY" "$stage_dir/tuicr"
++cp LICENSE "$stage_dir/LICENSE"
++cp docs/release/INSTALL.md "$stage_dir/INSTALL.md"
++cp docs/release/MIGRATION.md "$stage_dir/MIGRATION.md"
++cp docs/offline-candidate/PROVIDER-CAPABILITIES.md "$stage_dir/PROVIDER-CAPABILITIES.md"
++cp scripts/import-reviews.sh "$stage_dir/import-reviews.sh"
++chmod +x "$stage_dir/tuicr" "$stage_dir/import-reviews.sh"
++
++signing="unsigned"
++if [[ "$os" == "macos" ]]; then
++  codesign --force --sign - "$stage_dir/tuicr"
++  codesign --verify --verbose "$stage_dir/tuicr"
++  signing="ad-hoc signed; not Developer ID signed or notarized"
++fi
++
++cat > "$stage_dir/PROVENANCE.txt" <<EOF
++repository=https://github.com/jdbencardinop/tuicr
++source_sha=$SOURCE_SHA
++version=$package_version
++target=$TARGET
++rustc=$(rustc --version)
++cargo=$(cargo --version)
++runner_os=$(uname -s)
++runner_arch=$(uname -m)
++signing=$signing
++EOF
++
++"$stage_dir/tuicr" --help >/dev/null
++scan_secrets "$stage_dir"
++archive="$OUTPUT_DIR/$base_name.tar.gz"
++tar -C "$work_dir" -czf "$archive" "$base_name"
++digest="$(sha256 "$archive")"
++printf '%s  %s\n' "$digest" "$(basename "$archive")" > "$archive.sha256"
++printf '%s\n' "$version" > "$OUTPUT_DIR/$base_name.version.txt"
+diff --git a/src/cli.rs b/src/cli.rs
+index 6e4c0a5..62624f9 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -43,12 +43,8 @@ pub struct CliArgs {
+ #[derive(Parser, Debug)]
+ #[command(
+     name = "tuicr",
+-    // Offline fork-candidate identity: `CARGO_PKG_VERSION` already carries
+-    // an `-offline-candidate.N` prerelease tag (see Cargo.toml); appending
+-    // the build-time source SHA (see build.rs) makes `--version` output
+-    // unambiguous, e.g. `tuicr 0.19.1-offline-candidate.1+d8b1f63`. This can
+-    // never be confused with an unmodified upstream `tuicr 0.19.1` release.
+-    version = concat!(env!("CARGO_PKG_VERSION"), "+", env!("TUICR_OFFLINE_CANDIDATE_SHA")),
++    // The fork prerelease plus source SHA is unambiguous and traceable.
++    version = concat!(env!("CARGO_PKG_VERSION"), "+", env!("TUICR_BUILD_SHA")),
+     about = "A code review TUI with vim keybindings. Export to GitHub or clipboard.",
+     after_help = "Press ? in the application for keybinding help.",
+     disable_help_subcommand = true
+diff --git a/src/config/mod.rs b/src/config/mod.rs
+index 626f7f5..6f2b465 100644
+--- a/src/config/mod.rs
++++ b/src/config/mod.rs
+@@ -256,27 +256,26 @@ fn config_dir_from_parts(
+     home: Option<PathBuf>,
+     _appdata: Option<PathBuf>,
+ ) -> Result<PathBuf> {
+-    // Offline fork candidate: use a fork-specific directory name ("tuicr" ->
+-    // "tuicr-offline-candidate") so config.toml/themes never collide with a
+-    // real upstream `tuicr` install's config directory on the same machine.
++    // Use a fork-specific directory so config and themes never collide with
++    // an upstream `tuicr` installation.
+     #[cfg(windows)]
+     {
+         let base = _appdata
+             .filter(|p| !p.as_os_str().is_empty())
+             .ok_or_else(|| anyhow!("Could not determine APPDATA for config directory"))?;
+-        return Ok(base.join("tuicr-offline-candidate"));
++        return Ok(base.join("tuicr-fork"));
+     }
+ 
+     #[cfg(not(windows))]
+     {
+         if let Some(base) = xdg_config_home.filter(|p| !p.as_os_str().is_empty()) {
+-            return Ok(base.join("tuicr-offline-candidate"));
++            return Ok(base.join("tuicr-fork"));
+         }
+ 
+         let home = home
+             .filter(|p| !p.as_os_str().is_empty())
+             .ok_or_else(|| anyhow!("Could not determine HOME for config directory"))?;
+-        Ok(home.join(".config").join("tuicr-offline-candidate"))
++        Ok(home.join(".config").join("tuicr-fork"))
+     }
+ }
+ 
+@@ -1708,7 +1707,7 @@ scope_line = "no"
+ 
+         assert_eq!(
+             path,
+-            PathBuf::from("/tmp/xdg-config/tuicr-offline-candidate/config.toml")
++            PathBuf::from("/tmp/xdg-config/tuicr-fork/config.toml")
+         );
+     }
+ 
+@@ -1720,7 +1719,7 @@ scope_line = "no"
+ 
+         assert_eq!(
+             path,
+-            PathBuf::from("/home/tester/.config/tuicr-offline-candidate/config.toml")
++            PathBuf::from("/home/tester/.config/tuicr-fork/config.toml")
+         );
+     }
+ 
+@@ -1736,7 +1735,7 @@ scope_line = "no"
+ 
+         assert_eq!(
+             path,
+-            PathBuf::from("/home/tester/.config/tuicr-offline-candidate/config.toml")
++            PathBuf::from("/home/tester/.config/tuicr-fork/config.toml")
+         );
+     }
+ 
+@@ -1750,7 +1749,7 @@ scope_line = "no"
+         )
+         .expect("config path should resolve");
+ 
+-        assert!(path.ends_with(Path::new("tuicr-offline-candidate").join("config.toml")));
++        assert!(path.ends_with(Path::new("tuicr-fork").join("config.toml")));
+     }
+ 
+     #[cfg(not(windows))]
+@@ -1763,10 +1762,7 @@ scope_line = "no"
+         )
+         .expect("themes dir should resolve");
+ 
+-        assert_eq!(
+-            path,
+-            PathBuf::from("/tmp/xdg-config/tuicr-offline-candidate/themes")
+-        );
++        assert_eq!(path, PathBuf::from("/tmp/xdg-config/tuicr-fork/themes"));
+     }
+ 
+     #[cfg(not(windows))]
+@@ -1777,7 +1773,7 @@ scope_line = "no"
+ 
+         assert_eq!(
+             path,
+-            PathBuf::from("/home/tester/.config/tuicr-offline-candidate/themes")
++            PathBuf::from("/home/tester/.config/tuicr-fork/themes")
+         );
+     }
+ 
+@@ -1793,7 +1789,7 @@ scope_line = "no"
+ 
+         assert_eq!(
+             path,
+-            PathBuf::from(r"C:\Users\tester\AppData\Roaming\tuicr-offline-candidate\config.toml")
++            PathBuf::from(r"C:\Users\tester\AppData\Roaming\tuicr-fork\config.toml")
+         );
+     }
+ 
+@@ -1809,7 +1805,7 @@ scope_line = "no"
+ 
+         assert_eq!(
+             path,
+-            PathBuf::from(r"C:\Users\tester\AppData\Roaming\tuicr-offline-candidate\themes")
++            PathBuf::from(r"C:\Users\tester\AppData\Roaming\tuicr-fork\themes")
+         );
+     }
+ }
+diff --git a/src/main.rs b/src/main.rs
+index 5527c81..f3f843c 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -44,18 +44,13 @@ fn main() -> anyhow::Result<()> {
+     // This also configures syntax highlighting colors before diff parsing
+     let mut cli_args = profile::time("startup.parse_cli_args", parse_cli_args);
+     if cli_args.update_command {
+-        // Offline fork candidate: `tuicr update` (and pinned-version
+-        // updates) are permanently disabled here so this binary can never
+-        // silently replace itself with real upstream `agavra/tuicr` and
+-        // discard the fork's durable-thread feature. The real
+-        // update-installer logic in `tuicr::update` is intentionally left
+-        // intact -- and still covered by its own test suite -- for
+-        // potential future re-enablement, but this binary never calls it.
++        // Keep self-update disabled until this fork owns a stable release
++        // channel; never fall through to the inherited upstream channel.
+         eprintln!(
+-            "tuicr-offline-candidate: `tuicr update` is disabled in this offline fork build.\n\
++            "tuicr-fork: `tuicr update` is disabled in this fork build.\n\
+              This binary will never contact crates.io, GitHub Releases, Homebrew, cargo, or mise.\n\
+-             Reinstall manually from the packaged offline-candidate archive if you need a newer build.\n\
+-             See docs/offline-candidate/INSTALL.md and README.md for details."
++             Reinstall from a verified fork release archive, Cargo git tag, or Nix flake.\n\
++             See RELEASE.md and README.md for details."
+         );
+         std::process::exit(1);
+     }
+diff --git a/src/persistence/storage.rs b/src/persistence/storage.rs
+index 9e3bc88..44cf978 100644
+--- a/src/persistence/storage.rs
++++ b/src/persistence/storage.rs
+@@ -1,6 +1,6 @@
+ //! Slug-addressed storage layer for review sessions.
+ //!
+-//! Layout under the platform data dir's `tuicr-offline-candidate/reviews/`:
++//! Layout under the platform data dir's `tuicr-fork/reviews/`:
+ //!
+ //! ```text
+ //! reviews/
+@@ -804,7 +804,7 @@ pub(crate) fn get_reviews_dir() -> Result<PathBuf> {
+         // `set_test_reviews_dir`; tests that hit storage incidentally (e.g.,
+         // App tests that toggle save markers) fall back to a per-thread
+         // temp dir. The real
+-        // `~/.local/share/tuicr-offline-candidate/reviews` is never used in
++        // `~/.local/share/tuicr-fork/reviews` is never used in
+         // test mode.
+         let configured = TEST_REVIEWS_DIR.with(|cell| cell.borrow().clone());
+         if let Some(path) = configured {
+@@ -823,13 +823,9 @@ pub(crate) fn get_reviews_dir() -> Result<PathBuf> {
+ 
+     #[cfg(not(test))]
+     {
+-        // Offline fork candidate: use a fork-specific app id ("tuicr" ->
+-        // "tuicr-offline-candidate") so this build's review-session store
+-        // never shares a data directory with, or races against, a real
+-        // upstream `tuicr` install on the same machine. See
+-        // docs/offline-candidate/MIGRATION.md and
+-        // scripts/import-upstream-reviews.sh for moving data between them.
+-        let proj_dirs = ProjectDirs::from("", "", "tuicr-offline-candidate").ok_or_else(|| {
++        // Keep the maintained fork isolated from upstream and the archived
++        // offline candidate. Migration is explicit via scripts/import-reviews.sh.
++        let proj_dirs = ProjectDirs::from("", "", "tuicr-fork").ok_or_else(|| {
+             TuicrError::Io(std::io::Error::other("Could not determine data directory"))
+         })?;
+ 
+diff --git a/src/update/check.rs b/src/update/check.rs
+index 600dfec..c81f3c2 100644
+--- a/src/update/check.rs
++++ b/src/update/check.rs
+@@ -1,11 +1,6 @@
+-//! Offline fork candidate: the automatic background version check is
+-//! permanently disabled here so packaged offline-candidate binaries can
+-//! never phone home to crates.io, regardless of `--no-update-check` /
+-//! `no_update_check` config (those flags are still parsed for
+-//! config-file/CLI backward compatibility, but this function no longer
+-//! branches on them -- it never makes a network call). See
+-//! `docs/offline-candidate/README.md`.
+-const OFFLINE_FORK_UPDATE_CHECK_MESSAGE: &str = "tuicr-offline-candidate: automatic update checks are disabled in this offline fork build; this binary will never contact crates.io.";
++//! Automatic checks remain disabled until the fork owns a stable release
++//! channel. The inherited upstream endpoint must never replace this binary.
++const FORK_UPDATE_CHECK_MESSAGE: &str = "tuicr-fork: automatic update checks are disabled in this fork build; this binary will never contact crates.io.";
+ 
+ #[derive(Debug, Clone)]
+ pub struct UpdateInfo {
+@@ -23,7 +18,7 @@ pub enum UpdateCheckResult {
+ }
+ 
+ pub fn check_for_updates() -> UpdateCheckResult {
+-    UpdateCheckResult::Failed(OFFLINE_FORK_UPDATE_CHECK_MESSAGE.to_string())
++    UpdateCheckResult::Failed(FORK_UPDATE_CHECK_MESSAGE.to_string())
+ }
+ 
+ /// Still used by the (now unreachable from this binary, but intact and
+@@ -40,10 +35,10 @@ mod tests {
+     use super::*;
+ 
+     #[test]
+-    fn never_contacts_the_network_and_reports_offline_fork_message() {
++    fn never_contacts_the_network_and_reports_fork_message() {
+         assert!(matches!(
+             check_for_updates(),
+-            UpdateCheckResult::Failed(ref msg) if msg.contains("offline fork") && msg.contains("never contact crates.io")
++            UpdateCheckResult::Failed(ref msg) if msg.contains("fork build") && msg.contains("never contact crates.io")
+         ));
+     }
+ 
+diff --git a/src/update/install/tests.rs b/src/update/install/tests.rs
+index 693424d..9d84471 100644
+--- a/src/update/install/tests.rs
++++ b/src/update/install/tests.rs
+@@ -514,7 +514,7 @@ fn rejects_bad_release_metadata_assets_and_digests() {
+     let asset_url = bad_digest
+         .responses
+         .keys()
+-        .find(|url| url.starts_with("https://github.com/agavra/tuicr/releases/download/"))
++        .find(|url| url.starts_with("https://github.com/jdbencardinop/tuicr/releases/download/"))
+         .unwrap()
+         .clone();
+     bad_digest.responses.insert(asset_url, b"tampered".to_vec());
+@@ -547,11 +547,11 @@ fn maps_every_published_target_and_rejects_unsupported_targets() {
+     ));
+     assert_eq!(
+         release_asset_url("1.2.3", "tuicr.zip"),
+-        "https://github.com/agavra/tuicr/releases/download/v1.2.3/tuicr.zip"
++        "https://github.com/jdbencardinop/tuicr/releases/download/v1.2.3/tuicr.zip"
+     );
+     assert_eq!(
+         release_api_url(Some(&semver::Version::parse("1.2.3").unwrap())),
+-        "https://api.github.com/repos/agavra/tuicr/releases/tags/v1.2.3"
++        "https://api.github.com/repos/jdbencardinop/tuicr/releases/tags/v1.2.3"
+     );
+ }
+ 

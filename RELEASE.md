@@ -1,86 +1,48 @@
-# Release Process
+# Maintained fork release process
 
-This project uses an automated release workflow via GitHub Actions.
+The fork uses a two-stage release. Candidate validation cannot tag, publish a
+crate, or create a GitHub Release.
 
-## How to Release
+## 1. Validate a candidate
 
-1. **Go to Actions** → **Release** → **Run workflow**
-2. **Select action:**
-   - `bump-patch` (0.1.0 → 0.1.1) - bug fixes
-   - `bump-minor` (0.1.0 → 0.2.0) - new features
-   - `bump-major` (0.1.0 → 1.0.0) - breaking changes
-3. **Click "Run workflow"**
-4. **Review and merge** the auto-created PR
-5. **Done!** Merging automatically:
-   - Creates git tag `vX.Y.Z`
-   - Publishes to crates.io
-   - Creates GitHub Release with release notes
-   - Builds and uploads binaries for:
-     - `x86_64-unknown-linux-gnu` (Linux x64)
-     - `aarch64-unknown-linux-gnu` (Linux ARM64)
-     - `x86_64-apple-darwin` (macOS x64)
-     - `aarch64-apple-darwin` (macOS Apple Silicon)
-     - `x86_64-pc-windows-msvc` (Windows x64)
-6. **Update Homebrew tap** (manual, see below)
+Push the exact source commit and run **Release candidate**. It builds and
+smoke-tests native archives on:
 
-## Build Binaries for Existing Release
+- Ubuntu x86_64 and arm64;
+- macOS x86_64 and Apple Silicon.
 
-If you need to rebuild binaries for an existing release:
+Each archive contains the binary, license, install/migration/provider
+documentation, import helper, and provenance. The packaging script performs a
+byte-aware secret-pattern scan and emits an adjacent SHA-256 file. The
+aggregate job requires all four targets and verifies every checksum.
 
-1. **Go to Actions** → **Release** → **Run workflow**
-2. **Select action:** `build-binaries`
-3. **Enter version:** e.g., `0.1.1` (without the `v` prefix)
-4. **Click "Run workflow"**
+macOS binaries are ad-hoc signed for integrity testing. They are **not**
+Developer ID signed or notarized. A Developer ID Application certificate,
+App Store Connect issuer/key, and an approved credential-handling design are
+required before claiming Gatekeeper-ready distribution.
 
-## What Gets Updated
+## 2. Promote the verified commit
 
-The release PR includes:
-- `Cargo.toml` - version bump
-- `Cargo.lock` - updated lockfile
-- `CHANGELOG.md` - auto-generated from commits
+Promotion is a separate, manually dispatched **Promote verified candidate**
+workflow protected by the `release` environment. It accepts the successful
+candidate run ID and version, then verifies:
 
-## Commit Message Convention
+- candidate conclusion is `success`;
+- candidate workflow path is exactly the release-candidate workflow;
+- candidate source SHA equals the commit being promoted;
+- Cargo version equals the requested version;
+- all four archives and checksums are present and valid.
 
-For meaningful changelogs, use conventional commits:
+Only then does it create an annotated tag and a **draft prerelease**. Publishing
+that draft is a separate explicit GitHub action. Do not run promotion without
+authorization to create the tag and hosted draft.
 
-| Prefix | Category | Example |
-|--------|----------|---------|
-| `feat:` | Features | `feat: add export to JSON` |
-| `fix:` | Bug Fixes | `fix: resolve crash on empty diff` |
-| `docs:` | Documentation | `docs: update keybindings table` |
-| `perf:` | Performance | `perf: optimize large file rendering` |
-| `refactor:` | Refactor | `refactor: simplify state machine` |
-| `test:` | Testing | `test: add integration tests` |
-| `chore:` | Miscellaneous | `chore: update dependencies` |
+## Distribution policy
 
-## Update Homebrew Tap
-
-After binaries are uploaded, update the Homebrew formula:
-
-```bash
-# Get SHA256 checksums for the new version
-VERSION=X.Y.Z
-curl -sL "https://github.com/agavra/tuicr/releases/download/v${VERSION}/tuicr-${VERSION}-x86_64-apple-darwin.tar.gz" | shasum -a 256
-curl -sL "https://github.com/agavra/tuicr/releases/download/v${VERSION}/tuicr-${VERSION}-aarch64-apple-darwin.tar.gz" | shasum -a 256
-curl -sL "https://github.com/agavra/tuicr/releases/download/v${VERSION}/tuicr-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" | shasum -a 256
-curl -sL "https://github.com/agavra/tuicr/releases/download/v${VERSION}/tuicr-${VERSION}-aarch64-unknown-linux-gnu.tar.gz" | shasum -a 256
-
-# Update homebrew-tap/Formula/tuicr.rb with new version and checksums
-# Then commit and push to homebrew-tap repo
-```
-
-## Required Secrets
-
-The following secrets must be configured in GitHub repository settings:
-
-- `CARGO_REGISTRY_TOKEN` - API token from https://crates.io/settings/tokens
-
-## Manual Release (if needed)
-
-```bash
-# Update version in Cargo.toml manually, then:
-cargo publish --dry-run  # verify
-cargo publish            # publish to crates.io
-git tag v0.2.0
-git push origin v0.2.0
-```
+- GitHub checksummed archives are the primary binary channel.
+- Cargo installs use an exact Git tag from this fork; this fork does not
+  publish the upstream-owned `tuicr` crate to crates.io.
+- Nix installs use the exact fork tag through the repository flake.
+- Homebrew, Mise, APT, and RPM are not first-release channels.
+- `tuicr update` remains disabled until the fork owns a stable, verified
+  update manifest and rollback channel.

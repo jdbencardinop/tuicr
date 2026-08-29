@@ -141,7 +141,7 @@ VERSION="$UPSTREAM_BASE_VERSION"
 # build, which builds from a clean `git archive` checkout with no `.git`
 # directory to fall back on) embeds an identical, known-correct source SHA
 # into `--version` regardless of build environment.
-export TUICR_OFFLINE_CANDIDATE_SHA="$SOURCE_SHA_SHORT"
+export TUICR_BUILD_SHA="$SOURCE_SHA_SHORT"
 EXPECTED_REPORTED_VERSION="tuicr ${FORK_VERSION}+${SOURCE_SHA_SHORT}"
 PACKAGED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 RUSTC_VERSION="$(rustc --version)"
@@ -866,7 +866,7 @@ if [[ "$SKIP_LINUX" -eq 0 ]]; then
       -v "$LINUX_TARGET_DIR:/build-target" \
       -v "$LINUX_REGISTRY_DIR:/usr/local/cargo/registry" \
       -e CARGO_TARGET_DIR=/build-target \
-      -e TUICR_OFFLINE_CANDIDATE_SHA="$SOURCE_SHA_SHORT" \
+      -e TUICR_BUILD_SHA="$SOURCE_SHA_SHORT" \
       -w /src \
       "$LINUX_BUILD_IMAGE" \
       cargo build --release --locked >&2

@@ -80,7 +80,7 @@ The packaged fork binary must be unambiguously distinguishable from upstream
 and must never silently self-replace with upstream:
 
 - `--version` reports a distinguishable prerelease tag plus the embedded
-  source commit SHA (e.g. `tuicr 0.19.1-offline-candidate.N+<sha>`), never a
+  source commit SHA (e.g. `tuicr 0.19.1-fork.N+<sha>`), never a
   plain upstream version string.
 - The automatic background update check and `tuicr update` are disabled at
   the source level (not just by config flag) and make zero network calls;
@@ -93,17 +93,15 @@ and must never silently self-replace with upstream:
 
 These four rules exist together so that installing, running, or updating the
 fork can never silently overwrite, delete, or leak into an existing upstream
-Tuicr install. See this repo's `docs/offline-candidate/README.md`,
-`docs/offline-candidate/SECRET-SCAN.md`, and
-`docs/offline-candidate/MIGRATION.md` for the exact mechanics.
+Tuicr install. See `RELEASE.md`, `docs/release/`, and the archived
+`docs/offline-candidate/SECRET-SCAN.md` for the mechanics.
 
-## Current offline-only status
+## Current release-candidate status
 
-The fork is **offline-implementation-complete; release is blocked.** The
-implementation/package base remains `ca319dc`, reported by its archived
-packages as `tuicr 0.19.1-offline-candidate.1+ca319dc`. Those macOS x86_64 and
-Linux x86_64 packages remain explicitly `OFFLINE_VALIDATED_ONLY` — not a
-release.
+The historical macOS/Linux x86_64 packages at `ca319dc` remain
+`OFFLINE_VALIDATED_ONLY`. Current source is promoted to the distinguishable
+`0.19.1-fork.1` prerelease identity and release preparation uses a
+non-publishing four-platform native candidate gate.
 
 Follow-up validation exercised source revision `c2a7554` on real Ubuntu 24.04
 under WSL2 and live-tested the GitLab transport against an approved disposable
@@ -120,11 +118,10 @@ head refresh. Its formatting, clippy, 61 focused GitLab tests, and all 1,655
 supported locked library tests pass; the disposable GitLab head-shift rerun
 remains required before the live range gap closes.
 
-Explicitly **not yet done**: live GitHub mutation validation; live Azure DevOps
-mutation validation; GitLab durable TUI publication and stale-range live
-retest; disposition of the WSL local-anchor and TUI-clipboard caveats;
-arm64/universal builds; signing/notarization; package-manager distribution; any
-Git tag or hosted release; upstream PR submission/reconciliation.
+Live provider validation and WSL correctness gates are complete. A real tag or
+hosted release remains pending native candidate CI. Developer ID
+signing/notarization remains an explicit credential-gated gap; crates.io is
+not a fork distribution channel.
 
 See `docs/handoff/CURRENT.md` for the exact frontier and
 `docs/wayfinder/tickets/` for the open/blocking tickets that gate a real

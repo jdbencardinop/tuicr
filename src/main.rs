@@ -44,18 +44,13 @@ fn main() -> anyhow::Result<()> {
     // This also configures syntax highlighting colors before diff parsing
     let mut cli_args = profile::time("startup.parse_cli_args", parse_cli_args);
     if cli_args.update_command {
-        // Offline fork candidate: `tuicr update` (and pinned-version
-        // updates) are permanently disabled here so this binary can never
-        // silently replace itself with real upstream `agavra/tuicr` and
-        // discard the fork's durable-thread feature. The real
-        // update-installer logic in `tuicr::update` is intentionally left
-        // intact -- and still covered by its own test suite -- for
-        // potential future re-enablement, but this binary never calls it.
+        // Keep self-update disabled until this fork owns a stable release
+        // channel; never fall through to the inherited upstream channel.
         eprintln!(
-            "tuicr-offline-candidate: `tuicr update` is disabled in this offline fork build.\n\
+            "tuicr-fork: `tuicr update` is disabled in this fork build.\n\
              This binary will never contact crates.io, GitHub Releases, Homebrew, cargo, or mise.\n\
-             Reinstall manually from the packaged offline-candidate archive if you need a newer build.\n\
-             See docs/offline-candidate/INSTALL.md and README.md for details."
+             Reinstall from a verified fork release archive, Cargo git tag, or Nix flake.\n\
+             See RELEASE.md and README.md for details."
         );
         std::process::exit(1);
     }

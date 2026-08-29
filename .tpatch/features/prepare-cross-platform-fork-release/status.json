@@ -1,0 +1,23 @@
+{
+  "id": "prepare-cross-platform-fork-release",
+  "slug": "prepare-cross-platform-fork-release",
+  "title": "Prepare the maintained fork for a first GitHub prerelease: replace offline-candidate identity with release-candidate identity, package native Linux/macOS x86_64 and arm64 binaries with checksums and provenance, validate them before promotion, keep crates.io publication disabled, document Nix and Cargo git distribution, and make signing/notarization requirements explicit without creating a tag or release.",
+  "state": "applied",
+  "compatibility": "unknown",
+  "requested_at": "2026-08-29T00:14:54Z",
+  "updated_at": "2026-08-29T01:32:38Z",
+  "last_command": "verify",
+  "notes": "landed at 2026-08-29T01:33:13Z",
+  "apply": {
+    "completed_at": "2026-08-29T01:32:37Z",
+    "base_commit": "0c15cd85258006292b894072c4c3eee67f545c43",
+    "has_patch": true
+  },
+  "reconcile": {},
+  "verify": {
+    "verified_at": "2026-08-29T01:32:37Z",
+    "passed": true,
+    "recipe_hash_at_verify": "d0c21cf0ba2fa3dd490cc69bafd404aa168d5eb9a9e7eedcc4ac7115d3b13d86",
+    "patch_hash_at_verify": "7ad3a0e084443368fc23c520e7a05e13a9e9780470fb17b8ecc88670237ea499"
+  }
+}

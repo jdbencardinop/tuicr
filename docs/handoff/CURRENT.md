@@ -54,15 +54,14 @@ Full decision text: `docs/fork/DECISIONS.md`.
   UTF-16LE directly to `clip.exe` before terminal/Linux fallbacks. Library,
   detached-tmux, and real-TUI Unicode round trips pass without changing
   native Linux, macOS, or native Windows routing.
-- Latest build exercised on WSL reports
-  `tuicr 0.19.1-offline-candidate.1+c2a7554`; later validation/tracker commits
-  only change documentation and have not been rebuilt separately. The
-  archived implementation package at `ca319dc` reports the corresponding
-  `+ca319dc` identity.
-- Platforms packaged: macOS x86_64 and Linux x86_64 only.
-- Artifact readiness: `OFFLINE_VALIDATED_ONLY` — not a release. See
-  `docs/offline-candidate/README.md` and `docs/offline-candidate/SECRET-SCAN.md`
-  for the accepted scope and artifact/checksum contract.
+- The current release-preparation worktree reports
+  `tuicr 0.19.1-fork.1+<source-sha>` and uses isolated `tuicr-fork` storage.
+  The archived implementation package at `ca319dc` remains
+  `OFFLINE_VALIDATED_ONLY`.
+- Release candidate matrix: native macOS/Linux x86_64 and arm64. Local Linux
+  x86_64 packaging passes; GitHub-hosted native matrix remains pending.
+- No tag or hosted release exists. Candidate CI is non-publishing; promotion
+  creates only a draft prerelease after exact-run verification.
 - Real Ubuntu 24.04 under WSL2: **pass with caveats** for upstream `v0.19.1`
   and fork tip `c2a7554`; see
   `docs/wayfinder/tickets/validate-wsl-baseline.md`.
@@ -79,8 +78,8 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Add arm64, signing/notarization, package-manager distribution, and cut an
-   actual tagged/pushed release;
+1. Push the candidate, run and inspect native x86_64/arm64 Linux/macOS CI,
+   then obtain separate approval before tag/draft-prerelease promotion;
    `docs/wayfinder/tickets/release-cross-platform-fork.md`.
 2. Post the one ready upstream patch (comment-author JSON) once approved, and
    reconcile the rest after the release interface stabilizes —
@@ -96,6 +95,8 @@ In dependency order:
 - `docs/wayfinder/` — the open/blocking tickets that gate a real release.
 - `docs/offline-candidate/` — the packaged candidate itself (install,
   migration, provider capabilities, secret-scan contract).
+- `docs/release/` and `RELEASE.md` — maintained-fork installation,
+  migration, signing, distribution, candidate, and promotion contracts.
 - `docs/fork/TPATCH.md` — the local tpatch committed-range verifier fix and
   when to apply it.
 

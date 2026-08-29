@@ -514,7 +514,7 @@ fn rejects_bad_release_metadata_assets_and_digests() {
     let asset_url = bad_digest
         .responses
         .keys()
-        .find(|url| url.starts_with("https://github.com/agavra/tuicr/releases/download/"))
+        .find(|url| url.starts_with("https://github.com/jdbencardinop/tuicr/releases/download/"))
         .unwrap()
         .clone();
     bad_digest.responses.insert(asset_url, b"tampered".to_vec());
@@ -547,11 +547,11 @@ fn maps_every_published_target_and_rejects_unsupported_targets() {
     ));
     assert_eq!(
         release_asset_url("1.2.3", "tuicr.zip"),
-        "https://github.com/agavra/tuicr/releases/download/v1.2.3/tuicr.zip"
+        "https://github.com/jdbencardinop/tuicr/releases/download/v1.2.3/tuicr.zip"
     );
     assert_eq!(
         release_api_url(Some(&semver::Version::parse("1.2.3").unwrap())),
-        "https://api.github.com/repos/agavra/tuicr/releases/tags/v1.2.3"
+        "https://api.github.com/repos/jdbencardinop/tuicr/releases/tags/v1.2.3"
     );
 }
 

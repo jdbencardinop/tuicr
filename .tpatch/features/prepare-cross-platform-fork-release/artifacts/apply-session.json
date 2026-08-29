@@ -1,0 +1,8 @@
+{
+  "slug": "prepare-cross-platform-fork-release",
+  "completed_at": "2026-08-29T01:32:37Z",
+  "base_commit": "0c15cd85258006292b894072c4c3eee67f545c43",
+  "has_patch": true,
+  "validation_status": "passed",
+  "validation_notes": "tpatch test — command: cargo fmt --all --check \u0026\u0026 cargo clippy --all-targets -- -D warnings \u0026\u0026 cargo test --locked --lib -- --skip vcs::git::libgit2::tests::should_discover_worktree_with_relativeworktrees_extension --skip vcs::git::tests::default_preference_routes_reftable_repo_to_cli \u0026\u0026 bash -n scripts/import-reviews.sh scripts/package-release-artifact.sh scripts/package-offline-candidate.sh \u0026\u0026 git diff --check"
+}

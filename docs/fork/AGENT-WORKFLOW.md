@@ -133,14 +133,16 @@ tracked in `docs/handoff/CURRENT.md`. These are self-contained fork-scoped
 records: link to files inside this repo or public upstream URLs only, never
 to a local research workspace or machine-specific path.
 
-## WSL/provider release gates
+## Release gates
 
-`RELEASE.md`'s automated `bump-*` workflow (tag, crates.io publish, GitHub
-Release, binaries) must **not** be triggered until the release is actually
-ready: a real Ubuntu-under-WSL run has passed, and live GitHub/GitLab/Azure
-DevOps/Gitea/Forgejo mutation validation has been approved and executed.
-Anything produced before that (including `docs/offline-candidate/` archives)
-is `OFFLINE_VALIDATED_ONLY`, not a release.
+The WSL and live-provider gates are complete. `Release candidate` is the only
+workflow permitted during preparation: it has read-only permissions, builds
+four native Linux/macOS x86_64/arm64 archives, and cannot tag or publish.
+`Promote verified candidate` requires a successful exact-commit candidate run
+and creates only a tag plus draft prerelease behind the `release` environment.
+Do not dispatch promotion without explicit tag/release authorization.
+crates.io publication is disabled for this fork; Developer ID
+signing/notarization remains a separate credential-gated release capability.
 
 ## Commit and safety rules
 

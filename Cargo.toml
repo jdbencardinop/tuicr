@@ -1,17 +1,14 @@
 [package]
 name = "tuicr"
-# Offline fork-candidate identity: a semver prerelease tag distinguishes this
-# build from real upstream `tuicr` releases (which never publish an
-# `-offline-candidate.N` version). The exact source commit is additionally
-# embedded at build time (see build.rs) and surfaced via `--version` as
-# `<version>+<short-sha>`, so this binary never reports an identity that
-# could be mistaken for an unmodified upstream release.
-version = "0.19.1-offline-candidate.1"
+# Maintained-fork identity: the prerelease tag distinguishes this build from
+# upstream `tuicr` releases. The exact source commit is additionally embedded
+# at build time (see build.rs) and surfaced via `--version`.
+version = "0.19.1-fork.1"
 edition = "2024"
 description = "Review AI-generated diffs like a GitHub pull request, right from your terminal."
 license = "MIT"
-repository = "https://github.com/agavra/tuicr"
-homepage = "https://github.com/agavra/tuicr"
+repository = "https://github.com/jdbencardinop/tuicr"
+homepage = "https://github.com/jdbencardinop/tuicr"
 readme = "README.md"
 keywords = ["tui", "git", "code-review", "diff", "cli"]
 categories = ["command-line-utilities", "development-tools"]

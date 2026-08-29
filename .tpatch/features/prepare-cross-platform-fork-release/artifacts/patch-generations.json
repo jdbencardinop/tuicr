@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "feature": "prepare-cross-platform-fork-release",
+  "current_generation": 1,
+  "generations": [
+    {
+      "generation": 1,
+      "generation_id": "pg_3eabd954c34d",
+      "kind": "record",
+      "patch_sha256": "7ad3a0e084443368fc23c520e7a05e13a9e9780470fb17b8ecc88670237ea499",
+      "git_patch_id": "8ae952805200458a639b32d8372fbb53d4aa8057",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "d0c21cf0ba2fa3dd490cc69bafd404aa168d5eb9a9e7eedcc4ac7115d3b13d86",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/001-record.patch",
+      "base_commit": "0c15cd85258006292b894072c4c3eee67f545c43",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/release-candidate.yml",
+        ".github/workflows/release.yml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "README.md",
+        "RELEASE.md",
+        "build.rs",
+        "docs/fork/AGENT-WORKFLOW.md",
+        "docs/fork/DECISIONS.md",
+        "docs/handoff/CURRENT.md",
+        "docs/release/INSTALL.md",
+        "docs/release/MIGRATION.md",
+        "docs/wayfinder/map.md",
+        "docs/wayfinder/tickets/release-cross-platform-fork.md",
+        "scripts/import-reviews.sh",
+        "scripts/package-offline-candidate.sh",
+        "scripts/package-release-artifact.sh",
+        "src/cli.rs",
+        "src/config/mod.rs",
+        "src/main.rs",
+        "src/persistence/storage.rs",
+        "src/update/check.rs",
+        "src/update/install/tests.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    }
+  ]
+}

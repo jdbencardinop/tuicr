@@ -1,6 +1,6 @@
 //! Slug-addressed storage layer for review sessions.
 //!
-//! Layout under the platform data dir's `tuicr-offline-candidate/reviews/`:
+//! Layout under the platform data dir's `tuicr-fork/reviews/`:
 //!
 //! ```text
 //! reviews/
@@ -804,7 +804,7 @@ pub(crate) fn get_reviews_dir() -> Result<PathBuf> {
         // `set_test_reviews_dir`; tests that hit storage incidentally (e.g.,
         // App tests that toggle save markers) fall back to a per-thread
         // temp dir. The real
-        // `~/.local/share/tuicr-offline-candidate/reviews` is never used in
+        // `~/.local/share/tuicr-fork/reviews` is never used in
         // test mode.
         let configured = TEST_REVIEWS_DIR.with(|cell| cell.borrow().clone());
         if let Some(path) = configured {
@@ -823,13 +823,9 @@ pub(crate) fn get_reviews_dir() -> Result<PathBuf> {
 
     #[cfg(not(test))]
     {
-        // Offline fork candidate: use a fork-specific app id ("tuicr" ->
-        // "tuicr-offline-candidate") so this build's review-session store
-        // never shares a data directory with, or races against, a real
-        // upstream `tuicr` install on the same machine. See
-        // docs/offline-candidate/MIGRATION.md and
-        // scripts/import-upstream-reviews.sh for moving data between them.
-        let proj_dirs = ProjectDirs::from("", "", "tuicr-offline-candidate").ok_or_else(|| {
+        // Keep the maintained fork isolated from upstream and the archived
+        // offline candidate. Migration is explicit via scripts/import-reviews.sh.
+        let proj_dirs = ProjectDirs::from("", "", "tuicr-fork").ok_or_else(|| {
             TuicrError::Io(std::io::Error::other("Could not determine data directory"))
         })?;
 
