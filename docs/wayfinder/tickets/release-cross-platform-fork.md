@@ -34,8 +34,7 @@ explicitly **not a release**:
 
 ## Remaining work
 
-- Native candidate CI is implemented for Linux/macOS x86_64 and arm64 but has
-  not run on the GitHub-hosted arm64/macOS runners yet.
+- Native candidate CI passes for Linux/macOS x86_64 and arm64.
 - macOS artifacts are ad-hoc signed. Developer ID signing and Apple
   notarization require credentials and an approved secret-handling boundary;
   the first prerelease must label this limitation rather than imply it passed.
@@ -47,10 +46,9 @@ No Git tag has been created and nothing has been pushed or published.
 
 ## Next work
 
-Push the exact candidate commit, run the four-platform workflow, inspect its
-archives/checksums/provenance, and record the native results here. Promotion
-then requires separate authorization to create a tag and draft GitHub
-prerelease. Publishing that draft remains a second explicit action.
+The candidate is ready for promotion. Promotion requires separate
+authorization to create a tag and draft GitHub prerelease. Publishing that
+draft remains a second explicit action.
 
 ## Release design
 
@@ -68,8 +66,7 @@ crates.io before binary completion was replaced:
 - no workflow publishes the upstream-owned crates.io package.
 
 The local WSL x86_64 release archive passed build, identity, help, byte-aware
-secret-pattern scan, extraction, content, and checksum checks. Native arm64
-and macOS evidence remains pending CI.
+secret-pattern scan, extraction, content, and checksum checks.
 
 The first native run (`33226861714`) passed Linux x86_64 and both macOS
 architectures. Linux arm64 built but stopped before upload on a deterministic
@@ -77,4 +74,17 @@ architectures. Linux arm64 built but stopped before upload on a deterministic
 `b693954df023f3cd9a2c073a2821437acd59a1ab6623229872259262a488b726`.
 The build receives no provider credentials, the other architectures do not
 contain the match, and the allowance is now limited to that complete digest;
-see `../../release/SECURITY.md`. A complete rerun is still required.
+see `../../release/SECURITY.md`.
+
+### Native candidate result
+
+GitHub Actions run `33227611517` at `e7ccb8f` passed all four native build,
+smoke, scan, package, and upload jobs plus the aggregate checksum/coverage
+gate. Downloaded evidence independently confirmed Mach-O x86_64/arm64 and ELF
+x86_64/aarch64 binaries, matching provenance, required documents, and all
+four SHA-256 files.
+
+The inherited Nix job failed three times on crates.io HTTP 403 responses for
+different dependencies, while direct Cargo source installation passed. Nix is
+therefore deferred and its workflow is manual/non-release; exact-tag Cargo git
+is the first package-manager channel.

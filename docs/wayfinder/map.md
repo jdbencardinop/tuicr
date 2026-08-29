@@ -42,7 +42,8 @@ Full text lives in `docs/fork/DECISIONS.md`; this is only the linked gist.
   — distinguishable version string, disabled self-update, isolated data dir.
 - [Prepare a fork-owned release channel](tickets/release-cross-platform-fork.md#release-design)
   — fork identity, isolated storage, native four-platform candidate CI, and
-  guarded draft-prerelease promotion are implemented; native CI is pending.
+  guarded draft-prerelease promotion are implemented; all native targets pass
+  and tag/draft promotion awaits explicit authorization.
 - [Validate upstream and fork on Ubuntu under WSL](tickets/validate-wsl-baseline.md)
   — core build/startup/navigation/persistence/stdout/editor and read-only
   provider checks passed; the two newer-Git fixtures and browser launcher
@@ -92,8 +93,8 @@ and what each still needs before it can go upstream):
 - Native self-hosted GitLab custom-port URLs without the documented portless
   logical-host workaround — tracked by
   [support-gitlab-custom-ports](tickets/support-gitlab-custom-ports.md).
-- native arm64/macOS candidate evidence, Developer ID
-  signing/notarization disposition, and the actual tagged/pushed release —
+- Developer ID signing/notarization disposition and the actual tagged/pushed
+  release —
   gated on
   [release-cross-platform-fork](tickets/release-cross-platform-fork.md).
 - Minimum supported provider versions beyond the proven Gitea 1.24/Forgejo 16

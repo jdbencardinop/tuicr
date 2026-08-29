@@ -60,8 +60,13 @@ Full decision text: `docs/fork/DECISIONS.md`.
   verification, and exact-run draft-prerelease promotion without crates.io.
 - Linux arm64 scan classification: `0aa9427` — exact-digest-only allowance
   for a deterministic compiled-binary token-shaped sequence; every changed or
-  additional match remains blocking. Three native targets passed the first
-  run; the complete rerun is pending.
+  additional match remains blocking.
+- Native candidate run `33227611517` at `e7ccb8f` passes Linux/macOS x86_64
+  and arm64 plus aggregate checksums. Downloaded artifacts match all four
+  target architectures and include provenance/security/migration docs.
+- Nix deferral: `51f42eb` — exact-tag Cargo git installation is the first
+  package-manager channel. The legacy Nix job is manual/non-release after
+  three crates.io HTTP 403 failures across changing dependencies.
 - The current release-preparation worktree reports
   `tuicr 0.19.1-fork.1+<source-sha>` and uses isolated `tuicr-fork` storage.
   The archived implementation package at `ca319dc` remains
@@ -86,8 +91,8 @@ Per-feature commit ranges and validation state:
 
 In dependency order:
 
-1. Push the candidate, run and inspect native x86_64/arm64 Linux/macOS CI,
-   then obtain separate approval before tag/draft-prerelease promotion;
+1. Obtain separate approval before tag/draft-prerelease promotion, then
+   inspect the draft before any public publication;
    `docs/wayfinder/tickets/release-cross-platform-fork.md`.
 2. Post the one ready upstream patch (comment-author JSON) once approved, and
    reconcile the rest after the release interface stabilizes —
