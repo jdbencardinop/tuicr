@@ -78,7 +78,7 @@ see `../../release/SECURITY.md`.
 
 ### Native candidate result
 
-GitHub Actions run `33227611517` at `e7ccb8f` passed all four native build,
+GitHub Actions run `33227880182` at `7e1f0a4` passed all four native build,
 smoke, scan, package, and upload jobs plus the aggregate checksum/coverage
 gate. Downloaded evidence independently confirmed Mach-O x86_64/arm64 and ELF
 x86_64/aarch64 binaries, matching provenance, required documents, and all

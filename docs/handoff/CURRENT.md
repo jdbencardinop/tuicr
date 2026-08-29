@@ -61,7 +61,7 @@ Full decision text: `docs/fork/DECISIONS.md`.
 - Linux arm64 scan classification: `0aa9427` — exact-digest-only allowance
   for a deterministic compiled-binary token-shaped sequence; every changed or
   additional match remains blocking.
-- Native candidate run `33227611517` at `e7ccb8f` passes Linux/macOS x86_64
+- Native candidate run `33227880182` at `7e1f0a4` passes Linux/macOS x86_64
   and arm64 plus aggregate checksums. Downloaded artifacts match all four
   target architectures and include provenance/security/migration docs.
 - Nix deferral: `51f42eb` — exact-tag Cargo git installation is the first
