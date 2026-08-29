@@ -54,6 +54,10 @@ Full decision text: `docs/fork/DECISIONS.md`.
   UTF-16LE directly to `clip.exe` before terminal/Linux fallbacks. Library,
   detached-tmux, and real-TUI Unicode round trips pass without changing
   native Linux, macOS, or native Windows routing.
+- Cross-platform release candidate: `828cd12` — promotes fork identity to
+  `0.19.1-fork.1`, isolates `tuicr-fork` data, adds backup-first migration,
+  native Linux/macOS x86_64/arm64 candidate artifacts, checksum/provenance
+  verification, and exact-run draft-prerelease promotion without crates.io.
 - The current release-preparation worktree reports
   `tuicr 0.19.1-fork.1+<source-sha>` and uses isolated `tuicr-fork` storage.
   The archived implementation package at `ca319dc` remains
