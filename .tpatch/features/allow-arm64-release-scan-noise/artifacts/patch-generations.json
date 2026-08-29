@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "feature": "allow-arm64-release-scan-noise",
+  "current_generation": 1,
+  "generations": [
+    {
+      "generation": 1,
+      "generation_id": "pg_21ef9ce248e7",
+      "kind": "record",
+      "patch_sha256": "c9b14ecc5cb500a6e2f958de8c375d5d6547fea100f4e71ca103e3334ded7445",
+      "git_patch_id": "107b4def3e6209962922ae8bb9f26815a9f9df4a",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "53599957a6ec95da21e097302c1b951d3950d238330fdbfb06fdd466696a772f",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/001-record.patch",
+      "base_commit": "720e4a9adbbf29b49bb9b535619e9d1016eac7bb",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        "docs/release/SECURITY.md",
+        "scripts/package-release-artifact.sh"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    }
+  ]
+}

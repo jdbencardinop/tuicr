@@ -1,0 +1,65 @@
+diff --git a/docs/release/SECURITY.md b/docs/release/SECURITY.md
+new file mode 100644
+index 0000000..2cbc872
+--- /dev/null
++++ b/docs/release/SECURITY.md
+@@ -0,0 +1,24 @@
++# Release artifact security contract
++
++Every native archive is scanned byte-for-byte before compression for common
++GitHub, GitLab, AWS, Slack, and PEM private-key shapes. Non-allowlisted
++matches abort packaging and prevent artifact upload.
++
++The allowlist contains synthetic test fixtures plus two exact SHA-256 digests
++for investigated compiled-binary false positives. The matched bytes are not
++stored in source or logs:
++
++| Target | Pattern | Match properties | SHA-256 | Evidence |
++| --- | --- | --- | --- | --- |
++| Linux x86_64 | GitLab PAT | documented in the archived candidate investigation | `861868d6e0246f776b867c651da9519f5d398cee945fe26ae2f0e890dcf64032` | `docs/offline-candidate/SECRET-SCAN.md` |
++| Linux arm64 | GitHub other-prefix PAT | 56 bytes, 24 unique characters | `b693954df023f3cd9a2c073a2821437acd59a1ab6623229872259262a488b726` | Two independent native builds of commit `720e4a9` produced the exact digest; Linux x86_64 and both macOS targets had no corresponding match |
++
++The Linux arm64 job has read-only repository permission and passes no provider
++credential to Cargo or the packager. Its build inputs are public source,
++locked public dependencies, the target toolchain, and the public source SHA.
++The architecture-specific deterministic sequence is therefore classified as
++compiled byte adjacency, although the exact linker/source-byte boundary has
++not been isolated.
++
++Allowlisting is by complete matched-value digest only. A changed byte, another
++target, or another token-shaped value remains blocking.
+diff --git a/scripts/package-release-artifact.sh b/scripts/package-release-artifact.sh
+index 9f34688..0b1b56e 100755
+--- a/scripts/package-release-artifact.sh
++++ b/scripts/package-release-artifact.sh
+@@ -79,7 +79,10 @@ scan_secrets() {
+     'glpat-XyZ_0123456789abcdef'
+     'glpat-ABCDEFGHIJKLMNOPQRST'
+   )
+-  local allowed_hash='861868d6e0246f776b867c651da9519f5d398cee945fe26ae2f0e890dcf64032'
++  local allowed_hashes=(
++    '861868d6e0246f776b867c651da9519f5d398cee945fe26ae2f0e890dcf64032'
++    'b693954df023f3cd9a2c073a2821437acd59a1ab6623229872259262a488b726'
++  )
+   local file pattern_index pattern pattern_id value value_hash value_length unique_chars allowed
+ 
+   while IFS= read -r -d '' file; do
+@@ -93,7 +96,9 @@ scan_secrets() {
+           [[ "$value" == "$exact" ]] && allowed=1
+         done
+         value_hash="$(printf '%s' "$value" | sha256_stream)"
+-        [[ "$value_hash" == "$allowed_hash" ]] && allowed=1
++        for exact_hash in "${allowed_hashes[@]}"; do
++          [[ "$value_hash" == "$exact_hash" ]] && allowed=1
++        done
+         if [[ "$allowed" -ne 1 ]]; then
+           value_length="${#value}"
+           unique_chars="$(printf '%s' "$value" | fold -w1 | sort -u | wc -l | tr -d ' ')"
+@@ -123,6 +128,7 @@ cp "$BINARY" "$stage_dir/tuicr"
+ cp LICENSE "$stage_dir/LICENSE"
+ cp docs/release/INSTALL.md "$stage_dir/INSTALL.md"
+ cp docs/release/MIGRATION.md "$stage_dir/MIGRATION.md"
++cp docs/release/SECURITY.md "$stage_dir/SECURITY.md"
+ cp docs/offline-candidate/PROVIDER-CAPABILITIES.md "$stage_dir/PROVIDER-CAPABILITIES.md"
+ cp scripts/import-reviews.sh "$stage_dir/import-reviews.sh"
+ chmod +x "$stage_dir/tuicr" "$stage_dir/import-reviews.sh"

@@ -1,0 +1,4 @@
+# Test run — 2026-08-29T01:53:31Z
+# Command: bash -n scripts/package-release-artifact.sh && git diff --check
+# Directory: /home/juanbe/development/tools/diffreviewtui/tuicr
+

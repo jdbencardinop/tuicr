@@ -1,0 +1,23 @@
+{
+  "id": "allow-arm64-release-scan-noise",
+  "slug": "allow-arm64-release-scan-noise",
+  "title": "Allowlist the deterministic Linux arm64 compiled-binary github-token-shaped scanner false positive by exact SHA-256 only, document the evidence and limitation, and keep every other matched value fail-closed.",
+  "state": "applied",
+  "compatibility": "unknown",
+  "requested_at": "2026-08-29T01:52:35Z",
+  "updated_at": "2026-08-29T01:53:31Z",
+  "last_command": "verify",
+  "notes": "landed at 2026-08-29T01:53:31Z",
+  "apply": {
+    "completed_at": "2026-08-29T01:53:31Z",
+    "base_commit": "720e4a9adbbf29b49bb9b535619e9d1016eac7bb",
+    "has_patch": true
+  },
+  "reconcile": {},
+  "verify": {
+    "verified_at": "2026-08-29T01:53:31Z",
+    "passed": true,
+    "recipe_hash_at_verify": "53599957a6ec95da21e097302c1b951d3950d238330fdbfb06fdd466696a772f",
+    "patch_hash_at_verify": "c9b14ecc5cb500a6e2f958de8c375d5d6547fea100f4e71ca103e3334ded7445"
+  }
+}

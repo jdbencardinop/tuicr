@@ -79,7 +79,10 @@ scan_secrets() {
     'glpat-XyZ_0123456789abcdef'
     'glpat-ABCDEFGHIJKLMNOPQRST'
   )
-  local allowed_hash='861868d6e0246f776b867c651da9519f5d398cee945fe26ae2f0e890dcf64032'
+  local allowed_hashes=(
+    '861868d6e0246f776b867c651da9519f5d398cee945fe26ae2f0e890dcf64032'
+    'b693954df023f3cd9a2c073a2821437acd59a1ab6623229872259262a488b726'
+  )
   local file pattern_index pattern pattern_id value value_hash value_length unique_chars allowed
 
   while IFS= read -r -d '' file; do
@@ -93,7 +96,9 @@ scan_secrets() {
           [[ "$value" == "$exact" ]] && allowed=1
         done
         value_hash="$(printf '%s' "$value" | sha256_stream)"
-        [[ "$value_hash" == "$allowed_hash" ]] && allowed=1
+        for exact_hash in "${allowed_hashes[@]}"; do
+          [[ "$value_hash" == "$exact_hash" ]] && allowed=1
+        done
         if [[ "$allowed" -ne 1 ]]; then
           value_length="${#value}"
           unique_chars="$(printf '%s' "$value" | fold -w1 | sort -u | wc -l | tr -d ' ')"
@@ -123,6 +128,7 @@ cp "$BINARY" "$stage_dir/tuicr"
 cp LICENSE "$stage_dir/LICENSE"
 cp docs/release/INSTALL.md "$stage_dir/INSTALL.md"
 cp docs/release/MIGRATION.md "$stage_dir/MIGRATION.md"
+cp docs/release/SECURITY.md "$stage_dir/SECURITY.md"
 cp docs/offline-candidate/PROVIDER-CAPABILITIES.md "$stage_dir/PROVIDER-CAPABILITIES.md"
 cp scripts/import-reviews.sh "$stage_dir/import-reviews.sh"
 chmod +x "$stage_dir/tuicr" "$stage_dir/import-reviews.sh"

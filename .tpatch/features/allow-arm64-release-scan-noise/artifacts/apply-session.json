@@ -1,0 +1,8 @@
+{
+  "slug": "allow-arm64-release-scan-noise",
+  "completed_at": "2026-08-29T01:53:31Z",
+  "base_commit": "720e4a9adbbf29b49bb9b535619e9d1016eac7bb",
+  "has_patch": true,
+  "validation_status": "passed",
+  "validation_notes": "tpatch test — command: bash -n scripts/package-release-artifact.sh \u0026\u0026 git diff --check"
+}
