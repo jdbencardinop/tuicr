@@ -1,7 +1,7 @@
 {
   "version": 1,
   "feature": "prepare-cross-platform-fork-release",
-  "current_generation": 1,
+  "current_generation": 2,
   "generations": [
     {
       "generation": 1,
@@ -11,7 +11,7 @@
       "git_patch_id": "8ae952805200458a639b32d8372fbb53d4aa8057",
       "git_patch_id_algorithm": "git-patch-id-stable",
       "recipe_sha256": "d0c21cf0ba2fa3dd490cc69bafd404aa168d5eb9a9e7eedcc4ac7115d3b13d86",
-      "canonical_patch": "artifacts/post-apply.patch",
+      "canonical_patch": "",
       "audit_patch": "patches/001-record.patch",
       "base_commit": "0c15cd85258006292b894072c4c3eee67f545c43",
       "upper": {
@@ -49,6 +49,38 @@
         "src/persistence/storage.rs",
         "src/update/check.rs",
         "src/update/install/tests.rs"
+      ],
+      "dependencies": [],
+      "refs": {
+        "anchors": "",
+        "fingerprints": "",
+        "relations": "",
+        "vector_manifest": ""
+      }
+    },
+    {
+      "generation": 2,
+      "generation_id": "pg_103f31fc9f63",
+      "kind": "amend-refresh",
+      "patch_sha256": "e711a08533a1b60d23b05c895fe70b00f9de8aa8711cb0ef17ee02208eabf1a5",
+      "git_patch_id": "c021e4bccd5f08403aa0b11c7a858740a9a4bf7d",
+      "git_patch_id_algorithm": "git-patch-id-stable",
+      "recipe_sha256": "f50a4be7194ba5be982a271788273953277a4c226802a349d034a9dbabd3ad39",
+      "canonical_patch": "artifacts/post-apply.patch",
+      "audit_patch": "patches/002-record.patch",
+      "base_commit": "42a9597e2dd361ad66943c4a177e10ab3efd2d3e",
+      "upper": {
+        "kind": "working-tree",
+        "ref": "working-tree",
+        "commit": ""
+      },
+      "capture": {
+        "mode": "working-tree-all",
+        "pathspecs": [],
+        "claim_ids": []
+      },
+      "touched_paths": [
+        ".github/workflows/release-candidate.yml"
       ],
       "dependencies": [],
       "refs": {

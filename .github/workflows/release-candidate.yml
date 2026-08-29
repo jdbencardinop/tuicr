@@ -2,6 +2,8 @@ name: Release candidate
 
 on:
   workflow_dispatch:
+  push:
+    branches: [tessera/offline-candidate]
   pull_request:
     branches: [main]
     paths:
