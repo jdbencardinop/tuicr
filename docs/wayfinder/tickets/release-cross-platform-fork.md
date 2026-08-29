@@ -70,3 +70,11 @@ crates.io before binary completion was replaced:
 The local WSL x86_64 release archive passed build, identity, help, byte-aware
 secret-pattern scan, extraction, content, and checksum checks. Native arm64
 and macOS evidence remains pending CI.
+
+The first native run (`33226861714`) passed Linux x86_64 and both macOS
+architectures. Linux arm64 built but stopped before upload on a deterministic
+56-byte GitHub-token-shaped binary sequence. An exact rerun reproduced SHA-256
+`b693954df023f3cd9a2c073a2821437acd59a1ab6623229872259262a488b726`.
+The build receives no provider credentials, the other architectures do not
+contain the match, and the allowance is now limited to that complete digest;
+see `../../release/SECURITY.md`. A complete rerun is still required.

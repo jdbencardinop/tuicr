@@ -2,6 +2,7 @@
 
 | Slug | Title | State | Compatibility |
 |------|-------|-------|---------------|
+| `allow-arm64-release-scan-noise` | Allowlist the deterministic Linux arm64 compiled-binary github-token-shaped scanner false positive by exact SHA-256 only, document the evidence and limitation, and keep every other matched value fail-closed. | applied | unknown |
 | `capture-provider-neutral-context-for-local-line-and-range` | Capture provider-neutral context for local line and range anchors, relocate them uniquely on diff/head refresh, and mark zero/multiple matches stale or ambiguous without nearest-line guessing. | applied | unknown |
 | `classify-gitlab-range-anchors` | Classify GitLab review threads as outdated when provider position head SHA differs from the current merge-request head, preserve current ranges, add regression tests, and leave the disposable live GitLab rerun explicitly blocked. | applied | unknown |
 | `fix-azure-connection-data-version` | Use the official Azure DevOps Connection Data API preview version so live reviewer vote operations can resolve the authenticated viewer ID. | applied | unknown |

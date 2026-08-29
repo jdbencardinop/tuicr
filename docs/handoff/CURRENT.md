@@ -58,6 +58,10 @@ Full decision text: `docs/fork/DECISIONS.md`.
   `0.19.1-fork.1`, isolates `tuicr-fork` data, adds backup-first migration,
   native Linux/macOS x86_64/arm64 candidate artifacts, checksum/provenance
   verification, and exact-run draft-prerelease promotion without crates.io.
+- Linux arm64 scan classification: `0aa9427` — exact-digest-only allowance
+  for a deterministic compiled-binary token-shaped sequence; every changed or
+  additional match remains blocking. Three native targets passed the first
+  run; the complete rerun is pending.
 - The current release-preparation worktree reports
   `tuicr 0.19.1-fork.1+<source-sha>` and uses isolated `tuicr-fork` storage.
   The archived implementation package at `ca319dc` remains
